@@ -607,6 +607,8 @@ func (c *twoPhaseCommitter) execute(ctx goctx.Context) error {
 		return errors.Trace(err)
 	}
 
+	log.Debugf("2PC finish prewrite, tid: %v", c.startTS)
+
 	commitTS, err := c.store.getTimestampWithRetry(NewBackoffer(tsoMaxBackoff, ctx))
 	if err != nil {
 		log.Warnf("2PC get commitTS failed: %v, tid: %d", err, c.startTS)
@@ -643,6 +645,7 @@ func (c *twoPhaseCommitter) execute(ctx goctx.Context) error {
 		}
 		log.Debugf("2PC succeed with error: %v, tid: %d", err, c.startTS)
 	}
+	log.Debugf("2PC finish commit, tid: %v", c.startTS)
 	return nil
 }
 

@@ -53,6 +53,7 @@ func newTiKVTxn(store *tikvStore) (*tikvTxn, error) {
 
 // newTikvTxnWithStartTS creates a txn with startTS.
 func newTikvTxnWithStartTS(store *tikvStore, startTS uint64) (*tikvTxn, error) {
+	log.Debugf("tikv begin txn, tid: %v", startTS)
 	ver := kv.NewVersion(startTS)
 	snapshot := newTiKVSnapshot(store, ver)
 	return &tikvTxn{
@@ -145,6 +146,8 @@ func (txn *tikvTxn) Commit(ctx goctx.Context) error {
 		return kv.ErrInvalidTxn
 	}
 	defer txn.close()
+
+	log.Debugf("tikv start commit txn, tid: %v", txn.StartTS)
 
 	txnCmdCounter.WithLabelValues("set").Add(float64(txn.setCnt))
 	txnCmdCounter.WithLabelValues("commit").Inc()
