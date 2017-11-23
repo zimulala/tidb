@@ -147,7 +147,7 @@ func (txn *tikvTxn) Commit(ctx goctx.Context) error {
 	}
 	defer txn.close()
 
-	log.Debugf("tikv start commit txn, tid: %v", txn.StartTS)
+	log.Debugf("tikv start commit txn, tid: %v", txn.startTS)
 
 	txnCmdCounter.WithLabelValues("set").Add(float64(txn.setCnt))
 	txnCmdCounter.WithLabelValues("commit").Inc()
