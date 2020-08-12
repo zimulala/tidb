@@ -1007,7 +1007,7 @@ var MySQLErrName = map[uint16]string{
 	ErrInvalidDDLWorker:           "Invalid DDL worker",
 	ErrUnsupportedDDLOperation:    "Unsupported %s",
 	ErrNotOwner:                   "TiDB server is not a DDL owner",
-	ErrCantDecodeIndex:            "Cannot decode index value, because %s",
+	ErrCantDecodeRecord:           "Cannot decode %s value, because %s",
 	ErrInvalidDDLJob:              "Invalid DDL job",
 	ErrInvalidDDLJobFlag:          "Invalid DDL job flag",
 	ErrWaitReorgTimeout:           "Timeout waiting for data reorganization",

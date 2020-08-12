@@ -42,6 +42,7 @@ import (
 	decoder "github.com/pingcap/tidb/util/rowDecoder"
 	"github.com/pingcap/tidb/util/sqlexec"
 	"github.com/pingcap/tidb/util/timeutil"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -757,7 +758,7 @@ func (w *worker) doModifyColumnType(
 				// If timeout, we should return, check for the owner and re-wait job done.
 				return ver, nil
 			}
-			if kv.ErrKeyExists.Equal(err) || errCancelledDDLJob.Equal(err) || errCantDecodeIndex.Equal(err) {
+			if kv.ErrKeyExists.Equal(err) || errCancelledDDLJob.Equal(err) || errCantDecodeRecord.Equal(err) {
 				logutil.BgLogger().Warn("[ddl] run modify column job failed, convert job to rollback", zap.String("job", job.String()), zap.Error(err))
 				// TODO: Do rollback.
 			}
@@ -831,8 +832,9 @@ func (w *worker) updateColumnAndIndexes(t table.Table, oldCol, col *model.Column
 
 type updateColumnWorker struct {
 	*backfillWorker
-	oldColInfo *model.ColumnInfo
-	newColInfo *model.ColumnInfo
+	oldColInfo    *model.ColumnInfo
+	newColInfo    *model.ColumnInfo
+	metricCounter prometheus.Counter
 
 	// The following attributes are used to reduce memory allocation.
 	rowRecords []*rowRecord
@@ -850,9 +852,14 @@ func newUpdateColumnWorker(sessCtx sessionctx.Context, worker *worker, id int, t
 		backfillWorker: newBackfillWorker(sessCtx, worker, id, t),
 		oldColInfo:     oldCol,
 		newColInfo:     newCol,
+		metricCounter:  metrics.BackfillTotalCounter.WithLabelValues("update_col_speed"),
 		rowDecoder:     rowDecoder,
 		rowMap:         make(map[int64]types.Datum, len(decodeColMap)),
 	}
+}
+
+func (w *updateColumnWorker) AddMetricInfo(cnt float64) {
+	w.metricCounter.Add(cnt)
 }
 
 type rowRecord struct {
@@ -905,7 +912,7 @@ func (w *updateColumnWorker) fetchRowColVals(txn kv.Transaction, taskRange reorg
 
 			_, err := w.rowDecoder.DecodeAndEvalRowWithMap(w.sessCtx, handle, rawRow, time.UTC, sysZone, w.rowMap)
 			if err != nil {
-				return false, errors.Trace(errCantDecodeIndex.GenWithStackByArgs(err))
+				return false, errors.Trace(errCantDecodeRecord.GenWithStackByArgs("row", err))
 			}
 			if _, ok := w.rowMap[w.newColInfo.ID]; ok {
 				// The column is already added by update or insert statement, skip it.
@@ -981,7 +988,7 @@ func (w *updateColumnWorker) BackfillDataInTxn(handleRange reorgIndexTask) (task
 
 		return nil
 	})
-	logSlowOperations(time.Since(oprStartTime), "BackfillDataInTxn", 3000)
+	logSlowOperations(time.Since(oprStartTime), "UpdateColumnBackfillDataInTxn", 3000)
 
 	return
 }
