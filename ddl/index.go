@@ -1246,6 +1246,7 @@ func (w *worker) waitTaskResults(workers []*backfillWorker, taskCnt int, totalAd
 		nextHandle = startHandle
 		firstErr   error
 	)
+	// 这里是根据 worker 的顺序来接受的，所以肯定是从小到大
 	for i := 0; i < taskCnt; i++ {
 		worker := workers[i]
 		result := <-worker.resultCh
