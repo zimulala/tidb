@@ -789,13 +789,13 @@ type addIndexWorker struct {
 
 func newAddIndexWorker(sessCtx sessionctx.Context, worker *worker, id int, t table.PhysicalTable, indexInfo *model.IndexInfo, decodeColMap map[int64]decoder.Column) *addIndexWorker {
 	index := tables.NewIndex(t.GetPhysicalID(), t.Meta(), indexInfo)
-	rowDecoder := decoder.NewRowDecoder(t, decodeColMap)
+	rowDecoder := decoder.NewRowDecoder(t, t.WritableCols(), decodeColMap)
 	return &addIndexWorker{
 		backfillWorker: newBackfillWorker(sessCtx, worker, id, t),
 		index:          index,
 		metricCounter:  metrics.BackfillTotalCounter.WithLabelValues("add_idx_speed"),
 		rowDecoder:     rowDecoder,
-		defaultVals:    make([]types.Datum, len(t.Cols())),
+		defaultVals:    make([]types.Datum, len(t.WritableCols())),
 		rowMap:         make(map[int64]types.Datum, len(decodeColMap)),
 	}
 }
@@ -807,7 +807,7 @@ func (w *addIndexWorker) AddMetricInfo(cnt float64) {
 // getIndexRecord gets index columns values from raw binary value row.
 func (w *addIndexWorker) getIndexRecord(handle kv.Handle, recordKey []byte, rawRecord []byte) (*indexRecord, error) {
 	t := w.table
-	cols := t.Cols()
+	cols := t.WritableCols()
 	idxInfo := w.index.Meta()
 	sysZone := timeutil.SystemLocation()
 	_, err := w.rowDecoder.DecodeAndEvalRowWithMap(w.sessCtx, handle, rawRecord, time.UTC, sysZone, w.rowMap)
@@ -820,16 +820,19 @@ func (w *addIndexWorker) getIndexRecord(handle kv.Handle, recordKey []byte, rawR
 		idxColumnVal, ok := w.rowMap[col.ID]
 		if ok {
 			idxVal[j] = idxColumnVal
-			// Make sure there is no dirty data.
-			delete(w.rowMap, col.ID)
 			continue
 		}
-		idxColumnVal, err = tables.GetColDefaultValue(w.sessCtx, col, w.defaultVals)
+		isDefaultVal := true
+		if col.ChangeStateInfo != nil {
+			idxColumnVal, isDefaultVal, err = tables.GetChangingColVal(w.sessCtx, cols, col, w.rowMap, w.defaultVals)
+		} else {
+			idxColumnVal, err = tables.GetColDefaultValue(w.sessCtx, col, w.defaultVals)
+		}
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 
-		if idxColumnVal.Kind() == types.KindMysqlTime {
+		if idxColumnVal.Kind() == types.KindMysqlTime && isDefaultVal {
 			t := idxColumnVal.GetMysqlTime()
 			if t.Type() == mysql.TypeTimestamp && sysZone != time.UTC {
 				err := t.ConvertTimeZone(sysZone, time.UTC)

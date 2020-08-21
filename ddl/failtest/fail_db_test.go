@@ -446,7 +446,7 @@ func (s *testFailDBSuite) TestModifyColumn(c *C) {
 	tk.MustExec("create table t (a int not null default 1, b int default 2, c int not null default 0, primary key(c), index idx(b), index idx1(a), index idx2(b, c))")
 	tk.MustExec("insert into t values(1, 2, 3), (11, 22, 33)")
 	_, err := tk.Exec("alter table t change column c cc mediumint")
-	c.Assert(err.Error(), Equals, "[ddl:8200]Unsupported modify column: enableChangeColType is true and this column has primary key flag")
+	c.Assert(err.Error(), Equals, "[ddl:8200]Unsupported modify column: tidb_enable_change_column_type is true and this column has primary key flag")
 	tk.MustExec("alter table t change column b bb mediumint first")
 	dom := domain.GetDomain(tk.Se)
 	is := dom.InfoSchema()
@@ -493,14 +493,14 @@ func (s *testFailDBSuite) TestModifyColumn(c *C) {
 	// Test unsupport statements.
 	tk.MustExec("create table t1(a int) partition by hash (a) partitions 2")
 	_, err = tk.Exec("alter table t1 modify column a mediumint")
-	c.Assert(err.Error(), Equals, "[ddl:8200]Unsupported modify column: enableChangeColType is true, table is partition table")
+	c.Assert(err.Error(), Equals, "[ddl:8200]Unsupported modify column: tidb_enable_change_column_type is true, table is partition table")
 	tk.MustExec("create table t2(id int, a int, b int generated always as (abs(a)) virtual, c int generated always as (a+1) stored)")
 	_, err = tk.Exec("alter table t2 modify column b mediumint")
-	c.Assert(err.Error(), Equals, "[ddl:8200]Unsupported modify column: enableChangeColType is true, newCol IsGenerated false, oldCol IsGenerated true")
+	c.Assert(err.Error(), Equals, "[ddl:8200]Unsupported modify column: tidb_enable_change_column_type is true, newCol IsGenerated false, oldCol IsGenerated true")
 	_, err = tk.Exec("alter table t2 modify column c mediumint")
-	c.Assert(err.Error(), Equals, "[ddl:8200]Unsupported modify column: enableChangeColType is true, newCol IsGenerated false, oldCol IsGenerated true")
+	c.Assert(err.Error(), Equals, "[ddl:8200]Unsupported modify column: tidb_enable_change_column_type is true, newCol IsGenerated false, oldCol IsGenerated true")
 	_, err = tk.Exec("alter table t2 modify column a mediumint generated always as(id+1) stored")
-	c.Assert(err.Error(), Equals, "[ddl:8200]Unsupported modify column: enableChangeColType is true, newCol IsGenerated true, oldCol IsGenerated false")
+	c.Assert(err.Error(), Equals, "[ddl:8200]Unsupported modify column: tidb_enable_change_column_type is true, newCol IsGenerated true, oldCol IsGenerated false")
 
 	// Test multiple rows of data.
 	tk.MustExec("create table t3(a int not null default 1, b int default 2, c int not null default 0, primary key(c), index idx(b), index idx1(a), index idx2(b, c))")
@@ -521,5 +521,11 @@ func (s *testFailDBSuite) TestModifyColumn(c *C) {
 	tk.MustExec("alter table t3 modify column a mediumint")
 	tk.MustExec("admin check table t")
 
-	tk.MustExec("drop table t, t1, t2, t3")
+	// Test PointGet.
+	tk.MustExec("create table t4(a bigint, b int, unique index idx(a));")
+	tk.MustExec("insert into t4 values (1,1),(2,2),(3,3),(4,4),(5,5);")
+	tk.MustExec("alter table t4 modify a bigint unsigned;")
+	tk.MustQuery("select * from t4 where a=1;").Check(testkit.Rows("1 1"))
+
+	tk.MustExec("drop table t, t1, t2, t3, t4")
 }

@@ -42,14 +42,14 @@ type backfillWorkerType byte
 
 const (
 	typeAddIndexWorker     backfillWorkerType = 0
-	typeUpdateColumnWroker backfillWorkerType = 1
+	typeUpdateColumnWorker backfillWorkerType = 1
 )
 
 func (bWT backfillWorkerType) String() string {
 	switch bWT {
 	case typeAddIndexWorker:
 		return "add index"
-	case typeUpdateColumnWroker:
+	case typeUpdateColumnWorker:
 		return "update column"
 	default:
 		return "unknow"
@@ -405,13 +405,13 @@ func loadDDLReorgVars(w *worker) error {
 
 func makeupDecodeColMap(sessCtx sessionctx.Context, t table.Table) (map[int64]decoder.Column, error) {
 	dbName := model.NewCIStr(sessCtx.GetSessionVars().CurrentDB)
-	exprCols, _, err := expression.ColumnInfos2ColumnsAndNames(sessCtx, dbName, t.Meta().Name, t.Meta().Columns, t.Meta())
+	exprCols, _, err := expression.ColumnInfos2ColumnsAndNames(sessCtx, dbName, t.Meta().Name, t.Meta(), true)
 	if err != nil {
 		return nil, err
 	}
-
 	mockSchema := expression.NewSchema(exprCols...)
-	decodeColMap := decoder.BuildFullDecodeColMap(t, mockSchema)
+
+	decodeColMap := decoder.BuildFullDecodeColMap(t.WritableCols(), mockSchema)
 
 	return decodeColMap, nil
 }
