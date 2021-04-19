@@ -46,6 +46,7 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tidb/util/israce"
+	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/mock"
 	"github.com/pingcap/tidb/util/testkit"
 	"github.com/pingcap/tidb/util/testutil"
@@ -2722,6 +2723,7 @@ func (s *testIntegrationSuite7) TestDuplicateErrorMessage(c *C) {
 			for _, clusteredIndex := range []variable.ClusteredIndexDefMode{variable.ClusteredIndexDefModeOn, variable.ClusteredIndexDefModeOff, variable.ClusteredIndexDefModeIntOnly} {
 				tk.Se.GetSessionVars().EnableClusteredIndex = clusteredIndex
 				for _, t := range tests {
+					logutil.BgLogger().Info("************************************* start test")
 					tk.MustExec("drop table if exists t;")
 					fields := make([]string, len(t.types))
 

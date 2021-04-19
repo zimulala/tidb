@@ -459,12 +459,17 @@ func (w *worker) handleDDLJobQueue(d *ddlCtx) error {
 		if isChanClosed(w.ctx.Done()) {
 			return nil
 		}
+		logutil.Logger(w.logCtx).Info("------------------------------ * start")
 
 		var (
 			job       *model.Job
 			schemaVer int64
 			runJobErr error
 		)
+		defer func() {
+			jobStr := fmt.Sprintf("%s", job)
+			logutil.Logger(w.logCtx).Info("------------------------------ * end", zap.String("job", jobStr))
+		}()
 		waitTime := 2 * d.lease
 		err := kv.RunInNewTxn(context.Background(), d.store, false, func(ctx context.Context, txn kv.Transaction) error {
 			// We are not owner, return and retry checking later.

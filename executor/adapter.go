@@ -336,6 +336,7 @@ func (a *ExecStmt) Exec(ctx context.Context) (_ sqlexec.RecordSet, err error) {
 		terror.Call(e.Close)
 		return nil, err
 	}
+	fmt.Sprintf("+++++++++++++++++++++++++++++++++++++++++, executor after open")
 
 	cmd32 := atomic.LoadUint32(&sctx.GetSessionVars().CommandValue)
 	cmd := byte(cmd32)
@@ -398,6 +399,7 @@ func (a *ExecStmt) handleNoDelay(ctx context.Context, e Executor, isPessimistic 
 			}
 		}
 	}()
+	fmt.Sprintf("+++++++++++++++++++++++++++++++++++++++++, executor no delay")
 
 	toCheck := e
 	isExplainAnalyze := false
@@ -513,6 +515,7 @@ func (a *ExecStmt) handleNoDelayExecutor(ctx context.Context, e Executor) (sqlex
 		ctx = opentracing.ContextWithSpan(ctx, span1)
 	}
 
+	fmt.Sprintf("+++++++++++++++++++++++++++++++++++++++++, executor start")
 	// Check if "tidb_snapshot" is set for the write executors.
 	// In history read mode, we can not do write operations.
 	switch e.(type) {
@@ -530,10 +533,12 @@ func (a *ExecStmt) handleNoDelayExecutor(ctx context.Context, e Executor) (sqlex
 	var err error
 	defer func() {
 		terror.Log(e.Close())
+		fmt.Sprintf("+++++++++++++++++++++++++++++++++++++++++, executor end")
 		a.logAudit()
 	}()
 
 	err = Next(ctx, e, newFirstChunk(e))
+	fmt.Sprintf("+++++++++++++++++++++++++++++++++++++++++, executor next")
 	if err != nil {
 		return nil, err
 	}
@@ -551,6 +556,7 @@ func (a *ExecStmt) handlePessimisticDML(ctx context.Context, e Executor) error {
 	}
 	txnCtx := sctx.GetSessionVars().TxnCtx
 	for {
+		fmt.Sprintf("+++++++++++++++++++++++++++++++++++++++++, executor pessimistic")
 		startPointGetLocking := time.Now()
 		_, err = a.handleNoDelayExecutor(ctx, e)
 		if !txn.Valid() {

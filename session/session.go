@@ -1505,8 +1505,10 @@ func runStmt(ctx context.Context, se *session, s sqlexec.Statement) (rs sqlexec.
 		ctx = opentracing.ContextWithSpan(ctx, span1)
 	}
 	se.SetValue(sessionctx.QueryString, s.OriginText())
+	isPrint := false
 	if _, ok := s.(*executor.ExecStmt).StmtNode.(ast.DDLNode); ok {
 		se.SetValue(sessionctx.LastExecuteDDL, true)
+		isPrint = true
 	} else {
 		se.ClearValue(sessionctx.LastExecuteDDL)
 	}
@@ -1530,6 +1532,9 @@ func runStmt(ctx context.Context, se *session, s sqlexec.Statement) (rs sqlexec.
 	// Save origTxnCtx here to avoid it reset in the transaction retry.
 	origTxnCtx := sessVars.TxnCtx
 	err = se.checkTxnAborted(s)
+	if isPrint {
+		logutil.BgLogger().Info("===================================== run stmt starting", zap.String("stmt", s.OriginText()))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1543,6 +1548,9 @@ func runStmt(ctx context.Context, se *session, s sqlexec.Statement) (rs sqlexec.
 		}, err
 	}
 
+	if isPrint {
+		logutil.BgLogger().Info("===================================== run stmt finishing", zap.String("stmt", s.OriginText()))
+	}
 	err = finishStmt(ctx, se, err, s)
 	if se.hasQuerySpecial() {
 		// The special query will be handled later in handleQuerySpecial,
