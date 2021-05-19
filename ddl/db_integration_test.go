@@ -227,6 +227,7 @@ func (s *testIntegrationSuite2) TestCreateTableWithKeyWord(c *C) {
 func (s *testIntegrationSuite1) TestUniqueKeyNullValue(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("USE test")
+	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int primary key, b varchar(255))")
 
 	tk.MustExec("insert into t values(1, NULL)")
@@ -309,7 +310,7 @@ func (s *testIntegrationSuite2) TestIssue19229(c *C) {
 	tk.MustExec("drop table sett")
 }
 
-func (s *testIntegrationSuite1) TestIndexLength(c *C) {
+func (s *testIntegrationSuite9) TestIndexLength(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("create table idx_len(a int(0), b timestamp(0), c datetime(0), d time(0), f float(0), g decimal(0))")
@@ -385,7 +386,7 @@ func (s *testIntegrationSuite1) TestIssue4432(c *C) {
 	tk.MustExec("drop table tx")
 }
 
-func (s *testIntegrationSuite1) TestIssue5092(c *C) {
+func (s *testIntegrationSuite9) TestIssue5092(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 
@@ -642,6 +643,9 @@ func (s *testIntegrationSuite3) TestTableDDLWithFloatType(c *C) {
 }
 
 func (s *testIntegrationSuite1) TestTableDDLWithTimeType(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("skip race test")
+	}
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
@@ -1060,7 +1064,7 @@ func (s *testIntegrationSuite4) TestIndexOnMultipleGeneratedColumn5(c *C) {
 	tk.MustExec("admin check table t")
 }
 
-func (s *testIntegrationSuite2) TestCaseInsensitiveCharsetAndCollate(c *C) {
+func (s *testIntegrationSuite6) TestCaseInsensitiveCharsetAndCollate(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 
 	tk.MustExec("create database if not exists test_charset_collate")
@@ -1234,7 +1238,7 @@ func (s *testIntegrationSuite5) TestBackwardCompatibility(c *C) {
 
 	// Split the table.
 	tableStart := tablecodec.GenTableRecordPrefix(tbl.Meta().ID)
-	s.cluster.SplitKeys(tableStart, tableStart.PrefixNext(), 100)
+	s.cluster.SplitKeys(tableStart, tableStart.PrefixNext(), 10)
 
 	unique := false
 	indexName := model.NewCIStr("idx_b")
@@ -1371,6 +1375,9 @@ func getHistoryDDLJob(store kv.Storage, id int64) (*model.Job, error) {
 }
 
 func (s *testIntegrationSuite6) TestCreateTableTooLarge(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("skip race test")
+	}
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 
@@ -2728,7 +2735,7 @@ func (s *testIntegrationSuite3) TestStrictDoubleTypeCheck(c *C) {
 	tk.MustExec(sql)
 }
 
-func (s *testIntegrationSuite7) TestDuplicateErrorMessage(c *C) {
+func (s *testSerialDBSuite) TestDuplicateErrorMessage(c *C) {
 	defer collate.SetNewCollationEnabledForTest(false)
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")

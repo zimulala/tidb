@@ -45,6 +45,7 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/admin"
 	"github.com/pingcap/tidb/util/collate"
+	"github.com/pingcap/tidb/util/israce"
 	"github.com/pingcap/tidb/util/mock"
 	"github.com/pingcap/tidb/util/testkit"
 )
@@ -302,7 +303,7 @@ partition by range (a)
     partition p2 values less than maxvalue)`)
 }
 
-func (s *testIntegrationSuite2) TestCreateTableWithHashPartition(c *C) {
+func (s *testIntegrationSuite3) TestCreateTableWithHashPartition(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test;")
 	tk.MustExec("drop table if exists employees;")
@@ -593,6 +594,9 @@ create table log_message_1 (
 }
 
 func (s *testIntegrationSuite1) TestDisableTablePartition(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("skip race test")
+	}
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test;")
 	for _, v := range []string{"'AUTO'", "'OFF'", "0", "'ON'"} {
@@ -765,7 +769,7 @@ func (s *testIntegrationSuite1) TestCreateTableWithListPartition(c *C) {
 	}
 }
 
-func (s *testIntegrationSuite1) TestCreateTableWithListColumnsPartition(c *C) {
+func (s *testIntegrationSuite9) TestCreateTableWithListColumnsPartition(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test;")
 	tk.MustExec("set @@session.tidb_enable_list_partition = ON")
@@ -2576,7 +2580,7 @@ func (s *testIntegrationSuite5) TestPartitionUniqueKeyNeedAllFieldsInPf(c *C) {
 	tk.MustExec(sql13)
 }
 
-func (s *testIntegrationSuite2) TestPartitionDropPrimaryKey(c *C) {
+func (s *testIntegrationSuite3) TestPartitionDropPrimaryKey(c *C) {
 	idxName := "primary"
 	addIdxSQL := "alter table partition_drop_idx add primary key idx1 (c1);"
 	dropIdxSQL := "alter table partition_drop_idx drop primary key;"
@@ -2676,7 +2680,7 @@ func (s *testIntegrationSuite2) TestPartitionCancelAddPrimaryKey(c *C) {
 	testPartitionCancelAddIndex(c, s.store, s.dom.DDL(), s.lease, idxName, addIdxSQL)
 }
 
-func (s *testIntegrationSuite4) TestPartitionCancelAddIndex(c *C) {
+func (s *testIntegrationSuite6) TestPartitionCancelAddIndex(c *C) {
 	idxName := "idx1"
 	addIdxSQL := "create unique index c3_index on t1 (c1)"
 	testPartitionCancelAddIndex(c, s.store, s.dom.DDL(), s.lease, idxName, addIdxSQL)
@@ -2834,7 +2838,7 @@ func (s *testIntegrationSuite5) TestPartitionAddPrimaryKey(c *C) {
 	testPartitionAddIndexOrPK(c, tk, "primary key")
 }
 
-func (s *testIntegrationSuite1) TestPartitionAddIndex(c *C) {
+func (s *testIntegrationSuite9) TestPartitionAddIndex(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	testPartitionAddIndexOrPK(c, tk, "index")
 }

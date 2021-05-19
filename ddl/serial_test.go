@@ -925,7 +925,7 @@ func (s *testSerialSuite) TestTableLocksEnable(c *C) {
 	checkTableLock(c, tk.Se, "test", "t1", model.TableLockNone)
 }
 
-func (s *testSerialSuite) TestAutoRandom(c *C) {
+func (s *testSerialDBSuite) TestAutoRandom(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("create database if not exists auto_random_db")
 	defer tk.MustExec("drop database if exists auto_random_db")
@@ -1515,7 +1515,7 @@ func (s *testIntegrationSuite9) TestCreateClusteredIndex(c *C) {
 	c.Assert(tbl.Meta().IsCommonHandle, IsFalse)
 }
 
-func (s *testSerialSuite) TestCreateTableNoBlock(c *C) {
+func (s *testSerialDBSuite) TestCreateTableNoBlock(c *C) {
 	tk := testkit.NewTestKitWithInit(c, s.store)
 	c.Assert(failpoint.Enable("github.com/pingcap/tidb/ddl/checkOwnerCheckAllVersionsWaitTime", `return(true)`), IsNil)
 	defer func() {
