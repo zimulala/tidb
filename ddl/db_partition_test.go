@@ -360,7 +360,7 @@ func (s *testIntegrationSuite3) TestCreateTableWithHashPartition(c *C) {
 	tk.MustExec("create table t4 (a int, b int) partition by hash(floor(a-b)) partitions 10")
 }
 
-func (s *testIntegrationSuite7) TestCreateTableWithRangeColumnPartition(c *C) {
+func (s *testSerialDBSuite1) TestCreateTableWithRangeColumnPartition(c *C) {
 	collate.SetNewCollationEnabledForTest(true)
 	defer collate.SetNewCollationEnabledForTest(false)
 	tk := testkit.NewTestKit(c, s.store)
@@ -615,7 +615,7 @@ func (s *testIntegrationSuite1) TestDisableTablePartition(c *C) {
 	}
 }
 
-func (s *testIntegrationSuite1) generatePartitionTableByNum(num int) string {
+func (s *testIntegrationSuite6) generatePartitionTableByNum(num int) string {
 	buf := bytes.NewBuffer(make([]byte, 0, 1024*1024))
 	buf.WriteString("create table t (id int) partition by list  (id) (")
 	for i := 0; i < num; i++ {
@@ -628,7 +628,7 @@ func (s *testIntegrationSuite1) generatePartitionTableByNum(num int) string {
 	return buf.String()
 }
 
-func (s *testIntegrationSuite1) TestCreateTableWithListPartition(c *C) {
+func (s *testIntegrationSuite6) TestCreateTableWithListPartition(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test;")
 	tk.MustExec("set @@session.tidb_enable_list_partition = ON")
@@ -1607,7 +1607,7 @@ func (s *testIntegrationSuite5) TestMultiPartitionDropAndTruncate(c *C) {
 	result.Check(testkit.Rows(`2010`))
 }
 
-func (s *testIntegrationSuite7) TestDropPartitionWithGlobalIndex(c *C) {
+func (s *testSerialDBSuite1) TestDropPartitionWithGlobalIndex(c *C) {
 	config.UpdateGlobal(func(conf *config.Config) {
 		conf.EnableGlobalIndex = true
 	})
@@ -1645,7 +1645,7 @@ func (s *testIntegrationSuite7) TestDropPartitionWithGlobalIndex(c *C) {
 	})
 }
 
-func (s *testIntegrationSuite7) TestAlterTableExchangePartition(c *C) {
+func (s *testSerialDBSuite1) TestAlterTableExchangePartition(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists e")
@@ -2080,7 +2080,7 @@ func (s *testIntegrationSuite4) TestExchangePartitionTableCompatiable(c *C) {
 	c.Assert(err, IsNil)
 }
 
-func (s *testIntegrationSuite7) TestExchangePartitionExpressIndex(c *C) {
+func (s *testSerialDBSuite1) TestExchangePartitionExpressIndex(c *C) {
 	config.UpdateGlobal(func(conf *config.Config) {
 		conf.Experimental.AllowsExpressionIndex = true
 	})
@@ -3209,7 +3209,7 @@ func (s *testIntegrationSuite3) TestUnsupportedPartitionManagementDDLs(c *C) {
 	c.Assert(err, ErrorMatches, ".*alter table partition is unsupported")
 }
 
-func (s *testIntegrationSuite7) TestCommitWhenSchemaChange(c *C) {
+func (s *testSerialDBSuite1) TestCommitWhenSchemaChange(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec(`create table schema_change (a int, b timestamp)
@@ -3274,7 +3274,7 @@ func (s *testIntegrationSuite7) TestCommitWhenSchemaChange(c *C) {
 	tk.MustQuery("select * from nt").Check(testkit.Rows())
 }
 
-func (s *testIntegrationSuite7) TestCreatePartitionTableWithWrongType(c *C) {
+func (s *testSerialDBSuite1) TestCreatePartitionTableWithWrongType(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
@@ -3315,7 +3315,7 @@ func (s *testIntegrationSuite7) TestCreatePartitionTableWithWrongType(c *C) {
 	c.Assert(err, NotNil)
 }
 
-func (s *testIntegrationSuite7) TestAddPartitionForTableWithWrongType(c *C) {
+func (s *testSerialDBSuite1) TestAddPartitionForTableWithWrongType(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop tables if exists t_int, t_char, t_date")
@@ -3365,7 +3365,7 @@ func (s *testIntegrationSuite7) TestAddPartitionForTableWithWrongType(c *C) {
 	c.Assert(ddl.ErrWrongTypeColumnValue.Equal(err), IsTrue)
 }
 
-func (s *testIntegrationSuite7) TestPartitionListWithTimeType(c *C) {
+func (s *testSerialDBSuite1) TestPartitionListWithTimeType(c *C) {
 	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("use test;")
 	tk.MustExec("set @@session.tidb_enable_list_partition = ON")
@@ -3374,7 +3374,7 @@ func (s *testIntegrationSuite7) TestPartitionListWithTimeType(c *C) {
 	tk.MustQuery(`select * from t_list1 partition (p0);`).Check(testkit.Rows("2018-02-03"))
 }
 
-func (s *testIntegrationSuite7) TestPartitionListWithNewCollation(c *C) {
+func (s *testSerialDBSuite1) TestPartitionListWithNewCollation(c *C) {
 	collate.SetNewCollationEnabledForTest(true)
 	defer collate.SetNewCollationEnabledForTest(false)
 	tk := testkit.NewTestKitWithInit(c, s.store)
@@ -3391,7 +3391,7 @@ func (s *testIntegrationSuite7) TestPartitionListWithNewCollation(c *C) {
 	c.Assert(strings.Contains(str, "partition:p0"), IsTrue)
 }
 
-func (s *testIntegrationSuite7) TestAddTableWithPartition(c *C) {
+func (s *testSerialDBSuite1) TestAddTableWithPartition(c *C) {
 	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("use test;")
 	tk.MustExec("drop table if exists global_partition_table;")

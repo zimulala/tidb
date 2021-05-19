@@ -76,8 +76,9 @@ var _ = Suite(&testDBSuite4{&testDBSuite{}})
 var _ = Suite(&testDBSuite5{&testDBSuite{}})
 var _ = Suite(&testDBSuite6{&testDBSuite{}})
 var _ = Suite(&testDBSuite7{&testDBSuite{}})
-var _ = SerialSuites(&testSerialDBSuite{&testDBSuite{}})
 var _ = Suite(&testDBSuite8{&testDBSuite{}})
+var _ = SerialSuites(&testSerialDBSuite{&testDBSuite{}})
+var _ = SerialSuites(&testSerialDBSuite1{&testDBSuite{}})
 
 const defaultBatchSize = 1024
 const defaultReorgBatchSize = 256
@@ -90,6 +91,7 @@ type testDBSuite struct {
 	s          session.Session
 	lease      time.Duration
 	autoIDStep int64
+	ctx        sessionctx.Context
 }
 
 func setUpSuite(s *testDBSuite, c *C) {
@@ -114,6 +116,7 @@ func setUpSuite(s *testDBSuite, c *C) {
 	c.Assert(err, IsNil)
 	s.s, err = session.CreateSession4Test(s.store)
 	c.Assert(err, IsNil)
+	s.ctx = s.s.(sessionctx.Context)
 
 	_, err = s.s.Execute(context.Background(), "create database test_db")
 	c.Assert(err, IsNil)
@@ -146,6 +149,7 @@ type testDBSuite5 struct{ *testDBSuite }
 type testDBSuite6 struct{ *testDBSuite }
 type testDBSuite7 struct{ *testDBSuite }
 type testSerialDBSuite struct{ *testDBSuite }
+type testSerialDBSuite1 struct{ *testDBSuite }
 type testDBSuite8 struct{ *testDBSuite }
 
 func testAddIndexWithPK(tk *testkit.TestKit) {
@@ -608,7 +612,7 @@ func (s *testDBSuite4) TestCancelAddIndex1(c *C) {
 }
 
 // TestCancelDropIndex tests cancel ddl job which type is drop primary key.
-func (s *testDBSuite4) TestCancelDropPrimaryKey(c *C) {
+func (s *testDBSuite6) TestCancelDropPrimaryKey(c *C) {
 	idxName := "primary"
 	addIdxSQL := "alter table t add primary key idx_c2 (c2);"
 	dropIdxSQL := "alter table t drop primary key;"
@@ -1072,7 +1076,7 @@ func (s *testDBSuite6) TestAddMultiColumnsIndexClusterIndex(c *C) {
 	tk.MustExec("admin check table t;")
 }
 
-func (s *testDBSuite1) TestAddPrimaryKey1(c *C) {
+func (s *testDBSuite8) TestAddPrimaryKey1(c *C) {
 	testAddIndex(c, s.store, s.lease, testPlain,
 		"create table test_add_index (c1 bigint, c2 bigint, c3 bigint, unique key(c1))", "primary")
 }
@@ -1088,7 +1092,7 @@ func (s *testDBSuite2) TestAddPrimaryKey2(c *C) {
 			      partition p4 values less than maxvalue)`, "primary")
 }
 
-func (s *testDBSuite3) TestAddPrimaryKey3(c *C) {
+func (s *testDBSuite7) TestAddPrimaryKey3(c *C) {
 	testAddIndex(c, s.store, s.lease, testPartition,
 		`create table test_add_index (c1 bigint, c2 bigint, c3 bigint, key(c1))
 			      partition by hash (c3) partitions 4;`, "primary")
@@ -1308,7 +1312,7 @@ LOOP:
 }
 
 // TestCancelAddTableAndDropTablePartition tests cancel ddl job which type is add/drop table partition.
-func (s *testDBSuite1) TestCancelAddTableAndDropTablePartition(c *C) {
+func (s *testDBSuite8) TestCancelAddTableAndDropTablePartition(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	s.mustExec(tk, c, "create database if not exists test_partition_table")
 	s.mustExec(tk, c, "use test_partition_table")
@@ -1772,7 +1776,7 @@ func checkGlobalIndexCleanUpDone(c *C, ctx sessionctx.Context, tblInfo *model.Ta
 	return cnt
 }
 
-func (s *testDBSuite5) TestAlterPrimaryKey(c *C) {
+func (s *testDBSuite6) TestAlterPrimaryKey(c *C) {
 	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create table test_add_pk(a int, b int unsigned , c varchar(255) default 'abc', d int as (a+b), e int as (a+1) stored, index idx(b))")
 	defer tk.MustExec("drop table test_add_pk")
@@ -2035,7 +2039,7 @@ func (s *testDBSuite5) TestCreateIndexType(c *C) {
 	tk.MustExec(sql)
 }
 
-func (s *testDBSuite1) TestColumn(c *C) {
+func (s *testDBSuite8) TestColumn(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use " + s.schemaName)
 	tk.MustExec("create table t2 (c1 int, c2 int, c3 int)")
@@ -2086,13 +2090,23 @@ LOOP:
 
 				// Make sure that statement of insert and show use the same infoSchema.
 				tk.MustExec("begin")
+				// _, err := tk.Exec("insert into t2 values (?, ?, ?)", i, i, i)
+				// if err != nil {
+				// 	// if err is failed, the column number must be 4 now.
+				// 	values := s.showColumns(tk, c, "t2")
+				// 	c.Assert(values, HasLen, 4, Commentf("err:%v", errors.ErrorStack(err)))
+				// }
+				// tk.MustExec("commit")
 				_, err := tk.Exec("insert into t2 values (?, ?, ?)", i, i, i)
+				if err == nil {
+					_, err = tk.Exec("commit")
+				}
 				if err != nil {
-					// if err is failed, the column number must be 4 now.
+					// If err is failed, the column number must be 4 now.
 					values := s.showColumns(tk, c, "t2")
 					c.Assert(values, HasLen, 4, Commentf("err:%v", errors.ErrorStack(err)))
+					tk.MustExec("rollback")
 				}
-				tk.MustExec("commit")
 			}
 			num += step
 		}
@@ -3730,7 +3744,7 @@ func (s *testDBSuite5) TestCheckColumnDefaultValue(c *C) {
 	c.Assert(tblInfo.Meta().Columns[0].DefaultValue, Equals, `null`)
 }
 
-func (s *testDBSuite1) TestCharacterSetInColumns(c *C) {
+func (s *testDBSuite8) TestCharacterSetInColumns(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("create database varchar_test;")
 	defer tk.MustExec("drop database varchar_test;")
@@ -4928,7 +4942,7 @@ func (s *testDBSuite1) TestModifyColumnTime_DateToYear(c *C) {
 	testModifyColumnTime(c, s.store, tests)
 }
 
-func (s *testDBSuite1) TestModifyColumnTime_DateToDatetime(c *C) {
+func (s *testDBSuite7) TestModifyColumnTime_DateToDatetime(c *C) {
 	tests := []testModifyColumnTimeCase{
 		// date to datetime
 		{"date", `"2019-01-02"`, "datetime", "2019-01-02 00:00:00", 0},

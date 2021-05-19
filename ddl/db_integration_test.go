@@ -58,8 +58,6 @@ var _ = Suite(&testIntegrationSuite3{&testIntegrationSuite{}})
 var _ = Suite(&testIntegrationSuite4{&testIntegrationSuite{}})
 var _ = Suite(&testIntegrationSuite5{&testIntegrationSuite{}})
 var _ = Suite(&testIntegrationSuite6{&testIntegrationSuite{}})
-var _ = SerialSuites(&testIntegrationSuite7{&testIntegrationSuite{}})
-var _ = SerialSuites(&testIntegrationSuite8{&testIntegrationSuite{}})
 
 type testIntegrationSuite struct {
 	lease   time.Duration
@@ -127,8 +125,6 @@ type testIntegrationSuite3 struct{ *testIntegrationSuite }
 type testIntegrationSuite4 struct{ *testIntegrationSuite }
 type testIntegrationSuite5 struct{ *testIntegrationSuite }
 type testIntegrationSuite6 struct{ *testIntegrationSuite }
-type testIntegrationSuite7 struct{ *testIntegrationSuite }
-type testIntegrationSuite8 struct{ *testIntegrationSuite }
 type testIntegrationSuite9 struct{ *testIntegrationSuite }
 
 func (s *testIntegrationSuite5) TestNoZeroDateMode(c *C) {
@@ -1294,41 +1290,6 @@ func (s *testIntegrationSuite5) TestBackwardCompatibility(c *C) {
 	tk.MustExec("admin check index t idx_b")
 }
 
-func (s *testIntegrationSuite3) TestMultiRegionGetTableEndHandle(c *C) {
-	tk := testkit.NewTestKit(c, s.store)
-	tk.MustExec("drop database if exists test_get_endhandle")
-	tk.MustExec("create database test_get_endhandle")
-	tk.MustExec("use test_get_endhandle")
-
-	tk.MustExec("create table t(a bigint PRIMARY KEY nonclustered, b int)")
-	for i := 0; i < 1000; i++ {
-		tk.MustExec(fmt.Sprintf("insert into t values(%v, %v)", i, i))
-	}
-
-	// Get table ID for split.
-	dom := domain.GetDomain(tk.Se)
-	is := dom.InfoSchema()
-	tbl, err := is.TableByName(model.NewCIStr("test_get_endhandle"), model.NewCIStr("t"))
-	c.Assert(err, IsNil)
-	tblID := tbl.Meta().ID
-
-	d := s.dom.DDL()
-	testCtx := newTestMaxTableRowIDContext(c, d, tbl)
-
-	// Split the table.
-	tableStart := tablecodec.GenTableRecordPrefix(tblID)
-	s.cluster.SplitKeys(tableStart, tableStart.PrefixNext(), 100)
-
-	maxHandle, emptyTable := getMaxTableHandle(testCtx, s.store)
-	c.Assert(emptyTable, IsFalse)
-	c.Assert(maxHandle, Equals, kv.IntHandle(1000))
-
-	tk.MustExec("insert into t values(10000, 1000)")
-	maxHandle, emptyTable = getMaxTableHandle(testCtx, s.store)
-	c.Assert(emptyTable, IsFalse)
-	c.Assert(maxHandle, Equals, kv.IntHandle(1001))
-}
-
 type testMaxTableRowIDContext struct {
 	c   *C
 	d   ddl.DDL
@@ -1399,7 +1360,7 @@ func (s *testIntegrationSuite6) TestCreateTableTooLarge(c *C) {
 	atomic.StoreUint32(&config.GetGlobalConfig().TableColumnCountLimit, originLimit)
 }
 
-func (s *testIntegrationSuite8) TestCreateTableTooManyIndexes(c *C) {
+func (s *testSerialDBSuite1) TestCreateTableTooManyIndexes(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 
@@ -1528,7 +1489,7 @@ func (s *testIntegrationSuite6) TestAddColumnTooMany(c *C) {
 	tk.MustGetErrCode(alterSQL, errno.ErrTooManyFields)
 }
 
-func (s *testIntegrationSuite8) TestCreateTooManyIndexes(c *C) {
+func (s *testSerialDBSuite1) TestCreateTooManyIndexes(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	count := config.GetGlobalConfig().IndexLimit - 1
@@ -1550,7 +1511,7 @@ func (s *testIntegrationSuite8) TestCreateTooManyIndexes(c *C) {
 	tk.MustGetErrCode(alterSQL, errno.ErrTooManyKeys)
 }
 
-func (s *testIntegrationSuite8) TestCreateSecondaryIndexInCluster(c *C) {
+func (s *testSerialDBSuite1) TestCreateSecondaryIndexInCluster(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 
@@ -2280,7 +2241,7 @@ func (s *testIntegrationSuite3) TestParserIssue284(c *C) {
 	tk.MustExec("drop table test.t_parser_issue_284_2")
 }
 
-func (s *testIntegrationSuite7) TestAddExpressionIndex(c *C) {
+func (s *testSerialDBSuite1) TestAddExpressionIndex(c *C) {
 	config.UpdateGlobal(func(conf *config.Config) {
 		conf.Experimental.AllowsExpressionIndex = true
 	})
@@ -2346,7 +2307,7 @@ func (s *testIntegrationSuite7) TestAddExpressionIndex(c *C) {
 	tk.MustGetErrMsg("create table t(a int, key ((a+1)));", "[ddl:8200]Unsupported creating expression index without allow-expression-index in config")
 }
 
-func (s *testIntegrationSuite7) TestCreateExpressionIndexError(c *C) {
+func (s *testSerialDBSuite1) TestCreateExpressionIndexError(c *C) {
 	defer config.RestoreFunc()()
 	config.UpdateGlobal(func(conf *config.Config) {
 		conf.Experimental.AllowsExpressionIndex = true
@@ -2389,7 +2350,7 @@ func (s *testIntegrationSuite7) TestCreateExpressionIndexError(c *C) {
 	tk.MustGetErrCode("CREATE TABLE t1 (col1 INT, PRIMARY KEY ((ABS(col1))) NONCLUSTERED);", errno.ErrFunctionalIndexPrimaryKey)
 }
 
-func (s *testIntegrationSuite7) TestAddExpressionIndexOnPartition(c *C) {
+func (s *testSerialDBSuite1) TestAddExpressionIndexOnPartition(c *C) {
 	config.UpdateGlobal(func(conf *config.Config) {
 		conf.Experimental.AllowsExpressionIndex = true
 	})
@@ -2643,7 +2604,7 @@ func (s *testIntegrationSuite5) TestDropLastVisibleColumns(c *C) {
 	c.Assert(err.Error(), Equals, "[ddl:1113]A table must have at least 1 column")
 }
 
-func (s *testIntegrationSuite7) TestAutoIncrementTableOption(c *C) {
+func (s *testSerialDBSuite1) TestAutoIncrementTableOption(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("drop database if exists test_auto_inc_table_opt;")
 	tk.MustExec("create database test_auto_inc_table_opt;")
