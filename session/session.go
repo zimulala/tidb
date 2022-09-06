@@ -2738,14 +2738,22 @@ func loadCollationParameter(ctx context.Context, se *session) (bool, error) {
 
 var (
 	errResultIsEmpty = dbterror.ClassExecutor.NewStd(errno.ErrResultIsEmpty)
-	// DDLJobTables is a list of tables definitions used in concurrent DDL.
-	DDLJobTables = []struct {
+	// DDLJobTablesVer1 is a list of tables definitions used in concurrent DDL.
+	DDLJobTablesVer1 = []struct {
 		SQL string
 		id  int64
 	}{
 		{ddl.JobTableSQL, ddl.JobTableID},
 		{ddl.ReorgTableSQL, ddl.ReorgTableID},
 		{ddl.HistoryTableSQL, ddl.HistoryTableID},
+	}
+	// DDLJobTablesVer3 is a list of tables definitions used in dist reorg DDL.
+	DDLJobTablesVer3 = []struct {
+		SQL string
+		id  int64
+	}{
+		{ddl.BackfillTableSQL, ddl.BackfillTableID},
+		{ddl.BackfillHistoryTableSQL, ddl.BackfillHistoryTableID},
 	}
 	mdlTable = "create table mysql.tidb_mdl_info(job_id BIGINT NOT NULL PRIMARY KEY, version BIGINT NOT NULL, table_ids text(65535));"
 )
@@ -2764,25 +2772,38 @@ func splitAndScatterTable(store kv.Storage, tableIDs []int64) {
 	}
 }
 
-// InitDDLJobTables is to create tidb_ddl_job, tidb_ddl_reorg and tidb_ddl_history.
-func InitDDLJobTables(store kv.Storage) error {
+// InitDDLJobTables is to create tidb_ddl_job, tidb_ddl_reorg and tidb_ddl_history, or tidb_ddl_backfill and tidb_ddl_backfill_history.
+func InitDDLJobTables(store kv.Storage, targetVer string) error {
+	targetTables := DDLJobTablesVer1
+	if targetVer == meta.DDLTableVersion3 {
+		if !ddl.IsDistReorgEnable() {
+			return nil
+		}
+		targetTables = DDLJobTablesVer3
+	}
 	return kv.RunInNewTxn(kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL), store, true, func(ctx context.Context, txn kv.Transaction) error {
 		t := meta.NewMeta(txn)
-		exists, err := t.CheckDDLTableExists()
-		if err != nil || exists {
+		tableVer, err := t.CheckDDLTableVersion()
+		if err != nil || tableVer >= targetVer {
 			return errors.Trace(err)
 		}
 		dbID, err := t.CreateMySQLDatabaseIfNotExists()
 		if err != nil {
 			return err
 		}
-		tableIDs := make([]int64, 0, len(DDLJobTables))
-		for _, tbl := range DDLJobTables {
-			tableIDs = append(tableIDs, tbl.id)
-		}
-		splitAndScatterTable(store, tableIDs)
+		tableIDs := make([]int64, 0, len(targetTables))
 		p := parser.New()
-		for _, tbl := range DDLJobTables {
+		for _, tbl := range targetTables {
+			logutil.BgLogger().Info("init DDL job tables",
+				zap.Int64("tbl id", tbl.id), zap.String("tbl version", tableVer), zap.String("target tbl version", targetVer))
+			tableIDs = append(tableIDs, tbl.id)
+			id, err := t.GetGlobalID()
+			if err != nil {
+				return errors.Trace(err)
+			}
+			if id >= meta.MaxGlobalID {
+				return errors.Errorf("It is unreasonable that the global ID grows such a big value: %d, please concat TiDB team", id)
+			}
 			stmt, err := p.ParseOneStmt(tbl.SQL, "", "")
 			if err != nil {
 				return errors.Trace(err)
@@ -2799,7 +2820,8 @@ func InitDDLJobTables(store kv.Storage) error {
 				return errors.Trace(err)
 			}
 		}
-		return t.SetDDLTables()
+		splitAndScatterTable(store, tableIDs)
+		return t.SetDDLTables(targetVer)
 	})
 }
 
@@ -2850,11 +2872,15 @@ func BootstrapSession(store kv.Storage) (*domain.Domain, error) {
 			return nil, err
 		}
 	}
-	err := InitDDLJobTables(store)
+	err := InitDDLJobTables(store, meta.DDLTableVersion1)
 	if err != nil {
 		return nil, err
 	}
 	err = InitMDLTable(store)
+	if err != nil {
+		return nil, err
+	}
+	err = InitDDLJobTables(store, meta.DDLTableVersion3)
 	if err != nil {
 		return nil, err
 	}

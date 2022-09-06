@@ -88,28 +88,28 @@ func (wp *workerPool) tp() jobType {
 	return wp.t
 }
 
-// backfilWorkerPool is used to new backfill worker.
-type backfilWorkerPool struct {
+// backfillWorkerPool is used to new backfill worker.
+type backfillWorkerPool struct {
 	exit    atomic.Bool
 	resPool *pools.ResourcePool
 }
 
-func newBackfillWorkerPool(resPool *pools.ResourcePool) *backfilWorkerPool {
-	return &backfilWorkerPool{
+func newBackfillWorkerPool(resPool *pools.ResourcePool) *backfillWorkerPool {
+	return &backfillWorkerPool{
 		exit:    *atomic.NewBool(false),
 		resPool: resPool,
 	}
 }
 
 // setCapacity changes the capacity of the pool.
-// A setCapacity of 0 is equivalent to closing the backfilWorkerPool.
-func (bwp *backfilWorkerPool) setCapacity(capacity int) error {
+// A setCapacity of 0 is equivalent to closing the backfillWorkerPool.
+func (bwp *backfillWorkerPool) setCapacity(capacity int) error {
 	return bwp.resPool.SetCapacity(capacity)
 }
 
-// get gets backfilWorkerPool from context resource pool.
-// Please remember to call put after you finished using backfilWorkerPool.
-func (bwp *backfilWorkerPool) get() (*backfillWorker, error) {
+// get gets backfillWorker from context resource pool.
+// Please remember to call put after you finished using backfillWorkerPool.
+func (bwp *backfillWorkerPool) get() (*backfillWorker, error) {
 	if bwp.resPool == nil {
 		return nil, nil
 	}
@@ -131,8 +131,49 @@ func (bwp *backfilWorkerPool) get() (*backfillWorker, error) {
 	return worker, nil
 }
 
+// batchGet gets a batch backfillWorkers from context resource pool.
+// Please remember to call batchPut after you finished using backfillWorkerPool.
+func (bwp *backfillWorkerPool) batchGet(cnt int) ([]*backfillWorker, error) {
+	if bwp.resPool == nil {
+		return nil, nil
+	}
+
+	if bwp.exit.Load() {
+		return nil, errors.Errorf("backfill worker pool is closed")
+	}
+
+	workers := make([]*backfillWorker, 0, cnt)
+	for i := 0; i < cnt; i++ {
+		// no need to protect bwp.resPool
+		res, err := bwp.resPool.TryGet()
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		if res == nil {
+			return workers, nil
+		}
+		worker := res.(*backfillWorker)
+		workers = append(workers, worker)
+	}
+
+	return workers, nil
+}
+
+// batchPut returns workerPool to context resource pool.
+func (bwp *backfillWorkerPool) batchPut(wks []*backfillWorker) {
+	if bwp.resPool == nil || bwp.exit.Load() {
+		return
+	}
+
+	// No need to protect bwp.resPool, even the bwp.resPool is closed, the ctx still need to
+	// put into resPool, because when resPool is closing, it will wait all the ctx returns, then resPool finish closing.
+	for _, wk := range wks {
+		bwp.resPool.Put(wk)
+	}
+}
+
 // put returns workerPool to context resource pool.
-func (bwp *backfilWorkerPool) put(wk *backfillWorker) {
+func (bwp *backfillWorkerPool) put(wk *backfillWorker) {
 	if bwp.resPool == nil || bwp.exit.Load() {
 		return
 	}
@@ -142,13 +183,13 @@ func (bwp *backfilWorkerPool) put(wk *backfillWorker) {
 	bwp.resPool.Put(wk)
 }
 
-// close clean up the backfilWorkerPool.
-func (bwp *backfilWorkerPool) close() {
+// close clean up the backfillWorkerPool.
+func (bwp *backfillWorkerPool) close() {
 	// Prevent closing resPool twice.
 	if bwp.resPool == nil || bwp.exit.Load() {
 		return
 	}
 	bwp.exit.Store(true)
-	logutil.BgLogger().Info("[ddl] closing workerPool")
+	logutil.BgLogger().Info("[ddl] closing backfillWorkerPool")
 	bwp.resPool.Close()
 }

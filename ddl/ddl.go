@@ -39,6 +39,7 @@ import (
 	"github.com/pingcap/tidb/ddl/ingest"
 	"github.com/pingcap/tidb/ddl/syncer"
 	"github.com/pingcap/tidb/ddl/util"
+	"github.com/pingcap/tidb/ddl/util/gpool/spmc"
 	"github.com/pingcap/tidb/domain/infosync"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
@@ -83,8 +84,9 @@ const (
 
 	batchAddingJobs = 10
 
-	reorgWorkerCnt   = 10
-	generalWorkerCnt = 1
+	reorgWorkerCnt    = 10
+	generalWorkerCnt  = 1
+	backfillWorkerCnt = 64 // TODO:
 
 	// checkFlagIndexInJobArgs is the recoverCheckFlag index used in RecoverTable/RecoverSchema job arg list.
 	checkFlagIndexInJobArgs = 1
@@ -277,6 +279,8 @@ type ddl struct {
 	// used in the concurrency ddl.
 	reorgWorkerPool      *workerPool
 	generalDDLWorkerPool *workerPool
+	backfillCtxPool      *backfillWorkerPool
+	backfillWorkerPool   *spmc.Pool[*reorgBackfillTask, *backfillResult, int, *backfillWorker, *backfillWorkerContext]
 	// get notification if any DDL coming.
 	ddlJobCh chan struct{}
 }
@@ -332,6 +336,8 @@ type ddlCtx struct {
 	statsHandle  *handle.Handle
 	tableLockCkr util.DeadTableLockChecker
 	etcdCli      *clientv3.Client
+	// backfillJobCh gets notification if any backfill jobs coming.
+	backfillJobCh chan struct{}
 
 	*waitSchemaSyncedController
 	*schemaVersionManager
@@ -347,6 +353,12 @@ type ddlCtx struct {
 		sync.RWMutex
 		// reorgCtxMap maps job ID to reorg context.
 		reorgCtxMap map[int64]*reorgCtx
+	}
+	// backfillCtx is used for backfill workers.
+	backfillCtx struct {
+		sync.RWMutex
+		jobCtxMap      map[int64]*JobContext
+		backfillCtxMap map[int64]struct{}
 	}
 
 	jobCtx struct {
@@ -422,15 +434,15 @@ func (dc *ddlCtx) isOwner() bool {
 	return isOwner
 }
 
-func (dc *ddlCtx) setDDLLabelForTopSQL(job *model.Job) {
+func (dc *ddlCtx) setDDLLabelForTopSQL(jobID int64, jobQuery string) {
 	dc.jobCtx.Lock()
 	defer dc.jobCtx.Unlock()
-	ctx, exists := dc.jobCtx.jobCtxMap[job.ID]
+	ctx, exists := dc.jobCtx.jobCtxMap[jobID]
 	if !exists {
 		ctx = NewJobContext()
-		dc.jobCtx.jobCtxMap[job.ID] = ctx
+		dc.jobCtx.jobCtxMap[jobID] = ctx
 	}
-	ctx.setDDLLabelForTopSQL(job)
+	ctx.setDDLLabelForTopSQL(jobQuery)
 }
 
 func (dc *ddlCtx) setDDLSourceForDiagnosis(job *model.Job) {
@@ -444,10 +456,10 @@ func (dc *ddlCtx) setDDLSourceForDiagnosis(job *model.Job) {
 	}
 }
 
-func (dc *ddlCtx) getResourceGroupTaggerForTopSQL(job *model.Job) tikvrpc.ResourceGroupTagger {
+func (dc *ddlCtx) getResourceGroupTaggerForTopSQL(jobID int64) tikvrpc.ResourceGroupTagger {
 	dc.jobCtx.Lock()
 	defer dc.jobCtx.Unlock()
-	ctx, exists := dc.jobCtx.jobCtxMap[job.ID]
+	ctx, exists := dc.jobCtx.jobCtxMap[jobID]
 	if !exists {
 		return nil
 	}
@@ -460,19 +472,19 @@ func (dc *ddlCtx) removeJobCtx(job *model.Job) {
 	delete(dc.jobCtx.jobCtxMap, job.ID)
 }
 
-func (dc *ddlCtx) jobContext(job *model.Job) *JobContext {
+func (dc *ddlCtx) jobContext(jobID int64) *JobContext {
 	dc.jobCtx.RLock()
 	defer dc.jobCtx.RUnlock()
-	if jobContext, exists := dc.jobCtx.jobCtxMap[job.ID]; exists {
+	if jobContext, exists := dc.jobCtx.jobCtxMap[jobID]; exists {
 		return jobContext
 	}
 	return NewJobContext()
 }
 
-func (dc *ddlCtx) getReorgCtx(job *model.Job) *reorgCtx {
+func (dc *ddlCtx) getReorgCtx(jobID int64) *reorgCtx {
 	dc.reorgCtx.RLock()
 	defer dc.reorgCtx.RUnlock()
-	return dc.reorgCtx.reorgCtxMap[job.ID]
+	return dc.reorgCtx.reorgCtxMap[jobID]
 }
 
 func (dc *ddlCtx) newReorgCtx(r *reorgInfo) *reorgCtx {
@@ -497,7 +509,7 @@ func (dc *ddlCtx) removeReorgCtx(job *model.Job) {
 }
 
 func (dc *ddlCtx) notifyReorgCancel(job *model.Job) {
-	rc := dc.getReorgCtx(job)
+	rc := dc.getReorgCtx(job.ID)
 	if rc == nil {
 		return
 	}
@@ -662,7 +674,7 @@ func (d *ddl) prepareWorkers4ConcurrencyDDL() {
 				return nil, err
 			}
 			sessForJob.SetDiskFullOpt(kvrpcpb.DiskFullOpt_AllowedOnAlmostFull)
-			wk.sess = newSession(sessForJob)
+			wk.sess = NewSession(sessForJob)
 			metrics.DDLCounter.WithLabelValues(fmt.Sprintf("%s_%s", metrics.CreateDDL, wk.String())).Inc()
 			return wk, nil
 		}
@@ -677,6 +689,20 @@ func (d *ddl) prepareWorkers4ConcurrencyDDL() {
 		}
 	})
 	d.wg.Run(d.startDispatchLoop)
+}
+
+func (d *ddl) prepareBackfillWorkers() {
+	workerFactory := func() func() (pools.Resource, error) {
+		return func() (pools.Resource, error) {
+			bk := newBackfillWorker(int(genBackfillWorkerID()), d.ddlCtx, nil)
+			metrics.DDLCounter.WithLabelValues(fmt.Sprintf("%s_%s", metrics.CreateDDL, bk.String())).Inc()
+			return bk, nil
+		}
+	}
+	d.backfillCtxPool = newBackfillWorkerPool(pools.NewResourcePool(workerFactory(), backfillWorkerCnt, backfillWorkerCnt, 0))
+	d.backfillWorkerPool = spmc.NewSPMCPool[*reorgBackfillTask, *backfillResult, int, *backfillWorker, *backfillWorkerContext]("backfill", int32(backfillWorkerCnt))
+	d.backfillJobCh = make(chan struct{}, 1)
+	d.wg.Run(d.startDispatchBackfillJobsLoop)
 }
 
 func (d *ddl) prepareWorkers4legacyDDL() {
@@ -714,6 +740,7 @@ func (d *ddl) Start(ctxPool *pools.ResourcePool) error {
 
 	d.prepareWorkers4ConcurrencyDDL()
 	d.prepareWorkers4legacyDDL()
+	d.prepareBackfillWorkers()
 
 	if config.TableLockEnabled() {
 		d.wg.Add(1)
@@ -794,6 +821,12 @@ func (d *ddl) close() {
 	d.schemaSyncer.Close()
 	if d.reorgWorkerPool != nil {
 		d.reorgWorkerPool.close()
+	}
+	if d.backfillCtxPool != nil {
+		d.backfillCtxPool.close()
+	}
+	if d.backfillWorkerPool != nil {
+		d.backfillWorkerPool.ReleaseAndWait()
 	}
 	if d.generalDDLWorkerPool != nil {
 		d.generalDDLWorkerPool.close()
@@ -1231,7 +1264,7 @@ func (d *ddl) SwitchMDL(enable bool) error {
 		return err
 	}
 	defer d.sessPool.put(sess)
-	se := newSession(sess)
+	se := NewSession(sess)
 	rows, err := se.execute(ctx, "select 1 from mysql.tidb_ddl_job", "check job")
 	if err != nil {
 		return err
@@ -1349,7 +1382,7 @@ type Info struct {
 
 // GetDDLInfoWithNewTxn returns DDL information using a new txn.
 func GetDDLInfoWithNewTxn(s sessionctx.Context) (*Info, error) {
-	sess := newSession(s)
+	sess := NewSession(s)
 	err := sess.begin()
 	if err != nil {
 		return nil, err
@@ -1363,7 +1396,7 @@ func GetDDLInfoWithNewTxn(s sessionctx.Context) (*Info, error) {
 func GetDDLInfo(s sessionctx.Context) (*Info, error) {
 	var err error
 	info := &Info{}
-	sess := newSession(s)
+	sess := NewSession(s)
 	txn, err := sess.txn()
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -1532,7 +1565,7 @@ func cancelConcurrencyJobs(se sessionctx.Context, ids []int64) ([]error, error) 
 	}
 	var jobMap = make(map[int64]int) // jobID -> error index
 
-	sess := newSession(se)
+	sess := NewSession(se)
 	err := sess.begin()
 	if err != nil {
 		return nil, err
@@ -1614,7 +1647,7 @@ func getDDLJobsInQueue(t *meta.Meta, jobListKey meta.JobListKeyType) ([]*model.J
 // GetAllDDLJobs get all DDL jobs and sorts jobs by job.ID.
 func GetAllDDLJobs(sess sessionctx.Context, t *meta.Meta) ([]*model.Job, error) {
 	if variable.EnableConcurrentDDL.Load() {
-		return getJobsBySQL(newSession(sess), JobTable, "1 order by job_id")
+		return getJobsBySQL(NewSession(sess), JobTable, "1 order by job_id")
 	}
 
 	return getDDLJobs(t)
@@ -1700,7 +1733,7 @@ type session struct {
 	sessionctx.Context
 }
 
-func newSession(s sessionctx.Context) *session {
+func NewSession(s sessionctx.Context) *session {
 	return &session{s}
 }
 
@@ -1822,7 +1855,7 @@ func GetHistoryJobByID(sess sessionctx.Context, id int64) (*model.Job, error) {
 
 // AddHistoryDDLJobForTest used for test.
 func AddHistoryDDLJobForTest(sess sessionctx.Context, t *meta.Meta, job *model.Job, updateRawArgs bool) error {
-	return AddHistoryDDLJob(newSession(sess), t, job, updateRawArgs, variable.EnableConcurrentDDL.Load())
+	return AddHistoryDDLJob(NewSession(sess), t, job, updateRawArgs, variable.EnableConcurrentDDL.Load())
 }
 
 // AddHistoryDDLJob record the history job.

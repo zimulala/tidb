@@ -104,6 +104,7 @@ type worker struct {
 
 // JobContext is the ddl job execution context.
 type JobContext struct {
+	backfillJobCnt int
 	// below fields are cache for top sql
 	ddlJobCtx          context.Context
 	cacheSQL           string
@@ -117,6 +118,17 @@ func NewJobContext() *JobContext {
 	return &JobContext{
 		ddlJobCtx:          context.Background(),
 		cacheSQL:           "",
+		cacheNormalizedSQL: "",
+		cacheDigest:        nil,
+		tp:                 "unknown",
+	}
+}
+
+// NewJobContextWithArgs returns a new ddl job context with args.
+func NewJobContextWithArgs(sql string) *JobContext {
+	return &JobContext{
+		ddlJobCtx:          context.Background(),
+		cacheSQL:           sql,
 		cacheNormalizedSQL: "",
 		cacheDigest:        nil,
 		tp:                 "unknown",
@@ -395,7 +407,7 @@ func (d *ddl) addBatchDDLJobs2Table(tasks []*limitJobTask) error {
 		return errors.Trace(err)
 	}
 	defer d.sessPool.put(sess)
-	job, err := getJobsBySQL(newSession(sess), JobTable, fmt.Sprintf("type = %d", model.ActionFlashbackCluster))
+	job, err := getJobsBySQL(NewSession(sess), JobTable, fmt.Sprintf("type = %d", model.ActionFlashbackCluster))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -426,7 +438,7 @@ func (d *ddl) addBatchDDLJobs2Table(tasks []*limitJobTask) error {
 			injectModifyJobArgFailPoint(job)
 		}
 		sess.SetDiskFullOpt(kvrpcpb.DiskFullOpt_AllowedOnAlmostFull)
-		err = insertDDLJobs2Table(newSession(sess), true, jobTasks...)
+		err = insertDDLJobs2Table(NewSession(sess), true, jobTasks...)
 	}
 	return errors.Trace(err)
 }
@@ -519,7 +531,7 @@ func cleanMDLInfo(pool *sessionPool, jobID int64) {
 	sql := fmt.Sprintf("delete from mysql.tidb_mdl_info where job_id = %d", jobID)
 	sctx, _ := pool.get()
 	defer pool.put(sctx)
-	sess := newSession(sctx)
+	sess := NewSession(sctx)
 	sess.SetDiskFullOpt(kvrpcpb.DiskFullOpt_AllowedOnAlmostFull)
 	_, err := sess.execute(context.Background(), sql, "delete-mdl-info")
 	if err != nil {
@@ -532,7 +544,7 @@ func checkMDLInfo(jobID int64, pool *sessionPool) (bool, error) {
 	sql := fmt.Sprintf("select * from mysql.tidb_mdl_info where job_id = %d", jobID)
 	sctx, _ := pool.get()
 	defer pool.put(sctx)
-	sess := newSession(sctx)
+	sess := NewSession(sctx)
 	rows, err := sess.execute(context.Background(), sql, "check-mdl-info")
 	if err != nil {
 		return false, err
@@ -709,14 +721,14 @@ func newMetaWithQueueTp(txn kv.Transaction, tp workerType) *meta.Meta {
 	return meta.NewMeta(txn)
 }
 
-func (w *JobContext) setDDLLabelForTopSQL(job *model.Job) {
-	if !topsqlstate.TopSQLEnabled() || job == nil {
+func (w *JobContext) setDDLLabelForTopSQL(jobQuery string) {
+	if !topsqlstate.TopSQLEnabled() || jobQuery == "" {
 		return
 	}
 
-	if job.Query != w.cacheSQL || w.cacheDigest == nil {
-		w.cacheNormalizedSQL, w.cacheDigest = parser.NormalizeDigest(job.Query)
-		w.cacheSQL = job.Query
+	if jobQuery != w.cacheSQL || w.cacheDigest == nil {
+		w.cacheNormalizedSQL, w.cacheDigest = parser.NormalizeDigest(jobQuery)
+		w.cacheSQL = jobQuery
 		w.ddlJobCtx = topsql.AttachAndRegisterSQLInfo(context.Background(), w.cacheNormalizedSQL, w.cacheDigest, false)
 	} else {
 		topsql.AttachAndRegisterSQLInfo(w.ddlJobCtx, w.cacheNormalizedSQL, w.cacheDigest, false)
@@ -800,10 +812,10 @@ func (w *worker) HandleDDLJobTable(d *ddlCtx, job *model.Job) (int64, error) {
 	if w.tp == addIdxWorker && job.IsRunning() {
 		txn.SetDiskFullOpt(kvrpcpb.DiskFullOpt_NotAllowedOnFull)
 	}
-	w.setDDLLabelForTopSQL(job)
+	w.setDDLLabelForTopSQL(job.ID, job.Query)
 	w.setDDLSourceForDiagnosis(job)
-	jobContext := w.jobContext(job)
-	if tagger := w.getResourceGroupTaggerForTopSQL(job); tagger != nil {
+	jobContext := w.jobContext(job.ID)
+	if tagger := w.getResourceGroupTaggerForTopSQL(job.ID); tagger != nil {
 		txn.SetOption(kv.ResourceGroupTagger, tagger)
 	}
 	t := meta.NewMeta(txn)
@@ -939,10 +951,10 @@ func (w *worker) handleDDLJobQueue(d *ddlCtx) error {
 				txn.SetDiskFullOpt(kvrpcpb.DiskFullOpt_NotAllowedOnFull)
 			}
 
-			w.setDDLLabelForTopSQL(job)
+			w.setDDLLabelForTopSQL(job.ID, job.Query)
 			w.setDDLSourceForDiagnosis(job)
-			jobContext := w.jobContext(job)
-			if tagger := w.getResourceGroupTaggerForTopSQL(job); tagger != nil {
+			jobContext := w.jobContext(job.ID)
+			if tagger := w.getResourceGroupTaggerForTopSQL(job.ID); tagger != nil {
 				txn.SetOption(kv.ResourceGroupTagger, tagger)
 			}
 			if isDone, err1 := isDependencyJobDone(t, job); err1 != nil || !isDone {

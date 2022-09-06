@@ -197,7 +197,7 @@ func (w *worker) runReorgJob(rh *reorgHandler, reorgInfo *reorgInfo, tblInfo *mo
 		}
 	}
 
-	rc := w.getReorgCtx(job)
+	rc := w.getReorgCtx(job.ID)
 	if rc == nil {
 		// This job is cancelling, we should return ErrCancelledDDLJob directly.
 		// Q: Is there any possibility that the job is cancelling and has no reorgCtx?
@@ -270,7 +270,10 @@ func (w *worker) runReorgJob(rh *reorgHandler, reorgInfo *reorgInfo, tblInfo *mo
 		// Update a reorgInfo's handle.
 		// Since daemon-worker is triggered by timer to store the info half-way.
 		// you should keep these infos is read-only (like job) / atomic (like doneKey & element) / concurrent safe.
-		err := rh.UpdateDDLReorgStartHandle(job, currentElement, doneKey)
+		var err error
+		if !EnableDistReorg {
+			err = rh.UpdateDDLReorgStartHandle(job, currentElement, doneKey)
+		}
 
 		logutil.BgLogger().Info("[ddl] run reorg job wait timeout",
 			zap.Duration("waitTime", waitTimeout),
@@ -286,7 +289,7 @@ func (w *worker) runReorgJob(rh *reorgHandler, reorgInfo *reorgInfo, tblInfo *mo
 }
 
 func (w *worker) mergeWarningsIntoJob(job *model.Job) {
-	rc := w.getReorgCtx(job)
+	rc := w.getReorgCtx(job.ID)
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	partWarnings := rc.mu.warnings
@@ -349,22 +352,27 @@ func getTableTotalCount(w *worker, tblInfo *model.TableInfo) int64 {
 	return rows[0].GetInt64(0)
 }
 
-func (dc *ddlCtx) isReorgRunnable(job *model.Job) error {
+func (dc *ddlCtx) isReorgRunnable(jobIDs ...int64) error {
 	if isChanClosed(dc.ctx.Done()) {
 		// Worker is closed. So it can't do the reorganization.
 		return dbterror.ErrInvalidWorker.GenWithStack("worker is closed")
 	}
 
-	if dc.getReorgCtx(job).isReorgCanceled() {
-		// Job is cancelled. So it can't be done.
-		return dbterror.ErrCancelledDDLJob
+	jobID := jobIDs[0]
+	if len(jobIDs) == 1 {
+		// TODO: do check for interrupt backfill job.
+		if dc.getReorgCtx(jobID).isReorgCanceled() {
+			// Job is cancelled. So it can't be done.
+			return dbterror.ErrCancelledDDLJob
+		}
+
+		if !dc.isOwner() {
+			// If it's not the owner, we will try later, so here just returns an error.
+			logutil.BgLogger().Info("[ddl] DDL is not the DDL owner", zap.String("ID", dc.uuid))
+			return errors.Trace(dbterror.ErrNotOwner)
+		}
 	}
 
-	if !dc.isOwner() {
-		// If it's not the owner, we will try later, so here just returns an error.
-		logutil.BgLogger().Info("[ddl] DDL is not the DDL owner", zap.String("ID", dc.uuid))
-		return errors.Trace(dbterror.ErrNotOwner)
-	}
 	return nil
 }
 
@@ -752,7 +760,7 @@ func (r *reorgInfo) UpdateReorgMeta(startKey kv.Key, pool *sessionPool) (err err
 	}
 	defer pool.put(se)
 
-	sess := newSession(se)
+	sess := NewSession(se)
 	err = sess.begin()
 	if err != nil {
 		return
@@ -781,7 +789,7 @@ type reorgHandler struct {
 
 // NewReorgHandlerForTest creates a new reorgHandler, only used in test.
 func NewReorgHandlerForTest(t *meta.Meta, sess sessionctx.Context) *reorgHandler {
-	return newReorgHandler(t, newSession(sess), variable.EnableConcurrentDDL.Load())
+	return newReorgHandler(t, NewSession(sess), variable.EnableConcurrentDDL.Load())
 }
 
 func newReorgHandler(t *meta.Meta, sess *session, enableConcurrentDDL bool) *reorgHandler {
