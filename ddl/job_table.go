@@ -21,7 +21,6 @@ import (
 	"math"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/pingcap/errors"
@@ -35,6 +34,7 @@ import (
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/table"
+	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/dbterror"
 	"github.com/pingcap/tidb/util/logutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -277,59 +277,23 @@ func (d *ddl) runBackfillJobs(sess *session, bJob *model.BackfillJob, jobCtx *Jo
 		logutil.BgLogger().Warn("[ddl] backfill job get table failed", zap.String("bfJob", bJob.AbbrStr()), zap.Error(err))
 		return
 	}
-	// TODO: optimize
-	decodeColMap, err := makeupDecodeColMap(sess, tbl.(table.PhysicalTable))
-	if err != nil {
-		logutil.BgLogger().Debug(fmt.Sprintf("[ddl] make up decode col map failed"), zap.Error(err))
-		return
-	}
 
 	workerCnt := int(variable.GetDDLReorgWorkerCounter())
 	batch := int(variable.GetDDLReorgBatchSize())
-	pool := spmc.NewSPMCPool[*reorgBackfillTask, *backfillResult, []*backfillWorker](int32(workerCnt))
-	bws, err := d.backfillWorkerPool.batchGet(workerCnt)
-	if err != nil || len(bws) == 0 {
-		logutil.BgLogger().Debug(fmt.Sprintf("[ddl] no backfill worker available now"), zap.Error(err))
-		return
-	}
-	sessions := make([]*session, 0, len(bws))
-	for i := 0; i < len(bws); i++ {
-		se, err := d.sessPool.get()
-		if err != nil {
-			logutil.BgLogger().Fatal("dispatch backfill jobs loop get session failed, it should not happen, please try restart TiDB", zap.Error(err))
-		}
-		sess := newSession(se)
-		bf := newAddIndexWorker(decodeColMap, newBackfillCtx(d.ddlCtx, sess, tbl, batch), jobCtx, bJob.EleID, bJob.EleKey)
-		sessions = append(sessions, sess)
-		bws[i].backfiller = bf
-	}
-	var workersL sync.RWMutex
-	pool.SetConsumerFunc(func(task *reorgBackfillTask, bfWorkers []*backfillWorker) *backfillResult {
+	bwCtx := newBackfillWorkerContext(d, tbl, jobCtx, bJob.EleID, bJob.EleKey, workerCnt, batch)
+	pool := spmc.NewSPMCPool[*reorgBackfillTask, *backfillResult, int, *backfillWorker, *backfillWorkerContext](int32(workerCnt))
+	pool.SetConsumerFunc(func(task *reorgBackfillTask, _ int, bfWorker *backfillWorker) *backfillResult {
 		// To prevent different workers from using the same session.
 		// TODO: backfillWorkerPool is global, and bfWorkers is used in this function, we'd better do something make worker and job's ID can be matched.
 		defer injectSpan(traceID, fmt.Sprintf("run-task-id-%d", task.bfJob.ID))()
 
-		var bf *backfillWorker
-		workersL.Lock()
-		for _, w := range bfWorkers {
-			if w.state == 0 {
-				bf = w
-				bf.state = 1
-				break
-			}
-		}
-		workersL.Unlock()
-
-		bf.runTask(task)
-		ret := <-bf.resultCh
+		bfWorker.runTask(task)
+		ret := <-bfWorker.resultCh
 		if dbterror.ErrDDLJobNotFound.Equal(ret.err) {
 			logutil.BgLogger().Info("the backfill job instance ID or lease is changed", zap.Error(ret.err))
 			ret.err = nil
 		}
 
-		workersL.Lock()
-		bf.state = 0
-		workersL.Unlock()
 		return ret
 	})
 
@@ -340,7 +304,7 @@ func (d *ddl) runBackfillJobs(sess *session, bJob *model.BackfillJob, jobCtx *Jo
 		num++
 		// TODO: if err is write conflict, we need retry
 		// TODO: workerCnt -> batch
-		bJobs, err := getAndMarkBackfillJobsForOneEle(sess, workerCnt, true, runningJobIDs, d.uuid, instanceLease*time.Second)
+		bJobs, err := getAndMarkBackfillJobsForOneEle(sess, workerCnt*2, true, runningJobIDs, d.uuid, instanceLease*time.Second)
 		if err != nil {
 			// TODO: test: if all tidbs can't get the unmark backfill job(a tidb mark a backfill job, other tidbs returned, then the tidb can't handle this job.)
 			if dbterror.ErrDDLJobNotFound.Equal(err) {
@@ -357,38 +321,42 @@ func (d *ddl) runBackfillJobs(sess *session, bJob *model.BackfillJob, jobCtx *Jo
 		return tasks, nil
 	}
 	// add new task
-	resultCh, control := pool.AddProducer(proFunc, bws, workerCnt)
+	resultCh, control := pool.AddProduceBySlice(proFunc, 0, bwCtx, spmc.WithConcurrency(workerCnt))
 
-WaitResultLoop:
-	for {
-		select {
-		case result := <-resultCh:
-			if result.err != nil {
-				logutil.BgLogger().Warn("handle backfill task failed", zap.Error(result.err))
-				break WaitResultLoop
-			}
-		default:
-			if control.IsProduceClose() {
-				logutil.BgLogger().Info("handle backfill task finished normally")
-				break WaitResultLoop
+	var wg util.WaitGroupWrapper
+	exitCh := make(chan struct{})
+	wg.Run(func() {
+		for {
+			select {
+			case result := <-resultCh:
+				if result.err != nil {
+					logutil.BgLogger().Warn("handle backfill task failed", zap.Error(result.err))
+					return
+				}
+			case <-exitCh:
+				return
 			}
 		}
-	}
-	logutil.BgLogger().Info("close loop *****************************  00")
+	})
+
+	details := collectTrace(traceID)
+	logutil.BgLogger().Info("[ddl] &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&--------------------------  finish backfill jobs",
+		zap.Int64("job ID", bJob.JobID), zap.String("time details", details))
+
 	// Waiting task finishing
 	control.Wait()
+	close(exitCh)
+	wg.Wait()
 
-	logutil.BgLogger().Info("close loop *****************************  11")
+	logutil.BgLogger().Info("handle backfill task, close loop *****************************  11")
 	// close pool
 	pool.ReleaseAndWait()
-	for _, s := range sessions {
-		d.sessPool.put(s.Context)
+	for _, s := range bwCtx.sessCtxs {
+		d.sessPool.put(s)
 	}
-	for _, w := range bws {
+	for _, w := range bwCtx.backfillWorkers {
 		d.backfillWorkerPool.put(w)
 	}
-	details := collectTrace(traceID)
-	logutil.BgLogger().Info("[ddl] &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&--------------------------  finish backfill jobs", zap.String("time details", details))
 }
 
 func (d *ddl) startDispatchLoop() {
