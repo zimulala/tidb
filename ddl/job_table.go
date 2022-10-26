@@ -253,8 +253,7 @@ func (d *ddl) loadBackfillJobAndRun() {
 	}
 	d.backfillCtx.Unlock()
 
-	d.wg.Add(1)
-	go func() {
+	d.wg.Run(func() {
 		defer func() {
 			d.backfillCtx.Lock()
 			delete(d.backfillCtx.jobCtxMap, bJob.JobID)
@@ -265,7 +264,7 @@ func (d *ddl) loadBackfillJobAndRun() {
 		}()
 
 		d.runBackfillJobs(sess, bJob, jobCtx)
-	}()
+	})
 }
 
 func (d *ddl) runBackfillJobs(sess *session, bJob *model.BackfillJob, jobCtx *JobContext) {
@@ -281,8 +280,7 @@ func (d *ddl) runBackfillJobs(sess *session, bJob *model.BackfillJob, jobCtx *Jo
 	workerCnt := int(variable.GetDDLReorgWorkerCounter())
 	batch := int(variable.GetDDLReorgBatchSize())
 	bwCtx := newBackfillWorkerContext(d, tbl, jobCtx, bJob.EleID, bJob.EleKey, workerCnt, batch)
-	pool := spmc.NewSPMCPool[*reorgBackfillTask, *backfillResult, int, *backfillWorker, *backfillWorkerContext](int32(workerCnt))
-	pool.SetConsumerFunc(func(task *reorgBackfillTask, _ int, bfWorker *backfillWorker) *backfillResult {
+	d.backfillWorkerPool.SetConsumerFunc(func(task *reorgBackfillTask, _ int, bfWorker *backfillWorker) *backfillResult {
 		// To prevent different workers from using the same session.
 		// TODO: backfillWorkerPool is global, and bfWorkers is used in this function, we'd better do something make worker and job's ID can be matched.
 		defer injectSpan(traceID, fmt.Sprintf("run-task-id-%d", task.bfJob.ID))()
@@ -321,7 +319,7 @@ func (d *ddl) runBackfillJobs(sess *session, bJob *model.BackfillJob, jobCtx *Jo
 		return tasks, nil
 	}
 	// add new task
-	resultCh, control := pool.AddProduceBySlice(proFunc, 0, bwCtx, spmc.WithConcurrency(workerCnt))
+	resultCh, control := d.backfillWorkerPool.AddProduceBySlice(proFunc, 0, bwCtx, spmc.WithConcurrency(workerCnt))
 
 	var wg util.WaitGroupWrapper
 	exitCh := make(chan struct{})
@@ -339,23 +337,20 @@ func (d *ddl) runBackfillJobs(sess *session, bJob *model.BackfillJob, jobCtx *Jo
 		}
 	})
 
-	details := collectTrace(traceID)
-	logutil.BgLogger().Info("[ddl] &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&--------------------------  finish backfill jobs",
-		zap.Int64("job ID", bJob.JobID), zap.String("time details", details))
-
 	// Waiting task finishing
 	control.Wait()
 	close(exitCh)
 	wg.Wait()
 
-	logutil.BgLogger().Info("handle backfill task, close loop *****************************  11")
-	// close pool
-	pool.ReleaseAndWait()
+	details := collectTrace(traceID)
+	logutil.BgLogger().Info("[ddl] &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&--------------------------  finish backfill jobs",
+		zap.Int64("job ID", bJob.JobID), zap.String("time details", details))
+
 	for _, s := range bwCtx.sessCtxs {
 		d.sessPool.put(s)
 	}
 	for _, w := range bwCtx.backfillWorkers {
-		d.backfillWorkerPool.put(w)
+		d.backfillCtxPool.put(w)
 	}
 }
 
@@ -648,11 +643,11 @@ func addBackfillJobs(sess *session, backfillJobs []*model.BackfillJob) error {
 		}
 
 		if i == 0 {
-			sql = sqlPrefix + fmt.Sprintf("(%d, %d, %d, '%s', '%s', %d, '%s', '%s', %d, '%s')",
+			sql = sqlPrefix + fmt.Sprintf("(%d, %d, %d, '%s', %d, %d, '%s', '%s', %d, '%s')",
 				bj.ID, bj.JobID, bj.EleID, bj.EleKey, bj.StoreID, bj.Tp, instanceID, bj.Instance_Lease, bj.State, mateByte)
 			continue
 		}
-		sql += fmt.Sprintf(", (%d, %d, %d, '%s', '%s', %d, '%s', '%s', %d, '%s')",
+		sql += fmt.Sprintf(", (%d, %d, %d, '%s', %d, %d, '%s', '%s', %d, '%s')",
 			bj.ID, bj.JobID, bj.EleID, bj.EleKey, bj.StoreID, bj.Tp, instanceID, bj.Instance_Lease, bj.State, mateByte)
 	}
 	_, err = sess.execute(context.Background(), sql, "add_backfill_jobs")
@@ -795,7 +790,7 @@ func getBackfillJobs(sess *session, tblName, condition string, label string) ([]
 			JobID:       row.GetInt64(1),
 			EleID:       row.GetInt64(2),
 			EleKey:      row.GetBytes(3),
-			StoreID:     row.GetString(4),
+			StoreID:     row.GetInt64(4),
 			Tp:          model.BackfillType(row.GetInt64(5)),
 			Instance_ID: row.GetString(6),
 			// TODO:
@@ -808,7 +803,6 @@ func getBackfillJobs(sess *session, tblName, condition string, label string) ([]
 			return nil, errors.Trace(err)
 		}
 		jobs = append(jobs, &job)
-		// logutil.BgLogger().Info(fmt.Sprintf("get *****************************  no.%d, job cnt:%d, tp:%v, sql:%s, bf job:%#v", i, len(rows), row.GetInt64(4), condition, job.AbbrStr()))
 	}
 	logutil.BgLogger().Info(fmt.Sprintf("get *****************************  job cnt:%d, lable:%s, sql:%s", len(rows), label, condition))
 	return jobs, nil
@@ -851,11 +845,11 @@ func addBackfillHistoryJob(sess *session, backfillJobs []*model.BackfillJob) err
 		}
 
 		if i == 0 {
-			sql = sqlPrefix + fmt.Sprintf("(%d, %d, %d, '%s', '%s', %d, '%s', '%s', %d, '%s')",
+			sql = sqlPrefix + fmt.Sprintf("(%d, %d, %d, '%s', %d, %d, '%s', '%s', %d, '%s')",
 				bj.ID, bj.JobID, bj.EleID, bj.EleKey, bj.StoreID, bj.Tp, instanceID, bj.Instance_Lease, bj.State, mateByte)
 			continue
 		}
-		sql += fmt.Sprintf(", (%d, %d, %d, '%s', '%s', %d, '%s', '%s', %d, '%s')",
+		sql += fmt.Sprintf(", (%d, %d, %d, '%s', %d, %d, '%s', '%s', %d, '%s')",
 			bj.ID, bj.JobID, bj.EleID, bj.EleKey, bj.StoreID, bj.Tp, instanceID, bj.Instance_Lease, bj.State, mateByte)
 	}
 	logutil.BgLogger().Warn("add history *****************************   " + fmt.Sprintf("sql:%v", sql))

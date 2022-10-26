@@ -38,6 +38,7 @@ import (
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/ddl/syncer"
 	"github.com/pingcap/tidb/ddl/util"
+	"github.com/pingcap/tidb/ddl/util/gpool/spmc"
 	"github.com/pingcap/tidb/domain/infosync"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
@@ -225,7 +226,8 @@ type ddl struct {
 	// used in the concurrency ddl.
 	reorgWorkerPool      *workerPool
 	generalDDLWorkerPool *workerPool
-	backfillWorkerPool   *backfillWorkerPool
+	backfillCtxPool      *backfillWorkerPool
+	backfillWorkerPool   *spmc.Pool[*reorgBackfillTask, *backfillResult, int, *backfillWorker, *backfillWorkerContext]
 	// get notification if any DDL coming.
 	ddlJobCh chan struct{}
 }
@@ -643,7 +645,9 @@ func (d *ddl) prepareBackfillWorkers() {
 			return bk, nil
 		}
 	}
-	d.backfillWorkerPool = newBackfillWorkerPool(pools.NewResourcePool(workerFactory(), backfillWorkerCnt, backfillWorkerCnt, 0))
+	d.backfillCtxPool = newBackfillWorkerPool(pools.NewResourcePool(workerFactory(), backfillWorkerCnt, backfillWorkerCnt, 0))
+	workerCnt := int(variable.GetDDLReorgWorkerCounter())
+	d.backfillWorkerPool = spmc.NewSPMCPool[*reorgBackfillTask, *backfillResult, int, *backfillWorker, *backfillWorkerContext](int32(workerCnt))
 	d.backfillJobCh = make(chan struct{}, 1)
 	d.wg.Run(d.startDispatchBackfillJobsLoop)
 }
@@ -763,8 +767,11 @@ func (d *ddl) close() {
 	if d.reorgWorkerPool != nil {
 		d.reorgWorkerPool.close()
 	}
+	if d.backfillCtxPool != nil {
+		d.backfillCtxPool.close()
+	}
 	if d.backfillWorkerPool != nil {
-		d.backfillWorkerPool.close()
+		d.backfillWorkerPool.ReleaseAndWait()
 	}
 	if d.generalDDLWorkerPool != nil {
 		d.generalDDLWorkerPool.close()

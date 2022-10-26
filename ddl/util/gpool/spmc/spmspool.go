@@ -29,18 +29,18 @@ type Pool[T any, U any, C any, CT any, TF Context[CT]] struct {
 	workerCache   sync.Pool
 	lock          sync.Locker
 	workers       workerArray[T, U, C, CT, TF]
-	consumerFunc  func(T, C, CT) U
+	taskCh        chan *taskBox[T, U, C, CT, TF]
 	options       *Options
 	stopCh        chan struct{}
-	taskCh        chan *taskBox[T, U, C, CT, TF]
-	taskManager   *TaskManager[T, U, C, CT, TF]
+	consumerFunc  func(T, C, CT) U
 	cond          *sync.Cond
+	taskManager   TaskManager[T, U, C, CT, TF]
+	generator     atomic.Uint64 // it is to generate task id.
 	capacity      atomic.Int32
 	running       atomic.Int32
 	state         atomic.Int32
 	waiting       atomic.Int32
 	heartbeatDone atomic.Int32
-	generator     atomic.Uint64 // it is to generate task id.
 }
 
 // NewSPMCPool create a single producer, multiple consumer goroutine pool.
@@ -50,10 +50,11 @@ func NewSPMCPool[T any, U any, C any, CT any, TF Context[CT]](size int32, option
 		opts.ExpiryDuration = gpool.DefaultCleanIntervalTime
 	}
 	result := &Pool[T, U, C, CT, TF]{
-		taskCh:  make(chan *taskBox[T, U, C, CT, TF], 128),
-		stopCh:  make(chan struct{}),
-		lock:    gpool.NewSpinLock(),
-		options: opts,
+		taskCh:      make(chan *taskBox[T, U, C, CT, TF], 128),
+		stopCh:      make(chan struct{}),
+		lock:        gpool.NewSpinLock(),
+		taskManager: NewTaskManager[T, U, C, CT, TF](size),
+		options:     opts,
 	}
 	result.workerCache.New = func() interface{} {
 		return &goWorker[T, U, C, CT, TF]{

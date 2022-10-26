@@ -21,10 +21,10 @@ import (
 	"golang.org/x/sys/cpu"
 )
 
-const SHARD int = 8
+const shard int = 8
 
 func getShardID(id uint64) uint64 {
-	return id % uint64(SHARD)
+	return id % uint64(shard)
 }
 
 type TContainer[T any, U any, C any, CT any, TF Context[CT]] struct {
@@ -40,11 +40,16 @@ type TaskStatusContainer[T any, U any, C any, CT any, TF Context[CT]] struct {
 
 type TaskManager[T any, U any, C any, CT any, TF Context[CT]] struct {
 	task         []TaskStatusContainer[T, U, C, CT, TF]
-	conncurrency int
+	conncurrency int32
 }
 
-func NewTaskManager[T any, U any, C any, CT any, TF Context[CT]](con int) TaskManager[T, U, C, CT, TF] {
-	task := make([]TaskStatusContainer[T, U, C, CT, TF], 0, SHARD)
+func NewTaskManager[T any, U any, C any, CT any, TF Context[CT]](con int32) TaskManager[T, U, C, CT, TF] {
+	task := make([]TaskStatusContainer[T, U, C, CT, TF], shard)
+	for i := 0; i < shard; i++ {
+		task[i] = TaskStatusContainer[T, U, C, CT, TF]{
+			Status: make(map[uint64]*list.List),
+		}
+	}
 	return TaskManager[T, U, C, CT, TF]{
 		task:         task,
 		conncurrency: con,

@@ -385,7 +385,7 @@ type BackfillJob struct {
 	EleKey         []byte
 	Tp             BackfillType
 	State          JobState
-	StoreID        string
+	StoreID        int64
 	Instance_ID    string
 	Instance_Lease time.Time
 	Mate           *BackfillMeta
