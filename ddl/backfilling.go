@@ -49,26 +49,38 @@ import (
 	"github.com/pingcap/tidb/util/topsql"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
+	atomicutil "go.uber.org/atomic"
 	"go.uber.org/zap"
 )
 
 const (
 	InstanceLease       = 60 // s
 	updateInstanceLease = 40 // s
-	// TODO: control the behavior
-	EnableDistReorg  = true
-	emptyInstance    = ""
-	genTaskBatch     = 8192
-	minGenTaskBatch  = 1024
-	minDistTaskCnt   = 16
-	retrySQLTimes    = 3
-	retrySQLInterval = 500 // ms
+	emptyInstance       = ""
+	genTaskBatch        = 8192
+	minGenTaskBatch     = 1024
+	minDistTaskCnt      = 16
+	retrySQLTimes       = 3
+	retrySQLInterval    = 500 // ms
 )
 
-var backfillWorkerID int64
+// enableDistReorg means whether to enable dist reorg. The default is enable.
+// TODO: control the behavior
+var enableDistReorg = atomicutil.NewBool(true)
 
-func genBackfillWorkerID() int64 {
-	return atomic.AddInt64(&backfillWorkerID, 1)
+// DistReorgEnable enables dist reorg. It exports for testing.
+func DistReorgEnable() {
+	enableDistReorg.Store(true)
+}
+
+// DistReorgDisable disables dist reorg. It exports for testing.
+func DistReorgDisable() {
+	enableDistReorg.Store(false)
+}
+
+// IsDistReorgEnable indicates whether dist reorg enabled. It exports for testing.
+func IsDistReorgEnable() bool {
+	return enableDistReorg.Load()
 }
 
 type BackfillJob struct {
@@ -182,7 +194,7 @@ type backfillWorkerContext struct {
 	backfillWorkers []*backfillWorker
 }
 
-func newBackfillWorkerContext(d *ddl, tbl table.Table, jobCtx *JobContext, eleID int64, eleKey []byte, workerCnt int, batch int) *backfillWorkerContext {
+func newBackfillWorkerContext(d *ddl, tbl table.Table, jobCtx *JobContext, jobID, eleID int64, eleKey []byte, workerCnt int, batch int) *backfillWorkerContext {
 	if workerCnt <= 0 {
 		return nil
 	}
@@ -210,7 +222,7 @@ func newBackfillWorkerContext(d *ddl, tbl table.Table, jobCtx *JobContext, eleID
 			logutil.BgLogger().Fatal("dispatch backfill jobs loop get session failed, it should not happen, please try restart TiDB", zap.Error(err))
 		}
 		sess := NewSession(se)
-		bf, err := newAddIndexWorker(decodeColMap, newBackfillCtx(d.ddlCtx, sess, tbl, batch), jobCtx, eleID, eleKey)
+		bf, err := newAddIndexWorker(decodeColMap, newBackfillCtx(d.ddlCtx, sess, tbl, batch), jobCtx, jobID, eleID, eleKey)
 		seCtxs = append(seCtxs, se)
 		bws[i].backfiller = bf
 	}
@@ -252,10 +264,12 @@ func mergeBackfillCtxToResult(taskCtx *backfillTaskContext, result *backfillResu
 }
 
 type backfillCtx struct {
-	dCtx     *ddlCtx
-	sessCtx  sessionctx.Context
-	table    table.Table
-	batchCnt int
+	dCtx       *ddlCtx
+	reorgTp    model.ReorgType
+	sessCtx    sessionctx.Context
+	table      table.Table
+	schemaName string
+	batchCnt   int
 }
 
 func newBackfillCtx(ctx *ddlCtx, sessCtx sessionctx.Context, tbl table.Table, batchCnt int) *backfillCtx {
@@ -306,7 +320,7 @@ func closeBackfillWorkers(workers []*backfillWorker) {
 }
 
 func GetOracleTime(store kv.Storage) (time.Time, error) {
-	if !EnableDistReorg {
+	if !IsDistReorgEnable() {
 		return time.Time{}, nil
 	}
 
@@ -323,7 +337,7 @@ func GetLeaseGoTime(currTime time.Time, lease time.Duration) types.Time {
 }
 
 func (w *backfillWorker) updateLease(exec_id string, bJob *BackfillJob) error {
-	if !EnableDistReorg {
+	if !IsDistReorgEnable() {
 		return nil
 	}
 
@@ -337,7 +351,7 @@ func (w *backfillWorker) updateLease(exec_id string, bJob *BackfillJob) error {
 }
 
 func (w *backfillWorker) finishJob(bJob *BackfillJob) error {
-	if !EnableDistReorg {
+	if !IsDistReorgEnable() {
 		return nil
 	}
 
@@ -346,7 +360,7 @@ func (w *backfillWorker) finishJob(bJob *BackfillJob) error {
 }
 
 func (w *backfillWorker) releaseJob(bJob *BackfillJob) error {
-	if !EnableDistReorg {
+	if !IsDistReorgEnable() {
 		return nil
 	}
 
@@ -401,7 +415,7 @@ func (w *backfillWorker) handleBackfillTask(d *ddlCtx, task *reorgBackfillTask, 
 		// small ranges. This will cause the `redo` action in reorganization.
 		// So for added count and warnings collection, it is recommended to collect the statistics in every
 		// successfully committed small ranges rather than fetching it in the total result.
-		if !EnableDistReorg {
+		if !IsDistReorgEnable() {
 			rc := d.getReorgCtx(task.bfJob.JobID)
 			rc.increaseRowCount(int64(taskCtx.addedCount))
 			rc.mergeWarnings(taskCtx.warnings, taskCtx.warningsCount)
@@ -792,7 +806,7 @@ func setSessCtxLocation(sctx sessionctx.Context, info *reorgInfo) error {
 // The above operations are completed in a transaction.
 // Finally, update the concurrent processing of the total number of rows, and store the completed handle value.
 func (dc *ddlCtx) writePhysicalTableRecord(sessPool *sessionPool, t table.PhysicalTable, bfWorkerType model.BackfillType, reorgInfo *reorgInfo) error {
-	if EnableDistReorg {
+	if IsDistReorgEnable() {
 		sCtx, err := sessPool.get()
 		if err != nil {
 			return errors.Trace(err)
@@ -871,15 +885,21 @@ func (dc *ddlCtx) writePhysicalTableRecord(sessPool *sessionPool, t table.Physic
 
 			switch bfWorkerType {
 			case model.TypeAddIndexBackfill:
-				idxWorker := newAddIndexWorker(decodeColMap, newBackfillCtx(reorgInfo.d, sessCtx, t, int(variable.GetDDLReorgBatchSize())),
-					jc, reorgInfo.currElement.ID, reorgInfo.currElement.TypeKey)
+				backfilCtx := newBackfillCtx(reorgInfo.d, sessCtx, t, int(variable.GetDDLReorgBatchSize()))
+				idxWorker, err := newAddIndexWorker(decodeColMap, backfilCtx,
+					jc, job.ID, reorgInfo.currElement.ID, reorgInfo.currElement.TypeKey)
+				if err != nil {
+					return errors.Trace(err)
+				}
 				backfillWorker := newBackfillWorker(i, reorgInfo.d, idxWorker)
 				backfillWorkers = append(backfillWorkers, backfillWorker)
 				go backfillWorker.run(reorgInfo.d, idxWorker, job.ID, job.Query)
 			case model.TypeAddIndexMergeTmpWorker:
-				tmpIdxWorker := newMergeTempIndexWorker(sessCtx, i, t, reorgInfo, jc)
-				backfillWorkers = append(backfillWorkers, tmpIdxWorker.backfillWorker)
-				go tmpIdxWorker.backfillWorker.run(reorgInfo.d, tmpIdxWorker, job)
+				backfilCtx := newBackfillCtx(reorgInfo.d, sessCtx, t, int(variable.GetDDLReorgBatchSize()))
+				tmpIdxWorker := newMergeTempIndexWorker(backfilCtx, t, jc, reorgInfo.currElement.ID)
+				backfillWorker := newBackfillWorker(i, reorgInfo.d, tmpIdxWorker)
+				backfillWorkers = append(backfillWorkers, backfillWorker)
+				go backfillWorker.run(reorgInfo.d, tmpIdxWorker, job.ID, job.Query)
 			case model.TypeUpdateColumnBackfill:
 				// Setting InCreateOrAlterStmt tells the difference between SELECT casting and ALTER COLUMN casting.
 				sessCtx.GetSessionVars().StmtCtx.InCreateOrAlterStmt = true

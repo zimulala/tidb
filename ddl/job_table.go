@@ -163,7 +163,7 @@ func (d *ddl) getReorgJob(sess *session) (*model.Job, error) {
 }
 
 func (d *ddl) startDispatchBackfillJobsLoop() {
-	if !EnableDistReorg {
+	if !IsDistReorgEnable() {
 		return
 	}
 	d.backfillCtx.jobCtxMap = make(map[int64]*JobContext)
@@ -284,7 +284,7 @@ func (d *ddl) runBackfillJobs(sess *session, bJob *BackfillJob, jobCtx *JobConte
 
 	workerCnt := int(variable.GetDDLReorgWorkerCounter())
 	batch := int(variable.GetDDLReorgBatchSize())
-	bwCtx := newBackfillWorkerContext(d, tbl, jobCtx, bJob.EleID, bJob.EleKey, workerCnt, batch)
+	bwCtx := newBackfillWorkerContext(d, tbl, jobCtx, bJob.JobID, bJob.EleID, bJob.EleKey, workerCnt, batch)
 	d.backfillWorkerPool.SetConsumerFunc(func(task *reorgBackfillTask, _ int, bfWorker *backfillWorker) *backfillResult {
 		// To prevent different workers from using the same session.
 		// TODO: backfillWorkerPool is global, and bfWorkers is used in this function, we'd better do something make worker and job's ID can be matched.

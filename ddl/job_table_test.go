@@ -15,12 +15,14 @@
 package ddl_test
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/testkit"
@@ -227,7 +229,7 @@ func getIdxConditionStr(jobID, eleID int64) string {
 }
 
 func TestSimpleExecBackfillJobs(t *testing.T) {
-	if !ddl.EnableDistReorg {
+	if !ddl.IsDistReorgEnable() {
 		t.Skipf("test requires dist reorg")
 	}
 	store, dom := testkit.CreateMockStoreAndDomain(t)

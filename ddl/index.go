@@ -1187,7 +1187,7 @@ type addIndexWorker struct {
 	distinctCheckFlags []bool
 }
 
-func newAddIndexWorker(decodeColMap map[int64]decoder.Column, bfCtx *backfillCtx, jc *JobContext, eleID int64, eleTp []byte) (*addIndexWorker, error) {
+func newAddIndexWorker(decodeColMap map[int64]decoder.Column, bfCtx *backfillCtx, jc *JobContext, jobID, eleID int64, eleTp []byte) (*addIndexWorker, error) {
 	if !bytes.Equal(eleTp, meta.IndexElementKey) {
 		logutil.BgLogger().Error("[ddl] Element type for addIndexWorker incorrect", zap.String("jobQuery", jc.cacheSQL))
 		return nil, errors.Errorf("element type is not index, typeKey: %s", eleTp)
@@ -1198,16 +1198,17 @@ func newAddIndexWorker(decodeColMap map[int64]decoder.Column, bfCtx *backfillCtx
 	rowDecoder := decoder.NewRowDecoder(t, t.WritableCols(), decodeColMap)
 
 	var lwCtx *ingest.WriterContext
-	if job.ReorgMeta.ReorgTp == model.ReorgTypeLitMerge {
-		bc, ok := ingest.LitBackCtxMgr.Load(job.ID)
+	if bfCtx.reorgTp == model.ReorgTypeLitMerge {
+		bc, ok := ingest.LitBackCtxMgr.Load(jobID)
 		if !ok {
 			return nil, errors.Trace(errors.New(ingest.LitErrGetBackendFail))
 		}
-		ei, err := bc.EngMgr.Register(bc, job, eleID)
+		ei, err := bc.EngMgr.Register(bc, jobID, eleID, bfCtx.schemaName, t.Meta().Name.O)
 		if err != nil {
 			return nil, errors.Trace(errors.New(ingest.LitErrCreateEngineFail))
 		}
-		lwCtx, err = ei.NewWriterCtx(id)
+		// TODO: update this ID
+		lwCtx, err = ei.NewWriterCtx(int(backfillWorkerID.Add(1)))
 		if err != nil {
 			return nil, err
 		}
@@ -1379,7 +1380,7 @@ func (w *baseIndexWorker) fetchRowColVals(txn kv.Transaction, taskRange reorgBac
 	// taskDone means that the reorged handle is out of taskRange.endHandle.
 	taskDone := false
 	oprStartTime := startTime
-	err := iterateSnapshotRows(w.dCtx.jobContext(taskRange.bfJob.JobID), w.sessCtx.GetStore(), taskRange.priority, w.table, txn.StartTS(), taskRange.startKey, taskRange.endKey,
+	err := iterateSnapshotKeys(w.dCtx.jobContext(taskRange.bfJob.JobID), w.sessCtx.GetStore(), taskRange.priority, w.table.RecordPrefix(), txn.StartTS(), taskRange.startKey, taskRange.endKey,
 		func(handle kv.Handle, recordKey kv.Key, rawRow []byte) (bool, error) {
 			oprEndTime := time.Now()
 			logSlowOperations(oprEndTime.Sub(oprStartTime), "iterateSnapshotKeys in baseIndexWorker fetchRowColVals", 0)
