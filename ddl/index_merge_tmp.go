@@ -154,17 +154,17 @@ func (w *mergeIndexWorker) AddMetricInfo(cnt float64) {
 }
 
 func (w *mergeIndexWorker) GetTask() (*BackfillJob, error) {
-	panic("[ddl] update column worker GetTask function doesn't implement")
+	panic("[ddl] merge index worker GetTask function doesn't implement")
 	return nil, nil
 }
 
 func (w *mergeIndexWorker) UpdateTask(job *BackfillJob) error {
-	panic("[ddl] update column worker UpdateTask function doesn't implement")
+	panic("[ddl] merge index worker UpdateTask function doesn't implement")
 	return nil
 }
 
 func (w *mergeIndexWorker) FinishTask(job *BackfillJob) error {
-	panic("[ddl] update column worker FinishTask function doesn't implement")
+	panic("[ddl] merge index worker FinishTask function doesn't implement")
 	return nil
 }
 

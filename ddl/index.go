@@ -1771,7 +1771,7 @@ type cleanUpIndexWorker struct {
 	baseIndexWorker
 }
 
-func newCleanUpIndexWorker(dCtx *ddlCtx, sessCtx sessionctx.Context, t table.Table, decodeColMap map[int64]decoder.Column, jc *JobContext) *cleanUpIndexWorker {
+func newCleanUpIndexWorker(reorgInfo *reorgInfo, sessCtx sessionctx.Context, t table.Table, decodeColMap map[int64]decoder.Column, jc *JobContext) *cleanUpIndexWorker {
 	indexes := make([]table.Index, 0, len(t.Indices()))
 	rowDecoder := decoder.NewRowDecoder(t, t.WritableCols(), decodeColMap)
 	for _, index := range t.Indices() {
@@ -1781,7 +1781,7 @@ func newCleanUpIndexWorker(dCtx *ddlCtx, sessCtx sessionctx.Context, t table.Tab
 	}
 	return &cleanUpIndexWorker{
 		baseIndexWorker: baseIndexWorker{
-			backfillCtx:   newBackfillCtx(dCtx, sessCtx, t, int(variable.GetDDLReorgBatchSize())),
+			backfillCtx:   newBackfillCtx(reorgInfo.d, sessCtx, reorgInfo.ReorgMeta.ReorgTp, reorgInfo.SchemaName, t, int(variable.GetDDLReorgBatchSize())),
 			indexes:       indexes,
 			rowDecoder:    rowDecoder,
 			defaultVals:   make([]types.Datum, len(t.WritableCols())),

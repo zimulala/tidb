@@ -1148,7 +1148,7 @@ type updateColumnWorker struct {
 	jobContext *JobContext
 }
 
-func newUpdateColumnWorker(dCtx *ddlCtx, reorgInfo *reorgInfo, sessCtx sessionctx.Context, t table.Table, decodeColMap map[int64]decoder.Column, jc *JobContext) *updateColumnWorker {
+func newUpdateColumnWorker(reorgInfo *reorgInfo, sessCtx sessionctx.Context, t table.Table, decodeColMap map[int64]decoder.Column, jc *JobContext) *updateColumnWorker {
 	if !bytes.Equal(reorgInfo.currElement.TypeKey, meta.ColumnElementKey) {
 		logutil.BgLogger().Error("Element type for updateColumnWorker incorrect", zap.String("jobQuery", reorgInfo.Query),
 			zap.String("reorgInfo", reorgInfo.String()))
@@ -1164,7 +1164,7 @@ func newUpdateColumnWorker(dCtx *ddlCtx, reorgInfo *reorgInfo, sessCtx sessionct
 	}
 	rowDecoder := decoder.NewRowDecoder(t, t.WritableCols(), decodeColMap)
 	return &updateColumnWorker{
-		backfillCtx:   newBackfillCtx(dCtx, sessCtx, t, int(variable.GetDDLReorgBatchSize())),
+		backfillCtx:   newBackfillCtx(reorgInfo.d, sessCtx, reorgInfo.ReorgMeta.ReorgTp, reorgInfo.SchemaName, t, int(variable.GetDDLReorgBatchSize())),
 		oldColInfo:    oldCol,
 		newColInfo:    newCol,
 		metricCounter: metrics.BackfillTotalCounter.WithLabelValues(metrics.GenerateReorgLabel("update_col_rate", t.Meta().Name.L, t.Meta().Name.String())),

@@ -199,18 +199,24 @@ func (d *ddl) startDispatchBackfillJobsLoop() {
 	}
 }
 
-func (d *ddl) getTableByTxn(store kv.Storage, schemaID, tableID int64) (table.Table, error) {
+func (d *ddl) getTableByTxn(store kv.Storage, schemaID, tableID int64) (*model.DBInfo, table.Table, error) {
 	var tbl table.Table
+	var dbInfo *model.DBInfo
 	err := kv.RunInNewTxn(d.ctx, store, false, func(ctx context.Context, txn kv.Transaction) error {
 		t := newMetaWithQueueTp(txn, addIdxWorker)
-		tblInfo, err := getTableInfo(t, tableID, schemaID)
-		if err != nil {
-			return err
+		var err1 error
+		dbInfo, err1 = t.GetDatabase(schemaID)
+		if err1 != nil {
+			return errors.Trace(err1)
 		}
-		tbl, err = getTable(store, schemaID, tblInfo)
-		return err
+		tblInfo, err1 := getTableInfo(t, tableID, schemaID)
+		if err1 != nil {
+			return errors.Trace(err1)
+		}
+		tbl, err1 = getTable(store, schemaID, tblInfo)
+		return errors.Trace(err1)
 	})
-	return tbl, err
+	return dbInfo, tbl, err
 }
 
 func (d *ddl) loadBackfillJobAndRun() {
@@ -275,8 +281,7 @@ func (d *ddl) loadBackfillJobAndRun() {
 func (d *ddl) runBackfillJobs(sess *session, bJob *BackfillJob, jobCtx *JobContext) {
 	traceID := bJob.ID + 100
 	initializeTrace(traceID)
-	// TODO: lease
-	tbl, err := d.getTableByTxn(d.store, bJob.Mate.SchemaID, bJob.Mate.TableID)
+	dbInfo, tbl, err := d.getTableByTxn(d.store, bJob.Mate.SchemaID, bJob.Mate.TableID)
 	if err != nil {
 		logutil.BgLogger().Warn("[ddl] backfill job get table failed", zap.String("bfJob", bJob.AbbrStr()), zap.Error(err))
 		return
@@ -284,7 +289,7 @@ func (d *ddl) runBackfillJobs(sess *session, bJob *BackfillJob, jobCtx *JobConte
 
 	workerCnt := int(variable.GetDDLReorgWorkerCounter())
 	batch := int(variable.GetDDLReorgBatchSize())
-	bwCtx := newBackfillWorkerContext(d, tbl, jobCtx, bJob.JobID, bJob.EleID, bJob.EleKey, workerCnt, batch)
+	bwCtx := newBackfillWorkerContext(d, dbInfo.Name.O, tbl, jobCtx, bJob, workerCnt, batch)
 	d.backfillWorkerPool.SetConsumerFunc(func(task *reorgBackfillTask, _ int, bfWorker *backfillWorker) *backfillResult {
 		// To prevent different workers from using the same session.
 		// TODO: backfillWorkerPool is global, and bfWorkers is used in this function, we'd better do something make worker and job's ID can be matched.

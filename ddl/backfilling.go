@@ -194,7 +194,7 @@ type backfillWorkerContext struct {
 	backfillWorkers []*backfillWorker
 }
 
-func newBackfillWorkerContext(d *ddl, tbl table.Table, jobCtx *JobContext, jobID, eleID int64, eleKey []byte, workerCnt int, batch int) *backfillWorkerContext {
+func newBackfillWorkerContext(d *ddl, schemaName string, tbl table.Table, jobCtx *JobContext, bfJob *BackfillJob, workerCnt int, batch int) *backfillWorkerContext {
 	if workerCnt <= 0 {
 		return nil
 	}
@@ -222,8 +222,12 @@ func newBackfillWorkerContext(d *ddl, tbl table.Table, jobCtx *JobContext, jobID
 			logutil.BgLogger().Fatal("dispatch backfill jobs loop get session failed, it should not happen, please try restart TiDB", zap.Error(err))
 		}
 		sess := NewSession(se)
-		bf, err := newAddIndexWorker(decodeColMap, newBackfillCtx(d.ddlCtx, sess, tbl, batch), jobCtx, jobID, eleID, eleKey)
+		// TODO: set reorgTp
+		reorgTp := model.ReorgTypeNone
+		bfCtx := newBackfillCtx(d.ddlCtx, sess, reorgTp, schemaName, tbl, batch)
+		bf, err := newAddIndexWorker(decodeColMap, bfCtx, jobCtx, bfJob.JobID, bfJob.EleID, bfJob.EleKey)
 		seCtxs = append(seCtxs, se)
+		// TODO: make bf as a argument.
 		bws[i].backfiller = bf
 	}
 	return &backfillWorkerContext{backfillWorkers: bws, sessCtxs: seCtxs}
@@ -267,17 +271,20 @@ type backfillCtx struct {
 	dCtx       *ddlCtx
 	reorgTp    model.ReorgType
 	sessCtx    sessionctx.Context
-	table      table.Table
 	schemaName string
+	table      table.Table
 	batchCnt   int
 }
 
-func newBackfillCtx(ctx *ddlCtx, sessCtx sessionctx.Context, tbl table.Table, batchCnt int) *backfillCtx {
+func newBackfillCtx(ctx *ddlCtx, sessCtx sessionctx.Context, reorgTp model.ReorgType,
+	schemaName string, tbl table.Table, batchCnt int) *backfillCtx {
 	return &backfillCtx{
-		dCtx:     ctx,
-		sessCtx:  sessCtx,
-		table:    tbl,
-		batchCnt: batchCnt,
+		dCtx:       ctx,
+		sessCtx:    sessCtx,
+		reorgTp:    reorgTp,
+		schemaName: schemaName,
+		table:      tbl,
+		batchCnt:   batchCnt,
 	}
 }
 
@@ -883,10 +890,11 @@ func (dc *ddlCtx) writePhysicalTableRecord(sessPool *sessionPool, t table.Physic
 			sessCtx.GetSessionVars().StmtCtx.IgnoreZeroInDate = !sqlMode.HasStrictMode() || sqlMode.HasAllowInvalidDatesMode()
 			sessCtx.GetSessionVars().StmtCtx.NoZeroDate = sqlMode.HasStrictMode()
 
+			reorgBatchSize := int(variable.GetDDLReorgBatchSize())
 			switch bfWorkerType {
 			case model.TypeAddIndexBackfill:
-				backfilCtx := newBackfillCtx(reorgInfo.d, sessCtx, t, int(variable.GetDDLReorgBatchSize()))
-				idxWorker, err := newAddIndexWorker(decodeColMap, backfilCtx,
+				backfillCtx := newBackfillCtx(reorgInfo.d, sessCtx, reorgInfo.ReorgMeta.ReorgTp, job.SchemaName, t, reorgBatchSize)
+				idxWorker, err := newAddIndexWorker(decodeColMap, backfillCtx,
 					jc, job.ID, reorgInfo.currElement.ID, reorgInfo.currElement.TypeKey)
 				if err != nil {
 					return errors.Trace(err)
@@ -895,8 +903,8 @@ func (dc *ddlCtx) writePhysicalTableRecord(sessPool *sessionPool, t table.Physic
 				backfillWorkers = append(backfillWorkers, backfillWorker)
 				go backfillWorker.run(reorgInfo.d, idxWorker, job.ID, job.Query)
 			case model.TypeAddIndexMergeTmpWorker:
-				backfilCtx := newBackfillCtx(reorgInfo.d, sessCtx, t, int(variable.GetDDLReorgBatchSize()))
-				tmpIdxWorker := newMergeTempIndexWorker(backfilCtx, t, jc, reorgInfo.currElement.ID)
+				backfillCtx := newBackfillCtx(reorgInfo.d, sessCtx, reorgInfo.ReorgMeta.ReorgTp, job.SchemaName, t, reorgBatchSize)
+				tmpIdxWorker := newMergeTempIndexWorker(backfillCtx, t, jc, reorgInfo.currElement.ID)
 				backfillWorker := newBackfillWorker(i, reorgInfo.d, tmpIdxWorker)
 				backfillWorkers = append(backfillWorkers, backfillWorker)
 				go backfillWorker.run(reorgInfo.d, tmpIdxWorker, job.ID, job.Query)
@@ -904,12 +912,12 @@ func (dc *ddlCtx) writePhysicalTableRecord(sessPool *sessionPool, t table.Physic
 				// Setting InCreateOrAlterStmt tells the difference between SELECT casting and ALTER COLUMN casting.
 				sessCtx.GetSessionVars().StmtCtx.InCreateOrAlterStmt = true
 				// TODO: remove the argument of reorgInfo
-				updateWorker := newUpdateColumnWorker(reorgInfo.d, reorgInfo, sessCtx, t, decodeColMap, jc)
+				updateWorker := newUpdateColumnWorker(reorgInfo, sessCtx, t, decodeColMap, jc)
 				backfillWorker := newBackfillWorker(i, reorgInfo.d, updateWorker)
 				backfillWorkers = append(backfillWorkers, backfillWorker)
 				go backfillWorker.run(reorgInfo.d, updateWorker, job.ID, job.Query)
 			case model.TypeCleanUpIndexBackfill:
-				idxWorker := newCleanUpIndexWorker(reorgInfo.d, sessCtx, t, decodeColMap, jc)
+				idxWorker := newCleanUpIndexWorker(reorgInfo, sessCtx, t, decodeColMap, jc)
 				backfillWorker := newBackfillWorker(i, reorgInfo.d, idxWorker)
 				backfillWorkers = append(backfillWorkers, backfillWorker)
 				go backfillWorker.run(reorgInfo.d, idxWorker, job.ID, job.Query)
