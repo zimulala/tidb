@@ -54,6 +54,8 @@ var (
 	ddlWorkerID = atomicutil.NewInt32(0)
 	// backfillWorkerID is used for generating the next backfill worker ID.
 	backfillWorkerID = atomicutil.NewInt32(0)
+	// backfillContextID is used for generating the next backfill context ID.
+	backfillContextID = atomicutil.NewInt32(0)
 	// WaitTimeWhenErrorOccurred is waiting interval when processing DDL jobs encounter errors.
 	WaitTimeWhenErrorOccurred = int64(1 * time.Second)
 

@@ -105,7 +105,7 @@ func (bj *BackfillJob) IsRunning() bool {
 }
 
 func (bj *BackfillJob) AbbrStr() string {
-	return fmt.Sprintf("ID:%d, JobID:%d, EleID:%d, EleKey:%v, Type:%s, State:%s, Instance_ID:%s, Instance_Lease:%s",
+	return fmt.Sprintf("ID:%d, JobID:%d, EleID:%d, EleKey:%s, Type:%s, State:%s, Instance_ID:%s, Instance_Lease:%s",
 		bj.ID, bj.JobID, bj.EleID, bj.EleKey, bj.Tp, bj.State, bj.Instance_ID, bj.Instance_Lease)
 }
 
@@ -190,13 +190,14 @@ type backfillTaskContext struct {
 
 type backfillWorkerContext struct {
 	currID          int
+	mu              sync.Mutex
 	sessCtxs        []sessionctx.Context
 	backfillWorkers []*backfillWorker
 }
 
-func newBackfillWorkerContext(d *ddl, schemaName string, tbl table.Table, jobCtx *JobContext, bfJob *BackfillJob, workerCnt int, batch int) *backfillWorkerContext {
+func newBackfillWorkerContext(d *ddl, schemaName string, tbl table.Table, jobCtx *JobContext, bfJob *BackfillJob, workerCnt int, batch int) (*backfillWorkerContext, error) {
 	if workerCnt <= 0 {
-		return nil
+		return nil, nil
 	}
 
 	sess, err := d.sessPool.get()
@@ -207,35 +208,45 @@ func newBackfillWorkerContext(d *ddl, schemaName string, tbl table.Table, jobCtx
 	decodeColMap, err := makeupDecodeColMap(sess, tbl.(table.PhysicalTable))
 	if err != nil {
 		logutil.BgLogger().Debug(fmt.Sprintf("[ddl] make up decode col map failed"), zap.Error(err))
-		return nil
+		return nil, errors.Trace(err)
 	}
 
 	bws, err := d.backfillCtxPool.batchGet(workerCnt)
 	if err != nil || len(bws) == 0 {
 		logutil.BgLogger().Debug(fmt.Sprintf("[ddl] no backfill worker available now"), zap.Error(err))
-		return nil
+		return nil, errors.Trace(err)
 	}
 	seCtxs := make([]sessionctx.Context, 0, len(bws))
 	for i := 0; i < len(bws); i++ {
 		se, err := d.sessPool.get()
 		if err != nil {
-			logutil.BgLogger().Fatal("dispatch backfill jobs loop get session failed, it should not happen, please try restart TiDB", zap.Error(err))
+			logutil.BgLogger().Fatal("[ddl] dispatch backfill jobs loop get session failed, it should not happen, please try restart TiDB", zap.Error(err))
 		}
 		sess := NewSession(se)
 		// TODO: set reorgTp
-		reorgTp := model.ReorgTypeNone
+		reorgTp := model.ReorgTypeLitMerge
 		bfCtx := newBackfillCtx(d.ddlCtx, sess, reorgTp, schemaName, tbl, batch)
 		bf, err := newAddIndexWorker(decodeColMap, bfCtx, jobCtx, bfJob.JobID, bfJob.EleID, bfJob.EleKey)
+		if err != nil {
+			logutil.BgLogger().Fatal("[ddl] dispatch backfill jobs loop new add index worker failed, it should not happen, please try restart TiDB", zap.Error(err))
+			return nil, errors.Trace(err)
+		}
 		seCtxs = append(seCtxs, se)
 		// TODO: make bf as a argument.
 		bws[i].backfiller = bf
 	}
-	return &backfillWorkerContext{backfillWorkers: bws, sessCtxs: seCtxs}
+	return &backfillWorkerContext{backfillWorkers: bws, sessCtxs: seCtxs}, nil
 }
 
 func (bwCtx *backfillWorkerContext) GetContext() *backfillWorker {
-	bw := bwCtx.backfillWorkers[bwCtx.currID%len(bwCtx.backfillWorkers)]
+	bwCtx.mu.Lock()
+	offset := bwCtx.currID % len(bwCtx.backfillWorkers)
+	bw := bwCtx.backfillWorkers[offset]
+	bwStr := fmt.Sprintf("%#v", bw)
+	logutil.BgLogger().Warn("[ddl] GetContext", zap.Int("workers", len(bwCtx.backfillWorkers)), zap.Int("currID", bwCtx.currID), zap.Int("offset", offset),
+		zap.String("bw", bwStr))
 	bwCtx.currID++
+	bwCtx.mu.Unlock()
 	return bw
 }
 
@@ -335,7 +346,7 @@ func GetOracleTime(store kv.Storage) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, errors.Trace(err)
 	}
-	return oracle.GetTimeFromTS(currentVer.Ver), nil
+	return oracle.GetTimeFromTS(currentVer.Ver).UTC(), nil
 }
 
 func GetLeaseGoTime(currTime time.Time, lease time.Duration) types.Time {

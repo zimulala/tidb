@@ -26,6 +26,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
+	"github.com/pingcap/tidb/ddl/ingest"
 	ddlutil "github.com/pingcap/tidb/ddl/util"
 	"github.com/pingcap/tidb/ddl/util/gpool/spmc"
 	"github.com/pingcap/tidb/kv"
@@ -262,8 +263,12 @@ func (d *ddl) loadBackfillJobAndRun() {
 	if !ok {
 		jobCtx = NewJobContextWithArgs(bJob.Mate.Query)
 		d.backfillCtx.jobCtxMap[bJob.JobID] = jobCtx
+		d.backfillCtx.Unlock()
+	} else {
+		logutil.BgLogger().Warn("00 ******** load backfill job and run reorg jos exit", zap.Int64("job id", bJob.JobID))
+		d.backfillCtx.Unlock()
+		return
 	}
-	d.backfillCtx.Unlock()
 
 	d.wg.Run(func() {
 		defer func() {
@@ -273,23 +278,66 @@ func (d *ddl) loadBackfillJobAndRun() {
 			logutil.BgLogger().Warn("00 ******** load backfill job and run reorg jobs finished", zap.Int64("job id", bJob.JobID))
 		}()
 
+		// TODO: Consider redo it.
+		bc, ok := ingest.LitBackCtxMgr.Load(bJob.JobID)
+		if ok && bc.Done() {
+			logutil.BgLogger().Warn("[ddl] lightning loaded")
+			return
+		}
+		// if !ok && job.SnapshotVer != 0 {
+		// The owner is crashed or changed, we need to restart the backfill.
+		// job.SnapshotVer = 0
+		// return
+		// }
+		// TODO: set indexInfo.Unique
+		isUnique := false
+		bc, err = ingest.LitBackCtxMgr.Register(d.ctx, isUnique, bJob.JobID, bJob.Mate.SQLMode)
+		if err != nil {
+			//tryFallbackToTxnMerge(job, err)
+			logutil.BgLogger().Warn("[ddl] lightning register error", zap.Error(err))
+			return
+		}
+
 		logutil.BgLogger().Warn("00 ******** load backfill job and run reorg jobs start", zap.Int64("job id", bJob.JobID))
-		d.runBackfillJobs(sess, bJob, jobCtx)
+		tbl, err := d.runBackfillJobs(sess, bJob, jobCtx)
+		if err != nil {
+			logutil.BgLogger().Warn("[ddl] runBackfillJobs error", zap.Error(err))
+			ingest.LitBackCtxMgr.Unregister(bJob.JobID)
+			// tryFallbackToTxnMerge(job, err)
+			return
+		}
+
+		err = bc.FinishImport(bJob.EleID, isUnique, tbl)
+		if err != nil {
+			if kv.ErrKeyExists.Equal(err) {
+				logutil.BgLogger().Warn("[ddl] import index duplicate key, convert job to rollback", zap.String("job", bJob.AbbrStr()), zap.Error(err))
+				// ver, err = convertAddIdxJob2RollbackJob(d, t, job, tbl.Meta(), indexInfo, err)
+			} else {
+				logutil.BgLogger().Warn("[ddl] lightning import error", zap.Error(err))
+				// tryFallbackToTxnMerge(job, err)
+			}
+			ingest.LitBackCtxMgr.Unregister(bJob.JobID)
+			return
+		}
+		bc.SetDone()
 	})
 }
 
-func (d *ddl) runBackfillJobs(sess *session, bJob *BackfillJob, jobCtx *JobContext) {
+func (d *ddl) runBackfillJobs(sess *session, bJob *BackfillJob, jobCtx *JobContext) (table.Table, error) {
 	traceID := bJob.ID + 100
 	initializeTrace(traceID)
 	dbInfo, tbl, err := d.getTableByTxn(d.store, bJob.Mate.SchemaID, bJob.Mate.TableID)
 	if err != nil {
 		logutil.BgLogger().Warn("[ddl] backfill job get table failed", zap.String("bfJob", bJob.AbbrStr()), zap.Error(err))
-		return
+		return nil, err
 	}
 
 	workerCnt := int(variable.GetDDLReorgWorkerCounter())
 	batch := int(variable.GetDDLReorgBatchSize())
-	bwCtx := newBackfillWorkerContext(d, dbInfo.Name.O, tbl, jobCtx, bJob, workerCnt, batch)
+	bwCtx, err := newBackfillWorkerContext(d, dbInfo.Name.O, tbl, jobCtx, bJob, workerCnt, batch)
+	if err != nil {
+		return nil, err
+	}
 	d.backfillWorkerPool.SetConsumerFunc(func(task *reorgBackfillTask, _ int, bfWorker *backfillWorker) *backfillResult {
 		// To prevent different workers from using the same session.
 		// TODO: backfillWorkerPool is global, and bfWorkers is used in this function, we'd better do something make worker and job's ID can be matched.
@@ -362,6 +410,7 @@ func (d *ddl) runBackfillJobs(sess *session, bJob *BackfillJob, jobCtx *JobConte
 	for _, w := range bwCtx.backfillWorkers {
 		d.backfillCtxPool.put(w)
 	}
+	return tbl, nil
 }
 
 func (d *ddl) startDispatchLoop() {

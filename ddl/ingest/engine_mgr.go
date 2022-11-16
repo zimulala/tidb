@@ -57,6 +57,7 @@ func (m *engineManager) Register(bc *BackendContext, jobID, indexID int64, Schem
 		cfg := generateLocalEngineConfig(jobID, SchemaName, TableName)
 		openedEn, err := bc.backend.OpenEngine(bc.ctx, cfg, TableName, int32(indexID))
 		if err != nil {
+			logutil.BgLogger().Warn("[ddl] register open engine failed", zap.Error(err))
 			return nil, errors.New(LitErrCreateEngineFail)
 		}
 		id := openedEn.GetEngineUUID()

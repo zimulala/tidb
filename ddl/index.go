@@ -777,7 +777,7 @@ func doReorgWorkForCreateIndexMultiSchema(w *worker, d *ddlCtx, t *meta.Meta, jo
 	return true, ver, err
 }
 
-func doReorgWorkForCreateIndex(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job,
+func doReorgWorkForCreateIndexCopy(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job,
 	tbl table.Table, indexInfo *model.IndexInfo) (done bool, ver int64, err error) {
 	bfProcess := pickBackfillType(w, job)
 	if !bfProcess.NeedMergeProcess() {
@@ -825,6 +825,56 @@ func doReorgWorkForCreateIndex(w *worker, d *ddlCtx, t *meta.Meta, job *model.Jo
 				return false, ver, errors.Trace(err)
 			}
 			bc.SetDone()
+		case model.ReorgTypeTxnMerge:
+			done, ver, err = runReorgJobAndHandleErr(w, d, t, job, tbl, indexInfo, false)
+			if err != nil || !done {
+				return false, ver, errors.Trace(err)
+			}
+		}
+		indexInfo.BackfillState = model.BackfillStateReadyToMerge
+		ver, err = updateVersionAndTableInfo(d, t, job, tbl.Meta(), true)
+		return false, ver, errors.Trace(err)
+	case model.BackfillStateReadyToMerge:
+		logutil.BgLogger().Info("[ddl] index backfill state ready to merge", zap.Int64("job ID", job.ID),
+			zap.String("table", tbl.Meta().Name.O), zap.String("index", indexInfo.Name.O))
+		indexInfo.BackfillState = model.BackfillStateMerging
+		if bfProcess == model.ReorgTypeLitMerge {
+			ingest.LitBackCtxMgr.Unregister(job.ID)
+		}
+		job.SnapshotVer = 0 // Reset the snapshot version for merge index reorg.
+		ver, err = updateVersionAndTableInfo(d, t, job, tbl.Meta(), true)
+		return false, ver, errors.Trace(err)
+	case model.BackfillStateMerging:
+		done, ver, err = runReorgJobAndHandleErr(w, d, t, job, tbl, indexInfo, true)
+		if !done {
+			return false, ver, err
+		}
+		indexInfo.BackfillState = model.BackfillStateInapplicable // Prevent double-write on this index.
+		return true, ver, nil
+	default:
+		return false, 0, dbterror.ErrInvalidDDLState.GenWithStackByArgs("backfill", indexInfo.BackfillState)
+	}
+}
+
+func doReorgWorkForCreateIndex(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job,
+	tbl table.Table, indexInfo *model.IndexInfo) (done bool, ver int64, err error) {
+	bfProcess := pickBackfillType(w, job)
+	if !bfProcess.NeedMergeProcess() {
+		return runReorgJobAndHandleErr(w, d, t, job, tbl, indexInfo, false)
+	}
+	switch indexInfo.BackfillState {
+	case model.BackfillStateRunning:
+		logutil.BgLogger().Info("[ddl] index backfill state running", zap.Int64("job ID", job.ID),
+			zap.String("table", tbl.Meta().Name.O), zap.String("index", indexInfo.Name.O))
+		switch bfProcess {
+		case model.ReorgTypeLitMerge:
+			done, ver, err = runReorgJobAndHandleErr(w, d, t, job, tbl, indexInfo, false)
+			if err != nil {
+				return false, ver, errors.Trace(err)
+			}
+			if !done {
+				return false, ver, nil
+			}
 		case model.ReorgTypeTxnMerge:
 			done, ver, err = runReorgJobAndHandleErr(w, d, t, job, tbl, indexInfo, false)
 			if err != nil || !done {
@@ -1205,6 +1255,7 @@ func newAddIndexWorker(decodeColMap map[int64]decoder.Column, bfCtx *backfillCtx
 		}
 		ei, err := bc.EngMgr.Register(bc, jobID, eleID, bfCtx.schemaName, t.Meta().Name.O)
 		if err != nil {
+			logutil.BgLogger().Warn("[ddl] new addIndexWorker register failed", zap.Error(err))
 			return nil, errors.Trace(errors.New(ingest.LitErrCreateEngineFail))
 		}
 		// TODO: update this ID
@@ -1536,6 +1587,9 @@ func (w *addIndexWorker) BackfillDataInTxn(handleRange reorgBackfillTask) (taskC
 		}
 	})
 
+	if w.index == nil {
+		logutil.BgLogger().Warn(fmt.Sprintf("[ddl] backfill data in txn, w:%#v", w))
+	}
 	needMergeTmpIdx := w.index.Meta().BackfillState != model.BackfillStateInapplicable
 	ctx := kv.WithInternalSourceType(context.Background(), w.jobContext.ddlJobSourceType())
 	sessVars := w.sessCtx.GetSessionVars()
@@ -1621,7 +1675,7 @@ func (w *addIndexWorker) BackfillDataInTxn(handleRange reorgBackfillTask) (taskC
 		sessVars.StmtCtx.MergeExecDetails(nil, commitDetail)
 	}
 	execDetail := sessVars.StmtCtx.GetExecDetails()
-	logSlowOperations(time.Since(oprStartTime), "AddIndexBackfillDataInTxn "+execDetail.String(), 20)
+	logSlowOperations(time.Since(oprStartTime), "AddIndexBackfillDataInTxn "+execDetail.String(), 200)
 	// logSlowOperations(time.Since(oprStartTime), "AddIndexBackfillDataInTxn", 3000)
 
 	return
