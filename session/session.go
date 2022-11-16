@@ -2880,10 +2880,10 @@ func BootstrapSession(store kv.Storage) (*domain.Domain, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = InitDDLJobTables(store, meta.DDLTableVersion3)
-	if err != nil {
-		return nil, err
-	}
+	// err = InitDDLJobTables(store, meta.DDLTableVersion3)
+	// if err != nil {
+	// 	return nil, err
+	// }
 	ver := getStoreBootstrapVersion(store)
 	if ver == notBootstrapped {
 		runInBootstrapSession(store, bootstrap)

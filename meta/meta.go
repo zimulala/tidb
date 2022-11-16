@@ -570,7 +570,7 @@ func (m *Meta) SetDDLTables(ddlTableVersion string) error {
 
 // SetMDLTables write a key into storage.
 func (m *Meta) SetMDLTables() error {
-	err := m.txn.Set(mDDLTableVersion, []byte(DDLTableVersion2))
+	err := m.txn.Set(mDDLTableVersion, []byte(DDLTableVersion3))
 	return errors.Trace(err)
 }
 
@@ -625,7 +625,7 @@ func (m *Meta) CheckMDLTableExists() (bool, error) {
 	if err != nil {
 		return false, errors.Trace(err)
 	}
-	return bytes.Equal(v, []byte(DDLTableVersion2)), nil
+	return bytes.Equal(v, []byte(DDLTableVersion3)), nil
 }
 
 // SetConcurrentDDL set the concurrent DDL flag.
