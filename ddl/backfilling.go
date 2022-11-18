@@ -220,7 +220,7 @@ func newBackfillWorkerContext(d *ddl, schemaName string, tbl table.Table, jobCtx
 	for i := 0; i < len(bws); i++ {
 		se, err := d.sessPool.get()
 		if err != nil {
-			logutil.BgLogger().Fatal("[ddl] dispatch backfill jobs loop get session failed, it should not happen, please try restart TiDB", zap.Error(err))
+			logutil.BgLogger().Error("[ddl] dispatch backfill jobs loop get session failed, it should not happen, please try restart TiDB", zap.Error(err))
 		}
 		sess := NewSession(se)
 		// TODO: set reorgTp
@@ -228,7 +228,7 @@ func newBackfillWorkerContext(d *ddl, schemaName string, tbl table.Table, jobCtx
 		bfCtx := newBackfillCtx(d.ddlCtx, sess, reorgTp, schemaName, tbl, batch)
 		bf, err := newAddIndexWorker(decodeColMap, bfCtx, jobCtx, bfJob.JobID, bfJob.EleID, bfJob.EleKey)
 		if err != nil {
-			logutil.BgLogger().Fatal("[ddl] dispatch backfill jobs loop new add index worker failed, it should not happen, please try restart TiDB", zap.Error(err))
+			logutil.BgLogger().Error("[ddl] dispatch backfill jobs loop new add index worker failed, it should not happen, please try restart TiDB", zap.Error(err))
 			return nil, errors.Trace(err)
 		}
 		seCtxs = append(seCtxs, se)
