@@ -265,7 +265,7 @@ func (d *ddl) loadBackfillJobAndRun() {
 		d.backfillCtx.jobCtxMap[bJob.JobID] = jobCtx
 		d.backfillCtx.Unlock()
 	} else {
-		logutil.BgLogger().Warn("00 ******** load backfill job and run reorg jos exit", zap.Int64("job id", bJob.JobID))
+		logutil.BgLogger().Warn("00 ******** load backfill job and run reorg jobs exit", zap.Int64("job id", bJob.JobID))
 		d.backfillCtx.Unlock()
 		return
 	}
@@ -307,6 +307,7 @@ func (d *ddl) loadBackfillJobAndRun() {
 			return
 		}
 
+		finish := injectSpan(bJob.JobID, "finish-import")
 		err = bc.FinishImport(bJob.EleID, isUnique, tbl)
 		if err != nil {
 			if kv.ErrKeyExists.Equal(err) {
@@ -319,7 +320,14 @@ func (d *ddl) loadBackfillJobAndRun() {
 			ingest.LitBackCtxMgr.Unregister(bJob.JobID)
 			return
 		}
+		ingest.LitBackCtxMgr.Unregister(bJob.ID)
+		finish()
 		bc.SetDone()
+
+		details := collectTrace(bJob.JobID)
+		logutil.BgLogger().Info("[ddl] &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&--------------------------  finish backfill jobs",
+			zap.Int64("job ID", bJob.JobID), zap.String("time details", details))
+
 	})
 }
 
@@ -399,10 +407,6 @@ func (d *ddl) runBackfillJobs(sess *session, bJob *BackfillJob, jobCtx *JobConte
 	control.Wait()
 	close(exitCh)
 	wg.Wait()
-
-	details := collectTrace(traceID)
-	logutil.BgLogger().Info("[ddl] &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&--------------------------  finish backfill jobs",
-		zap.Int64("job ID", bJob.JobID), zap.String("time details", details))
 
 	for _, s := range bwCtx.sessCtxs {
 		d.sessPool.put(s)

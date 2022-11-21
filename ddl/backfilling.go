@@ -251,8 +251,10 @@ func (bwCtx *backfillWorkerContext) GetContext() *backfillWorker {
 }
 
 type reorgBackfillTask struct {
-	bfJob           *BackfillJob
-	sqlQuery        string
+	bfJob    *BackfillJob
+	sqlQuery string
+	// TODO: remove it after remove the function of run.
+	jobID           int64
 	physicalTableID int64
 	startKey        kv.Key
 	endKey          kv.Key
@@ -388,7 +390,7 @@ func (w *backfillWorker) releaseJob(bJob *BackfillJob) error {
 
 // handleBackfillTask backfills range [task.startHandle, task.endHandle) handle's index to table.
 func (w *backfillWorker) handleBackfillTask(d *ddlCtx, task *reorgBackfillTask, bf backfiller) *backfillResult {
-	traceID := task.bfJob.JobID + 100
+	// traceID := task.bfJob.JobID + 100
 	handleRange := *task
 	result := &backfillResult{
 		err:        nil,
@@ -402,20 +404,24 @@ func (w *backfillWorker) handleBackfillTask(d *ddlCtx, task *reorgBackfillTask, 
 
 	cnt := 0
 	batchStartTime := time.Now()
+	jobID := task.jobID
+	if task.bfJob != nil {
+		jobID = task.bfJob.JobID
+	}
 	for {
 		// Give job chance to be canceled, if we not check it here,
 		// if there is panic in bf.BackfillDataInTxn we will never cancel the job.
 		// Because reorgRecordTask may run a long time,
 		// we should check whether this ddl job is still runnable.
-		err := d.isReorgRunnable(task.bfJob.JobID, 1)
+		err := d.isReorgRunnable(jobID, 1)
 		if err != nil {
 			result.err = err
 			return result
 		}
 
-		finish := injectSpan(traceID, fmt.Sprintf("handle-task-id-%d-no.%d", task.bfJob.ID, cnt))
+		// finish := injectSpan(traceID, fmt.Sprintf("handle-task-id-%d-no.%d", task.bfJob.ID, cnt))
 		taskCtx, err := bf.BackfillDataInTxn(handleRange)
-		finish()
+		// finish()
 		cnt++
 		if err != nil {
 			result.err = err
@@ -434,7 +440,7 @@ func (w *backfillWorker) handleBackfillTask(d *ddlCtx, task *reorgBackfillTask, 
 		// So for added count and warnings collection, it is recommended to collect the statistics in every
 		// successfully committed small ranges rather than fetching it in the total result.
 		if !IsDistReorgEnable() {
-			rc := d.getReorgCtx(task.bfJob.JobID)
+			rc := d.getReorgCtx(jobID)
 			rc.increaseRowCount(int64(taskCtx.addedCount))
 			rc.mergeWarnings(taskCtx.warnings, taskCtx.warningsCount)
 		}
@@ -452,21 +458,27 @@ func (w *backfillWorker) handleBackfillTask(d *ddlCtx, task *reorgBackfillTask, 
 
 		handleRange.startKey = taskCtx.nextKey
 		if taskCtx.done {
-			task.bfJob.Mate.FinishTS = taskCtx.finishTS
 			break
 		}
 
-		// TODO: Adjust the updating lease frequency by batch processing time carefully.
-		if time.Since(batchStartTime) < updateInstanceLease*time.Second {
-			continue
-		}
-		batchStartTime = time.Now()
-		task.bfJob.Mate.CurrKey = result.nextKey
-		if err := w.updateLease(w.uuid, task.bfJob); err != nil {
-			logutil.BgLogger().Info("[ddl] handle backfill task, update lease failed",
-				zap.Int("workerID", w.id), zap.String("task", task.String()), zap.String("bj", task.bfJob.AbbrStr()), zap.Error(err))
-			result.err = err
-			return result
+		if task.bfJob != nil {
+			if taskCtx.done {
+				task.bfJob.Mate.FinishTS = taskCtx.finishTS
+				break
+			}
+
+			// TODO: Adjust the updating lease frequency by batch processing time carefully.
+			if time.Since(batchStartTime) < updateInstanceLease*time.Second {
+				continue
+			}
+			batchStartTime = time.Now()
+			task.bfJob.Mate.CurrKey = result.nextKey
+			if err := w.updateLease(w.uuid, task.bfJob); err != nil {
+				logutil.BgLogger().Info("[ddl] handle backfill task, update lease failed",
+					zap.Int("workerID", w.id), zap.String("task", task.String()), zap.String("bj", task.bfJob.AbbrStr()), zap.Error(err))
+				result.err = err
+				return result
+			}
 		}
 	}
 	logutil.BgLogger().Info("[ddl] backfill worker finish task",
@@ -720,6 +732,7 @@ func getBatchTasks(t table.Table, reorgInfo *reorgInfo, kvRanges []kv.KeyRange, 
 
 		task := &reorgBackfillTask{
 			physicalTableID: physicalTableID,
+			jobID:           reorgInfo.Job.ID,
 			startKey:        keyRange.StartKey,
 			endKey:          endKey,
 			priority:        reorgInfo.Priority,
@@ -824,7 +837,7 @@ func setSessCtxLocation(sctx sessionctx.Context, info *reorgInfo) error {
 // The above operations are completed in a transaction.
 // Finally, update the concurrent processing of the total number of rows, and store the completed handle value.
 func (dc *ddlCtx) writePhysicalTableRecord(sessPool *sessionPool, t table.PhysicalTable, bfWorkerType model.BackfillType, reorgInfo *reorgInfo) error {
-	if IsDistReorgEnable() {
+	if IsDistReorgEnable() && bfWorkerType == model.TypeAddIndexBackfill {
 		sCtx, err := sessPool.get()
 		if err != nil {
 			return errors.Trace(err)
