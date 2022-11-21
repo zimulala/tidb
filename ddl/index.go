@@ -51,7 +51,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
-	tikvutil "github.com/tikv/client-go/v2/util"
 	"go.uber.org/zap"
 	"golang.org/x/exp/slices"
 )
@@ -888,9 +887,6 @@ func doReorgWorkForCreateIndex(w *worker, d *ddlCtx, t *meta.Meta, job *model.Jo
 		logutil.BgLogger().Info("[ddl] index backfill state ready to merge", zap.Int64("job ID", job.ID),
 			zap.String("table", tbl.Meta().Name.O), zap.String("index", indexInfo.Name.O))
 		indexInfo.BackfillState = model.BackfillStateMerging
-		if bfProcess == model.ReorgTypeLitMerge {
-			ingest.LitBackCtxMgr.Unregister(job.ID)
-		}
 		job.SnapshotVer = 0 // Reset the snapshot version for merge index reorg.
 		ver, err = updateVersionAndTableInfo(d, t, job, tbl.Meta(), true)
 		return false, ver, errors.Trace(err)
@@ -1592,10 +1588,10 @@ func (w *addIndexWorker) BackfillDataInTxn(handleRange reorgBackfillTask) (taskC
 	}
 	needMergeTmpIdx := w.index.Meta().BackfillState != model.BackfillStateInapplicable
 	ctx := kv.WithInternalSourceType(context.Background(), w.jobContext.ddlJobSourceType())
-	sessVars := w.sessCtx.GetSessionVars()
-	sessVars.StmtCtx.ResetForRetry()
-	var commitDetail *tikvutil.CommitDetails
-	ctx = context.WithValue(ctx, tikvutil.CommitDetailCtxKey, &commitDetail)
+	// sessVars := w.sessCtx.GetSessionVars()
+	// sessVars.StmtCtx.ResetForRetry()
+	// var commitDetail *tikvutil.CommitDetails
+	// ctx = context.WithValue(ctx, tikvutil.CommitDetailCtxKey, &commitDetail)
 	oprStartTime := time.Now()
 	errInTxn = kv.RunInNewTxn(ctx, w.sessCtx.GetStore(), true, func(ctx context.Context, txn kv.Transaction) error {
 		taskCtx.finishTS = txn.StartTS()
@@ -1671,12 +1667,12 @@ func (w *addIndexWorker) BackfillDataInTxn(handleRange reorgBackfillTask) (taskC
 		return nil
 	})
 
-	if commitDetail != nil {
-		sessVars.StmtCtx.MergeExecDetails(nil, commitDetail)
-	}
-	execDetail := sessVars.StmtCtx.GetExecDetails()
-	logSlowOperations(time.Since(oprStartTime), "AddIndexBackfillDataInTxn "+execDetail.String(), 200)
-	// logSlowOperations(time.Since(oprStartTime), "AddIndexBackfillDataInTxn", 3000)
+	// if commitDetail != nil {
+	// 	sessVars.StmtCtx.MergeExecDetails(nil, commitDetail)
+	// }
+	// execDetail := sessVars.StmtCtx.GetExecDetails()
+	// logSlowOperations(time.Since(oprStartTime), "AddIndexBackfillDataInTxn "+execDetail.String(), 200)
+	logSlowOperations(time.Since(oprStartTime), "AddIndexBackfillDataInTxn", 3000)
 
 	return
 }
