@@ -1312,7 +1312,7 @@ func (w *baseIndexWorker) UpdateTask(bJob *BackfillJob) error {
 		if jobs[0].Instance_ID != bJob.Instance_ID {
 			return dbterror.ErrDDLJobNotFound.FastGenByArgs(fmt.Sprintf("get a backfill bJob %v, want instance ID %s", jobs[0], bJob.Instance_ID))
 		}
-		err = updateBackfillJob(sess, bJob, "update_backfill_task")
+		err = updateBackfillJob(sess, BackfillTable, bJob, "update_backfill_task")
 	}
 
 	return err
