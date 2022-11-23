@@ -324,10 +324,13 @@ func (d *ddl) loadBackfillJobAndRun() {
 		finish()
 		bc.SetDone()
 
+		err = syncBackfillHistoryJobs(sess, d.uuid, bJob)
+		if err != nil {
+			logutil.BgLogger().Warn("[ddl] syncBackfillHistoryJobs error", zap.Error(err))
+		}
 		details := collectTrace(bJob.JobID)
 		logutil.BgLogger().Info("[ddl] &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&--------------------------  finish backfill jobs",
 			zap.Int64("job ID", bJob.JobID), zap.String("time details", details))
-
 	})
 }
 
@@ -859,12 +862,20 @@ func GetAndMarkBackfillJobsForOneEle(sess *session, batch int, isInclude bool, j
 		jobs[i].Instance_ID = uuid
 		jobs[i].Instance_Lease = GetLeaseGoTime(currTime, lease)
 		// TODO: batch update
-		if err = updateBackfillJob(sess, jobs[i], "get_mark_backfill_job"); err != nil {
+		if err = updateBackfillJob(sess, BackfillTable, jobs[i], "get_mark_backfill_job"); err != nil {
 			return nil, err
 		}
 	}
 
 	return jobs[:validLen], err
+}
+
+func syncBackfillHistoryJobs(sess *session, uuid string, backfillJob *BackfillJob) error {
+	sql := fmt.Sprintf("update mysql.%s set state = %d where job_id = %d and exec_id = %d limit 1;",
+		BackfillHistoryTable, model.JobStateSynced, backfillJob.JobID, uuid)
+	logutil.BgLogger().Warn("update *****************************   " + fmt.Sprintf("sql:%v, sess:%#v", sql, sess))
+	_, err := sess.execute(context.Background(), sql, "sync_backfill_history_job")
+	return err
 }
 
 func getInterruptedBackfillJobsForOneEle(sess *session, jobID, eleID int64, eleKey []byte) ([]*BackfillJob, error) {
@@ -928,6 +939,22 @@ func GetBackfillJobs(sess *session, tblName, condition string, label string) ([]
 	return jobs, nil
 }
 
+func getUnsyncedInstanceIDs(sess *session, jobID int64, label string) ([]string, error) {
+	sql := fmt.Sprintf("select sum(state = %d) as tmp, exec_id from mysql.tidb_ddl_backfill_history where job_id = %d group by exec_id having tmp = 0;",
+		model.JobStateSynced, jobID)
+	logutil.BgLogger().Info(fmt.Sprintf("get unsynced exec ID ***************************** 00 lable:%s, sql:%s", sql, label))
+	rows, err := sess.execute(context.Background(), sql, label)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	InstanceIDs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		InstanceID := row.GetString(1)
+		InstanceIDs = append(InstanceIDs, InstanceID)
+	}
+	return InstanceIDs, nil
+}
+
 func RemoveBackfillJob(sess *session, isAll bool, backfillJob *BackfillJob) error {
 	sql := "delete from mysql.tidb_ddl_backfill"
 	if !isAll {
@@ -939,13 +966,13 @@ func RemoveBackfillJob(sess *session, isAll bool, backfillJob *BackfillJob) erro
 	return err
 }
 
-func updateBackfillJob(sess *session, backfillJob *BackfillJob, label string) error {
+func updateBackfillJob(sess *session, tableName string, backfillJob *BackfillJob, label string) error {
 	mate, err := backfillJob.Mate.Encode()
 	if err != nil {
 		return err
 	}
-	sql := fmt.Sprintf("update mysql.tidb_ddl_backfill set exec_id = '%s', exec_lease = '%s', state = %d, backfill_meta = '%s' where section_id = %d",
-		backfillJob.Instance_ID, backfillJob.Instance_Lease, backfillJob.State, mate, backfillJob.ID)
+	sql := fmt.Sprintf("update mysql.%s set exec_id = '%s', exec_lease = '%s', state = %d, backfill_meta = '%s' where job_id = %d and section_id = %d",
+		tableName, backfillJob.Instance_ID, backfillJob.Instance_Lease, backfillJob.State, mate, backfillJob.ID, backfillJob.JobID)
 	logutil.BgLogger().Warn("update *****************************   " + fmt.Sprintf("sql:%v, sess:%#v", sql, sess))
 	_, err = sess.execute(context.Background(), sql, label)
 	return err

@@ -1114,9 +1114,12 @@ func (dc *ddlCtx) controlWritePhysicalTableRecord(sess *session, t table.Physica
 	}
 
 	currBackfillJobID := int64(1)
-	maxBfJob, err := getMaxBackfillJob(sess, reorgInfo.Job.ID, reorgInfo.currElement.ID, reorgInfo.currElement.TypeKey)
+	isFinished, maxBfJob, err := getMaxBackfillJob(sess, reorgInfo.Job.ID, reorgInfo.currElement.ID, reorgInfo.currElement.TypeKey)
 	if err != nil {
 		return errors.Trace(err)
+	}
+	if isFinished {
+		return nil
 	}
 	if maxBfJob != nil {
 		// TODO: Do we need to use EndKey.Next?
@@ -1157,9 +1160,12 @@ func (dc *ddlCtx) controlWritePhysicalTableRecord(sess *session, t table.Physica
 		}
 
 		for {
-			bJobCnt, err := checkBackfillJobCount(sess, reorgInfo.Job.ID, reorgInfo.currElement.ID, reorgInfo.currElement.TypeKey)
+			isFinished, bJobCnt, err := checkBackfillJobCount(sess, reorgInfo.Job.ID, reorgInfo.currElement.ID, reorgInfo.currElement.TypeKey)
 			if err != nil {
 				return errors.Trace(err)
+			}
+			if isFinished {
+				return nil
 			}
 			if bJobCnt < minGenTaskBatch {
 				break
@@ -1169,6 +1175,7 @@ func (dc *ddlCtx) controlWritePhysicalTableRecord(sess *session, t table.Physica
 		startKey = remains[0].StartKey
 	}
 
+	var backfillJobFinished bool
 	ticker := time.NewTicker(300 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -1178,23 +1185,40 @@ func (dc *ddlCtx) controlWritePhysicalTableRecord(sess *session, t table.Physica
 
 		select {
 		case <-ticker.C:
-			err = checkAndHandleInterruptedBackfillJobs(sess, reorgInfo.Job.ID, reorgInfo.currElement.ID, reorgInfo.currElement.TypeKey)
+			isFinished, err := checkAndHandleInterruptedBackfillJobs(sess, reorgInfo.Job.ID, reorgInfo.currElement.ID, reorgInfo.currElement.TypeKey)
 			if err != nil {
 				logutil.BgLogger().Warn("[ddl] checkAndHandleInterruptedBackfillJobs failed", zap.Error(err))
 				return errors.Trace(err)
 			}
-			bJob, err := getBackfillJobWithRetry(sess, BackfillTable, reorgInfo.Job.ID, reorgInfo.currElement.ID, reorgInfo.currElement.TypeKey, false)
-			logutil.BgLogger().Info("[ddl] *** control write physical table record ----------------- 22", zap.Bool("isExist", bJob != nil))
-			if err != nil {
-				return errors.Trace(err)
-			}
-			if err != nil {
-				logutil.BgLogger().Info("[ddl] getBackfillJobWithRetry failed", zap.Error(err))
-				return errors.Trace(err)
-			}
-			if bJob == nil {
-				logutil.BgLogger().Info("[ddl] finish backfill jobs normal")
+			if isFinished {
+				logutil.BgLogger().Info("[ddl] finish interrupted backfill jobs")
 				return nil
+			}
+
+			if !backfillJobFinished {
+				bJob, err := getBackfillJobWithRetry(sess, BackfillTable, reorgInfo.Job.ID, reorgInfo.currElement.ID, reorgInfo.currElement.TypeKey, false)
+				logutil.BgLogger().Info("[ddl] *** control write physical table record ----------------- 22", zap.Bool("isExist", bJob != nil))
+				if err != nil {
+					return errors.Trace(err)
+				}
+				if err != nil {
+					logutil.BgLogger().Info("[ddl] getBackfillJobWithRetry failed", zap.Error(err))
+					return errors.Trace(err)
+				}
+				if bJob == nil {
+					backfillJobFinished = true
+					logutil.BgLogger().Info("[ddl] finish backfill jobs")
+				}
+			} else {
+				isSynced, err := checkJobIsSynced(sess, reorgInfo.Job.ID)
+				if err != nil {
+					logutil.BgLogger().Warn("[ddl] checkJobIsSynced failed", zap.Error(err))
+					return errors.Trace(err)
+				}
+				if isSynced {
+					logutil.BgLogger().Info("[ddl] sync backfill jobs")
+					return nil
+				}
 			}
 		case <-dc.ctx.Done():
 			return dbterror.ErrInvalidWorker.GenWithStack("worker is closed")
@@ -1204,9 +1228,27 @@ func (dc *ddlCtx) controlWritePhysicalTableRecord(sess *session, t table.Physica
 	return nil
 }
 
-func checkAndHandleInterruptedBackfillJobs(sess *session, jobID, currEleID int64, currEleKey []byte) error {
-	var bJobs []*BackfillJob
+func checkJobIsSynced(sess *session, jobID int64) (bool, error) {
 	var err error
+	var unsyncedInstanceIDs []string
+	for i := 0; i < retrySQLTimes; i++ {
+		unsyncedInstanceIDs, err = getUnsyncedInstanceIDs(sess, jobID, "check_backfill_history_job_sync")
+		if err != nil {
+			return false, errors.Trace(err)
+		}
+		if len(unsyncedInstanceIDs) == 0 {
+			return true, nil
+		}
+
+		logutil.BgLogger().Info("[ddl] checkJobIsSynced failed", zap.Int("tryTimes", i), zap.Error(err))
+		time.Sleep(retrySQLInterval * time.Millisecond)
+	}
+
+	return false, errors.Trace(err)
+}
+
+func checkAndHandleInterruptedBackfillJobs(sess *session, jobID, currEleID int64, currEleKey []byte) (isFinished bool, err error) {
+	var bJobs []*BackfillJob
 	for i := 0; i < retrySQLTimes; i++ {
 		bJobs, err = getInterruptedBackfillJobsForOneEle(sess, jobID, currEleID, currEleKey)
 		if err == nil {
@@ -1216,36 +1258,39 @@ func checkAndHandleInterruptedBackfillJobs(sess *session, jobID, currEleID int64
 		time.Sleep(retrySQLInterval * time.Millisecond)
 	}
 	if err != nil {
-		return errors.Trace(err)
+		return false, errors.Trace(err)
 	}
 	if len(bJobs) == 0 {
-		return nil
+		return false, nil
 	}
 
 	for i := 0; i < retrySQLTimes; i++ {
 		err = finishFailedBackfillJobs(sess, bJobs[0])
 		if err == nil {
-			return errors.Errorf(bJobs[0].Mate.ErrMsg)
+			return true, errors.Errorf(bJobs[0].Mate.ErrMsg)
 		}
 		logutil.BgLogger().Info("[ddl] finishFailedBackfillJobs failed", zap.Error(err))
 		time.Sleep(retrySQLInterval * time.Millisecond)
 	}
-	return errors.Trace(err)
+	return false, errors.Trace(err)
 }
 
-func checkBackfillJobCount(sess *session, jobID, currEleID int64, currEleKey []byte) (backfillJobCnt int, err error) {
-	err = checkAndHandleInterruptedBackfillJobs(sess, jobID, currEleID, currEleKey)
+func checkBackfillJobCount(sess *session, jobID, currEleID int64, currEleKey []byte) (isFinished bool, backfillJobCnt int, err error) {
+	isFinished, err = checkAndHandleInterruptedBackfillJobs(sess, jobID, currEleID, currEleKey)
 	if err != nil {
-		return 0, errors.Trace(err)
+		return false, 0, errors.Trace(err)
+	}
+	if isFinished {
+		return true, 0, nil
 	}
 
 	backfillJobCnt, err = GetBackfillJobCount(sess, BackfillTable, fmt.Sprintf("job_id = %d and ele_id = %d and ele_key = '%s'",
 		jobID, currEleID, currEleKey), "check_backfill_job_count")
 	if err != nil {
-		return 0, errors.Trace(err)
+		return false, 0, errors.Trace(err)
 	}
 
-	return backfillJobCnt, nil
+	return false, backfillJobCnt, nil
 }
 
 func getBackfillJobWithRetry(sess *session, tableName string, jobID, currEleID int64, currEleKey []byte, isAscend bool) (bJob *BackfillJob, err error) {
@@ -1271,30 +1316,34 @@ func getBackfillJobWithRetry(sess *session, tableName string, jobID, currEleID i
 	return nil, errors.Trace(err)
 }
 
-func getMaxBackfillJob(sess *session, jobID, currEleID int64, currEleKey []byte) (*BackfillJob, error) {
-	err := checkAndHandleInterruptedBackfillJobs(sess, jobID, currEleID, currEleKey)
+func getMaxBackfillJob(sess *session, jobID, currEleID int64, currEleKey []byte) (bool, *BackfillJob, error) {
+	isFinished, err := checkAndHandleInterruptedBackfillJobs(sess, jobID, currEleID, currEleKey)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return false, nil, errors.Trace(err)
 	}
+	if isFinished {
+		return true, nil, nil
+	}
+
 	bJob, err := getBackfillJobWithRetry(sess, BackfillTable, jobID, currEleID, currEleKey, false)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return false, nil, errors.Trace(err)
 	}
 	hJob, err := getBackfillJobWithRetry(sess, BackfillHistoryTable, jobID, currEleID, currEleKey, false)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return false, nil, errors.Trace(err)
 	}
 
 	if bJob == nil {
-		return hJob, nil
+		return false, hJob, nil
 	}
 	if hJob == nil {
-		return bJob, nil
+		return false, bJob, nil
 	}
 	if bJob.ID > hJob.ID {
-		return bJob, nil
+		return false, bJob, nil
 	}
-	return hJob, nil
+	return false, hJob, nil
 }
 
 func finishFailedBackfillJobs(sess sessionctx.Context, bJob *BackfillJob) error {
