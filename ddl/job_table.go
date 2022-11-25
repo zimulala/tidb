@@ -871,7 +871,7 @@ func GetAndMarkBackfillJobsForOneEle(sess *session, batch int, isInclude bool, j
 }
 
 func syncBackfillHistoryJobs(sess *session, uuid string, backfillJob *BackfillJob) error {
-	sql := fmt.Sprintf("update mysql.%s set state = %d where job_id = %d and exec_id = %d limit 1;",
+	sql := fmt.Sprintf("update mysql.%s set state = %d where job_id = %d and exec_id = '%s' limit 1;",
 		BackfillHistoryTable, model.JobStateSynced, backfillJob.JobID, uuid)
 	logutil.BgLogger().Warn("update *****************************   " + fmt.Sprintf("sql:%v, sess:%#v", sql, sess))
 	_, err := sess.execute(context.Background(), sql, "sync_backfill_history_job")

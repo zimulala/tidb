@@ -233,6 +233,7 @@ func newBackfillWorkerContext(d *ddl, schemaName string, tbl table.Table, jobCtx
 		}
 		seCtxs = append(seCtxs, se)
 		// TODO: make bf as a argument.
+		bws[i].tp = model.TypeAddIndexBackfill
 		bws[i].backfiller = bf
 	}
 	return &backfillWorkerContext{backfillWorkers: bws, sessCtxs: seCtxs}, nil
