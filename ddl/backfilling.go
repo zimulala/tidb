@@ -165,15 +165,8 @@ type backfiller interface {
 	BackfillDataInTxn(handleRange reorgBackfillTask) (taskCtx backfillTaskContext, errInTxn error)
 	AddMetricInfo(float64)
 	GetTask() (*BackfillJob, error)
-	UpdateTask(job *BackfillJob) error
-	FinishTask(bj *BackfillJob) error
-}
-
-type backfillResult struct {
-	addedCount int
-	scanCount  int
-	nextKey    kv.Key
-	err        error
+	UpdateTask(bJob *BackfillJob) error
+	FinishTask(bJob *BackfillJob) error
 }
 
 // backfillTaskContext is the context of the batch adding indices or updating column values.
@@ -195,20 +188,11 @@ type backfillWorkerContext struct {
 	backfillWorkers []*backfillWorker
 }
 
-func newBackfillWorkerContext(d *ddl, schemaName string, tbl table.Table, jobCtx *JobContext, bfJob *BackfillJob, workerCnt int, batch int) (*backfillWorkerContext, error) {
+type newBackfillerFunc func(bfCtx *backfillCtx) (bf backfiller, err error)
+
+func newBackfillWorkerContext(d *ddl, schemaName string, tbl table.Table, workerCnt int, batch int, bfFunc newBackfillerFunc) (*backfillWorkerContext, error) {
 	if workerCnt <= 0 {
 		return nil, nil
-	}
-
-	sess, err := d.sessPool.get()
-	if err != nil {
-		logutil.BgLogger().Fatal("dispatch backfill jobs loop get session failed, it should not happen, please try restart TiDB", zap.Error(err))
-	}
-	defer d.sessPool.put(sess)
-	decodeColMap, err := makeupDecodeColMap(sess, tbl.(table.PhysicalTable))
-	if err != nil {
-		logutil.BgLogger().Debug(fmt.Sprintf("[ddl] make up decode col map failed"), zap.Error(err))
-		return nil, errors.Trace(err)
 	}
 
 	bws, err := d.backfillCtxPool.batchGet(workerCnt)
@@ -226,7 +210,7 @@ func newBackfillWorkerContext(d *ddl, schemaName string, tbl table.Table, jobCtx
 		// TODO: set reorgTp
 		reorgTp := model.ReorgTypeLitMerge
 		bfCtx := newBackfillCtx(d.ddlCtx, sess, reorgTp, schemaName, tbl, batch)
-		bf, err := newAddIndexWorker(decodeColMap, bfCtx, jobCtx, bfJob.JobID, bfJob.EleID, bfJob.EleKey)
+		bf, err := bfFunc(bfCtx)
 		if err != nil {
 			logutil.BgLogger().Error("[ddl] dispatch backfill jobs loop new add index worker failed, it should not happen, please try restart TiDB", zap.Error(err))
 			return nil, errors.Trace(err)
@@ -249,6 +233,87 @@ func (bwCtx *backfillWorkerContext) GetContext() *backfillWorker {
 	bwCtx.currID++
 	bwCtx.mu.Unlock()
 	return bw
+}
+
+type backfillResult struct {
+	addedCount int
+	scanCount  int
+	nextKey    kv.Key
+	err        error
+}
+
+type backfilWorkerManager struct {
+	bwCtx  *backfillWorkerContext
+	wg     util.WaitGroupWrapper
+	exitCh chan struct{}
+}
+
+func newBackfilWorkerManager(bwCtx *backfillWorkerContext) *backfilWorkerManager {
+	return &backfilWorkerManager{
+		bwCtx:  bwCtx,
+		exitCh: make(chan struct{}),
+	}
+}
+
+func handleTask(task *reorgBackfillTask, _ int, bfWorker *backfillWorker) *backfillResult {
+	// To prevent different workers from using the same session.
+	// TODO: backfillWorkerPool is global, and bfWorkers is used in this function, we'd better do something make worker and job's ID can be matched.
+	bfWorker.runTask(task)
+	ret := <-bfWorker.resultCh
+	if dbterror.ErrDDLJobNotFound.Equal(ret.err) {
+		logutil.BgLogger().Info("the backfill job instance ID or lease is changed", zap.Error(ret.err))
+		ret.err = nil
+	}
+
+	return ret
+}
+
+func getTasks(d *ddlCtx, sess *session, tbl table.Table, runningJobIDs []int64, concurrency int) ([]*reorgBackfillTask, error) {
+	// TODO: if err is write conflict, we need retry
+	// TODO: workerCnt -> batch
+	bJobs, err := GetAndMarkBackfillJobsForOneEle(sess, concurrency, true, runningJobIDs, d.uuid, InstanceLease*time.Second)
+	if err != nil {
+		// TODO: test: if all tidbs can't get the unmark backfill job(a tidb mark a backfill job, other tidbs returned, then the tidb can't handle this job.)
+		if dbterror.ErrDDLJobNotFound.Equal(err) {
+			logutil.BgLogger().Info("no backfill job, handle backfill task finished")
+			return nil, err
+		}
+		// TODO: retry get backfill jobs
+	}
+	tasks := make([]*reorgBackfillTask, 0, len(bJobs))
+	for _, bJ := range bJobs {
+		task := d.backfillJob2Task(tbl, bJ)
+		tasks = append(tasks, task)
+	}
+	return tasks, nil
+}
+
+func (bwm *backfilWorkerManager) waitFinalResult(resultCh <-chan *backfillResult) {
+	bwm.wg.Run(func() {
+		for {
+			select {
+			case result := <-resultCh:
+				if result.err != nil {
+					logutil.BgLogger().Warn("handle backfill task failed", zap.Error(result.err))
+					return
+				}
+			case <-bwm.exitCh:
+				return
+			}
+		}
+	})
+}
+
+func (bwm *backfilWorkerManager) close(d *ddl) {
+	close(bwm.exitCh)
+	bwm.wg.Wait()
+
+	for _, s := range bwm.bwCtx.sessCtxs {
+		d.sessPool.put(s)
+	}
+	for _, w := range bwm.bwCtx.backfillWorkers {
+		d.backfillCtxPool.put(w)
+	}
 }
 
 type reorgBackfillTask struct {
