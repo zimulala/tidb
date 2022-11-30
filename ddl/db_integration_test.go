@@ -4149,6 +4149,9 @@ func TestAddIndexX(t *testing.T) {
 	tk.MustExec("alter table test_add_index add index idx(b)")
 	tk.MustExec("admin check table test_add_index")
 	tk.MustQuery("select count(1) from mysql.tidb_ddl_backfill").Check(testkit.Rows("0"))
-	tk.MustQuery("select section_id, ele_id, ele_key, type, state from mysql.tidb_ddl_backfill_history").Check(testkit.Rows("1 1 _idx_ 1 4"))
-	// tk.MustExec("alter table test_add_index add unique index idx1(b)")
+	tk.MustQuery("select section_id, ele_id, ele_key, type, state from mysql.tidb_ddl_backfill_history").Check(testkit.Rows("1 1 _idx_ 1 6"))
+	tk.MustExec("alter table test_add_index add unique index idx1(b)")
+	tk.MustExec("admin check table test_add_index")
+	tk.MustQuery("select count(1) from mysql.tidb_ddl_backfill").Check(testkit.Rows("0"))
+	tk.MustQuery("select section_id, ele_id, ele_key, type, state from mysql.tidb_ddl_backfill_history").Check(testkit.Rows("1 1 _idx_ 1 6", "1 2 _idx_ 1 6"))
 }

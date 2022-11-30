@@ -102,10 +102,7 @@ func newMergeTempIndexWorker(bfCtx *backfillCtx, t table.PhysicalTable, jc *JobC
 func (w *mergeIndexWorker) BackfillDataInTxn(taskRange reorgBackfillTask) (taskCtx backfillTaskContext, errInTxn error) {
 	oprStartTime := time.Now()
 	ctx := kv.WithInternalSourceType(context.Background(), w.jobContext.ddlJobSourceType())
-	jobID := taskRange.jobID
-	if taskRange.bfJob != nil {
-		jobID = taskRange.bfJob.JobID
-	}
+	jobID := taskRange.getJobID()
 	errInTxn = kv.RunInNewTxn(ctx, w.sessCtx.GetStore(), true, func(ctx context.Context, txn kv.Transaction) error {
 		taskCtx.addedCount = 0
 		taskCtx.scanCount = 0
@@ -159,17 +156,14 @@ func (w *mergeIndexWorker) AddMetricInfo(cnt float64) {
 
 func (w *mergeIndexWorker) GetTask() (*BackfillJob, error) {
 	panic("[ddl] merge index worker GetTask function doesn't implement")
-	return nil, nil
 }
 
 func (w *mergeIndexWorker) UpdateTask(job *BackfillJob) error {
 	panic("[ddl] merge index worker UpdateTask function doesn't implement")
-	return nil
 }
 
 func (w *mergeIndexWorker) FinishTask(job *BackfillJob) error {
 	panic("[ddl] merge index worker FinishTask function doesn't implement")
-	return nil
 }
 
 func (w *mergeIndexWorker) fetchTempIndexVals(txn kv.Transaction, taskRange reorgBackfillTask) ([]*temporaryIndexRecord, kv.Key, bool, error) {
@@ -182,10 +176,7 @@ func (w *mergeIndexWorker) fetchTempIndexVals(txn kv.Transaction, taskRange reor
 	oprStartTime := startTime
 	idxPrefix := w.table.IndexPrefix()
 	var lastKey kv.Key
-	jobID := taskRange.jobID
-	if taskRange.bfJob != nil {
-		jobID = taskRange.bfJob.JobID
-	}
+	jobID := taskRange.getJobID()
 	err := iterateSnapshotKeys(w.dCtx.jobContext(jobID), w.sessCtx.GetStore(), taskRange.priority, idxPrefix, txn.StartTS(),
 		taskRange.startKey, taskRange.endKey, func(_ kv.Handle, indexKey kv.Key, rawValue []byte) (more bool, err error) {
 			oprEndTime := time.Now()

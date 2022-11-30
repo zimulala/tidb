@@ -1240,7 +1240,11 @@ func newAddIndexWorker(decodeColMap map[int64]decoder.Column, bfCtx *backfillCtx
 	}
 	t := bfCtx.table
 	indexInfo := model.FindIndexInfoByID(t.Meta().Indices, eleID)
-	index := tables.NewIndex(t.(table.PhysicalTable).GetPhysicalID(), t.Meta(), indexInfo)
+	pTbl, ok := t.(table.PhysicalTable)
+	if !ok {
+		return nil, errors.Errorf("tbl:%#v convert physical table failed", t)
+	}
+	index := tables.NewIndex(pTbl.GetPhysicalID(), t.Meta(), indexInfo)
 	rowDecoder := decoder.NewRowDecoder(t, t.WritableCols(), decodeColMap)
 
 	var lwCtx *ingest.WriterContext
@@ -1285,7 +1289,10 @@ func (w *baseIndexWorker) GetTask() (*BackfillJob, error) {
 }
 
 func (w *baseIndexWorker) UpdateTask(bJob *BackfillJob) error {
-	sess := w.backfillCtx.sessCtx.(*session)
+	sess, ok := w.backfillCtx.sessCtx.(*session)
+	if !ok {
+		return errors.Errorf("sess ctx:%#v convert session failed", w.backfillCtx.sessCtx)
+	}
 
 	_, err := sess.execute(context.Background(), "begin", "update_backfill_task")
 	if err != nil {
@@ -1319,7 +1326,10 @@ func (w *baseIndexWorker) UpdateTask(bJob *BackfillJob) error {
 }
 
 func (w *baseIndexWorker) FinishTask(bJob *BackfillJob) error {
-	sess := w.backfillCtx.sessCtx.(*session)
+	sess, ok := w.backfillCtx.sessCtx.(*session)
+	if !ok {
+		return errors.Errorf("sess ctx:%#v convert session failed", w.backfillCtx.sessCtx)
+	}
 	_, err := sess.execute(context.Background(), "begin", "finish_backfill_task")
 	if err != nil {
 		return err
@@ -1427,7 +1437,8 @@ func (w *baseIndexWorker) fetchRowColVals(txn kv.Transaction, taskRange reorgBac
 	// taskDone means that the reorged handle is out of taskRange.endHandle.
 	taskDone := false
 	oprStartTime := startTime
-	err := iterateSnapshotKeys(w.dCtx.jobContext(taskRange.bfJob.JobID), w.sessCtx.GetStore(), taskRange.priority, w.table.RecordPrefix(), txn.StartTS(), taskRange.startKey, taskRange.endKey,
+	jobID := taskRange.getJobID()
+	err := iterateSnapshotKeys(w.dCtx.jobContext(jobID), w.sessCtx.GetStore(), taskRange.priority, w.table.RecordPrefix(), txn.StartTS(), taskRange.startKey, taskRange.endKey,
 		func(handle kv.Handle, recordKey kv.Key, rawRow []byte) (bool, error) {
 			oprEndTime := time.Now()
 			logSlowOperations(oprEndTime.Sub(oprStartTime), "iterateSnapshotKeys in baseIndexWorker fetchRowColVals", 0)
@@ -1593,12 +1604,13 @@ func (w *addIndexWorker) BackfillDataInTxn(handleRange reorgBackfillTask) (taskC
 	// var commitDetail *tikvutil.CommitDetails
 	// ctx = context.WithValue(ctx, tikvutil.CommitDetailCtxKey, &commitDetail)
 	oprStartTime := time.Now()
+	jobID := handleRange.getJobID()
 	errInTxn = kv.RunInNewTxn(ctx, w.sessCtx.GetStore(), true, func(ctx context.Context, txn kv.Transaction) error {
 		taskCtx.finishTS = txn.StartTS()
 		taskCtx.addedCount = 0
 		taskCtx.scanCount = 0
 		txn.SetOption(kv.Priority, handleRange.priority)
-		if tagger := w.dCtx.getResourceGroupTaggerForTopSQL(handleRange.bfJob.JobID); tagger != nil {
+		if tagger := w.dCtx.getResourceGroupTaggerForTopSQL(jobID); tagger != nil {
 			txn.SetOption(kv.ResourceGroupTagger, tagger)
 		}
 
@@ -1851,12 +1863,13 @@ func (w *cleanUpIndexWorker) BackfillDataInTxn(handleRange reorgBackfillTask) (t
 	})
 
 	oprStartTime := time.Now()
+	jobID := handleRange.getJobID()
 	ctx := kv.WithInternalSourceType(context.Background(), w.jobContext.ddlJobSourceType())
 	errInTxn = kv.RunInNewTxn(ctx, w.sessCtx.GetStore(), true, func(ctx context.Context, txn kv.Transaction) error {
 		taskCtx.addedCount = 0
 		taskCtx.scanCount = 0
 		txn.SetOption(kv.Priority, handleRange.priority)
-		if tagger := w.dCtx.getResourceGroupTaggerForTopSQL(handleRange.bfJob.JobID); tagger != nil {
+		if tagger := w.dCtx.getResourceGroupTaggerForTopSQL(jobID); tagger != nil {
 			txn.SetOption(kv.ResourceGroupTagger, tagger)
 		}
 
@@ -1952,6 +1965,50 @@ func (w *worker) updateReorgInfoForPartitions(t table.PartitionedTable, reorg *r
 		zap.Int64("partitionTableID", pid), zap.String("startHandle", tryDecodeToHandleString(start)),
 		zap.String("endHandle", tryDecodeToHandleString(end)), zap.Error(err))
 	return false, errors.Trace(err)
+}
+
+func runBackfillJobsWithLightning(d *ddl, sess *session, bJob *BackfillJob, jobCtx *JobContext) {
+	// TODO: Consider redo it.
+	bc, ok := ingest.LitBackCtxMgr.Load(bJob.JobID)
+	if ok && bc.Done() {
+		logutil.BgLogger().Warn("[ddl] lightning loaded")
+		return
+	}
+	// TODO: set indexInfo.Unique
+	isUnique := false
+	var err error
+	bc, err = ingest.LitBackCtxMgr.Register(d.ctx, isUnique, bJob.JobID, bJob.Mate.SQLMode)
+	if err != nil {
+		// TODO: tryFallbackToTxnMerge
+		logutil.BgLogger().Warn("[ddl] lightning register error", zap.Error(err))
+		return
+	}
+
+	logutil.BgLogger().Warn("00 ******** load backfill job and run reorg jobs start", zap.Int64("job id", bJob.JobID))
+	tbl, err := runBackfillJobs(d, sess, bJob, jobCtx)
+	if err != nil {
+		logutil.BgLogger().Warn("[ddl] runBackfillJobs error", zap.Error(err))
+		ingest.LitBackCtxMgr.Unregister(bJob.JobID)
+		// TODO: tryFallbackToTxnMerge
+		return
+	}
+
+	finish := injectSpan(bJob.JobID, "finish-import")
+	err = bc.FinishImport(bJob.EleID, isUnique, tbl)
+	if err != nil {
+		if kv.ErrKeyExists.Equal(err) {
+			logutil.BgLogger().Warn("[ddl] import index duplicate key, convert job to rollback", zap.String("job", bJob.AbbrStr()), zap.Error(err))
+			// TODO: convertAddIdxJob2RollbackJob
+		} else {
+			logutil.BgLogger().Warn("[ddl] lightning import error", zap.Error(err))
+			// TODO: tryFallbackToTxnMerge
+		}
+		ingest.LitBackCtxMgr.Unregister(bJob.JobID)
+		return
+	}
+	ingest.LitBackCtxMgr.Unregister(bJob.ID)
+	finish()
+	bc.SetDone()
 }
 
 // changingIndex is used to store the index that need to be changed during modifying column.

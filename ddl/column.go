@@ -1180,17 +1180,14 @@ func (w *updateColumnWorker) AddMetricInfo(cnt float64) {
 
 func (w *updateColumnWorker) GetTask() (*BackfillJob, error) {
 	panic("[ddl] update column worker GetTask function doesn't implement")
-	return nil, nil
 }
 
 func (w *updateColumnWorker) UpdateTask(job *BackfillJob) error {
 	panic("[ddl] update column worker UpdateTask function doesn't implement")
-	return nil
 }
 
 func (w *updateColumnWorker) FinishTask(job *BackfillJob) error {
 	panic("[ddl] update column worker FinishTask function doesn't implement")
-	return nil
 }
 
 type rowRecord struct {
@@ -1218,7 +1215,8 @@ func (w *updateColumnWorker) fetchRowColVals(txn kv.Transaction, taskRange reorg
 	taskDone := false
 	var lastAccessedHandle kv.Key
 	oprStartTime := startTime
-	err := iterateSnapshotKeys(w.dCtx.jobContext(taskRange.bfJob.JobID), w.sessCtx.GetStore(), taskRange.priority, w.table.RecordPrefix(), txn.StartTS(), taskRange.startKey, taskRange.endKey,
+	jobID := taskRange.getJobID()
+	err := iterateSnapshotKeys(w.dCtx.jobContext(jobID), w.sessCtx.GetStore(), taskRange.priority, w.table.RecordPrefix(), txn.StartTS(), taskRange.startKey, taskRange.endKey,
 		func(handle kv.Handle, recordKey kv.Key, rawRow []byte) (bool, error) {
 			oprEndTime := time.Now()
 			logSlowOperations(oprEndTime.Sub(oprStartTime), "iterateSnapshotKeys in updateColumnWorker fetchRowColVals", 0)
@@ -1357,11 +1355,12 @@ func (w *updateColumnWorker) cleanRowMap() {
 func (w *updateColumnWorker) BackfillDataInTxn(handleRange reorgBackfillTask) (taskCtx backfillTaskContext, errInTxn error) {
 	oprStartTime := time.Now()
 	ctx := kv.WithInternalSourceType(context.Background(), w.jobContext.ddlJobSourceType())
+	jobID := handleRange.getJobID()
 	errInTxn = kv.RunInNewTxn(ctx, w.sessCtx.GetStore(), true, func(ctx context.Context, txn kv.Transaction) error {
 		taskCtx.addedCount = 0
 		taskCtx.scanCount = 0
 		txn.SetOption(kv.Priority, handleRange.priority)
-		if tagger := w.dCtx.getResourceGroupTaggerForTopSQL(handleRange.bfJob.JobID); tagger != nil {
+		if tagger := w.dCtx.getResourceGroupTaggerForTopSQL(jobID); tagger != nil {
 			txn.SetOption(kv.ResourceGroupTagger, tagger)
 		}
 

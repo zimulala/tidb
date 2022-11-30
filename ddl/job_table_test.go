@@ -253,6 +253,7 @@ func TestSimpleExecBackfillJobs(t *testing.T) {
 	allCnt, err := ddl.GetBackfillJobCount(se, ddl.BackfillTable, fmt.Sprintf("job_id = %d and ele_id = %d and ele_key = '%s'",
 		jobID, eleID2, meta.IndexElementKey), "check_backfill_job_count")
 	require.Equal(t, allCnt, 0)
+	require.NoError(t, err)
 	// Test some backfill jobs, add backfill jobs to the table.
 	cnt := 2
 	bjTestCases := make([]*ddl.BackfillJob, 0, cnt*2)
@@ -306,6 +307,7 @@ func TestSimpleExecBackfillJobs(t *testing.T) {
 	err = ddl.AddBackfillHistoryJob(se, []*ddl.BackfillJob{bJobs1[0]})
 	require.NoError(t, err)
 	currTime, err = ddl.GetOracleTime(se.GetStore())
+	require.NoError(t, err)
 	condition := fmt.Sprintf("exec_ID = '' or exec_lease < '%v' and job_id = %d order by job_id", currTime.Add(-instanceLease), jobID)
 	bJobs, err = ddl.GetBackfillJobs(se, ddl.BackfillHistoryTable, condition, "test_get_bj")
 	require.NoError(t, err)
