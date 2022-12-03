@@ -837,6 +837,25 @@ func GetBackfillJobCount(sess *session, tblName, condition string, label string)
 	return int(rows[0].GetInt64(0)), nil
 }
 
+func GetHandledRowCount(sess *session, tblName, condition string, label string) (int64, error) {
+	rows, err := sess.execute(context.Background(), fmt.Sprintf("select * from mysql.%s where %s", tblName, condition), label)
+	if err != nil {
+		return 0, errors.Trace(err)
+	}
+	var rowCount int64
+	var mate *model.BackfillMeta
+	for _, row := range rows {
+		mate = &model.BackfillMeta{}
+		err = mate.Decode(row.GetBytes(9))
+		if err != nil {
+			return 0, errors.Trace(err)
+		}
+		rowCount += mate.RowCount
+	}
+	logutil.BgLogger().Info(fmt.Sprintf("get row cnt *****************************  job cnt:%d, sql:%s, lable:%s, row cnt:%d", len(rows), condition, label, rowCount))
+	return rowCount, nil
+}
+
 func GetBackfillJobs(sess *session, tblName, condition string, label string) ([]*BackfillJob, error) {
 	logutil.BgLogger().Info(fmt.Sprintf("get ***************************** 00 table:%s, sql:%s, lable:%s", tblName, condition, label))
 	rows, err := sess.execute(context.Background(), fmt.Sprintf("select * from mysql.%s where %s", tblName, condition), label)

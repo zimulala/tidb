@@ -412,8 +412,9 @@ func (bt BackfillType) String() string {
 }
 
 type JobMeta struct {
-	SchemaID int64 `json:"schema_id"`
-	TableID  int64 `json:"table_id"`
+	SchemaID        int64 `json:"schema_id"`
+	TableID         int64 `json:"table_id"`
+	PhysicalTableID int64 `json:"physical_table_id"`
 	// Query string of the ddl job.
 	Query string `json:"query"`
 	// Priority is only used to set the operation priority of adding indices.

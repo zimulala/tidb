@@ -1211,6 +1211,7 @@ type baseIndexWorker struct {
 	*backfillCtx
 	indexes []table.Index
 
+	tp            model.BackfillType
 	metricCounter prometheus.Counter
 
 	// The following attributes are used to reduce memory allocation.
@@ -1274,6 +1275,7 @@ func newAddIndexWorker(decodeColMap map[int64]decoder.Column, bfCtx *backfillCtx
 			rowMap:        make(map[int64]types.Datum, len(decodeColMap)),
 			metricCounter: metrics.BackfillTotalCounter.WithLabelValues(metrics.GenerateReorgLabel("add_idx_rate", t.Meta().Name.L, t.Meta().Name.String())),
 			jobContext:    jc,
+			tp:            model.TypeAddIndexBackfill,
 		},
 		index:     index,
 		writerCtx: lwCtx,
@@ -1286,6 +1288,10 @@ func (w *baseIndexWorker) AddMetricInfo(cnt float64) {
 
 func (w *baseIndexWorker) GetTask() (*BackfillJob, error) {
 	return nil, nil
+}
+
+func (w *baseIndexWorker) String() string {
+	return w.tp.String()
 }
 
 func (w *baseIndexWorker) UpdateTask(bJob *BackfillJob) error {
@@ -1408,7 +1414,7 @@ func (w *baseIndexWorker) getNextKey(taskRange reorgBackfillTask, taskDone bool)
 	if !taskDone {
 		// The task is not done. So we need to pick the last processed entry's handle and add one.
 		lastHandle := w.idxRecords[len(w.idxRecords)-1].handle
-		recordKey := tablecodec.EncodeRecordKey(w.table.RecordPrefix(), lastHandle)
+		recordKey := tablecodec.EncodeRecordKey(taskRange.physicalTable.RecordPrefix(), lastHandle)
 		return recordKey.Next()
 	}
 	return taskRange.endKey.Next()
@@ -1438,8 +1444,8 @@ func (w *baseIndexWorker) fetchRowColVals(txn kv.Transaction, taskRange reorgBac
 	taskDone := false
 	oprStartTime := startTime
 	jobID := taskRange.getJobID()
-	err := iterateSnapshotKeys(w.dCtx.jobContext(jobID), w.sessCtx.GetStore(), taskRange.priority, w.table.RecordPrefix(), txn.StartTS(), taskRange.startKey, taskRange.endKey,
-		func(handle kv.Handle, recordKey kv.Key, rawRow []byte) (bool, error) {
+	err := iterateSnapshotKeys(w.dCtx.jobContext(jobID), w.sessCtx.GetStore(), taskRange.priority, taskRange.physicalTable.RecordPrefix(), txn.StartTS(),
+		taskRange.startKey, taskRange.endKey, func(handle kv.Handle, recordKey kv.Key, rawRow []byte) (bool, error) {
 			oprEndTime := time.Now()
 			logSlowOperations(oprEndTime.Sub(oprStartTime), "iterateSnapshotKeys in baseIndexWorker fetchRowColVals", 0)
 			oprStartTime = oprEndTime
@@ -1481,8 +1487,7 @@ func (w *baseIndexWorker) fetchRowColVals(txn kv.Transaction, taskRange reorgBac
 		taskDone = true
 	}
 
-	// TODO: add worker id info?
-	logutil.BgLogger().Debug("[ddl] txn fetches handle info", zap.Uint64("txnStartTS", txn.StartTS()),
+	logutil.BgLogger().Debug("[ddl] txn fetches handle info", zap.Stringer("worker", w), zap.Uint64("txnStartTS", txn.StartTS()),
 		zap.String("taskRange", taskRange.String()), zap.Duration("takeTime", time.Since(startTime)))
 	return w.idxRecords, w.getNextKey(taskRange, taskDone), taskDone, errors.Trace(err)
 }
@@ -1774,8 +1779,7 @@ func (w *worker) updateReorgInfo(t table.PartitionedTable, reorg *reorgInfo) (bo
 	err = reorg.UpdateReorgMeta(reorg.StartKey, w.sessPool)
 	logutil.BgLogger().Info("[ddl] job update reorgInfo",
 		zap.Int64("jobID", reorg.Job.ID),
-		zap.ByteString("elementType", reorg.currElement.TypeKey),
-		zap.Int64("elementID", reorg.currElement.ID),
+		zap.Stringer("element", reorg.currElement),
 		zap.Int64("partitionTableID", pid),
 		zap.String("startKey", hex.EncodeToString(reorg.StartKey)),
 		zap.String("endKey", hex.EncodeToString(reorg.EndKey)), zap.Error(err))
@@ -1961,7 +1965,7 @@ func (w *worker) updateReorgInfoForPartitions(t table.PartitionedTable, reorg *r
 	// Write the reorg info to store so the whole reorganize process can recover from panic.
 	err = reorg.UpdateReorgMeta(reorg.StartKey, w.sessPool)
 	logutil.BgLogger().Info("[ddl] job update reorgInfo", zap.Int64("jobID", reorg.Job.ID),
-		zap.ByteString("elementType", reorg.currElement.TypeKey), zap.Int64("elementID", reorg.currElement.ID),
+		zap.Stringer("element", reorg.currElement),
 		zap.Int64("partitionTableID", pid), zap.String("startHandle", tryDecodeToHandleString(start)),
 		zap.String("endHandle", tryDecodeToHandleString(end)), zap.Error(err))
 	return false, errors.Trace(err)

@@ -154,6 +154,10 @@ func (w *mergeIndexWorker) BackfillDataInTxn(taskRange reorgBackfillTask) (taskC
 func (w *mergeIndexWorker) AddMetricInfo(cnt float64) {
 }
 
+func (w *mergeIndexWorker) String() string {
+	return model.TypeAddIndexMergeTmpWorker.String()
+}
+
 func (w *mergeIndexWorker) GetTask() (*BackfillJob, error) {
 	panic("[ddl] merge index worker GetTask function doesn't implement")
 }

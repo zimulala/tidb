@@ -1117,8 +1117,7 @@ func (w *worker) updateCurrentElement(t table.Table, reorgInfo *reorgInfo) error
 		err := reorgInfo.UpdateReorgMeta(reorgInfo.StartKey, w.sessPool)
 		logutil.BgLogger().Info("[ddl] update column and indexes",
 			zap.Int64("jobID", reorgInfo.Job.ID),
-			zap.ByteString("elementType", reorgInfo.currElement.TypeKey),
-			zap.Int64("elementID", reorgInfo.currElement.ID),
+			zap.Stringer("element", reorgInfo.currElement),
 			zap.String("startHandle", tryDecodeToHandleString(reorgInfo.StartKey)),
 			zap.String("endHandle", tryDecodeToHandleString(reorgInfo.EndKey)))
 		if err != nil {
@@ -1178,6 +1177,10 @@ func (w *updateColumnWorker) AddMetricInfo(cnt float64) {
 	w.metricCounter.Add(cnt)
 }
 
+func (w *updateColumnWorker) String() string {
+	return model.TypeUpdateColumnBackfill.String()
+}
+
 func (w *updateColumnWorker) GetTask() (*BackfillJob, error) {
 	panic("[ddl] update column worker GetTask function doesn't implement")
 }
@@ -1216,8 +1219,8 @@ func (w *updateColumnWorker) fetchRowColVals(txn kv.Transaction, taskRange reorg
 	var lastAccessedHandle kv.Key
 	oprStartTime := startTime
 	jobID := taskRange.getJobID()
-	err := iterateSnapshotKeys(w.dCtx.jobContext(jobID), w.sessCtx.GetStore(), taskRange.priority, w.table.RecordPrefix(), txn.StartTS(), taskRange.startKey, taskRange.endKey,
-		func(handle kv.Handle, recordKey kv.Key, rawRow []byte) (bool, error) {
+	err := iterateSnapshotKeys(w.dCtx.jobContext(jobID), w.sessCtx.GetStore(), taskRange.priority, taskRange.physicalTable.RecordPrefix(), txn.StartTS(),
+		taskRange.startKey, taskRange.endKey, func(handle kv.Handle, recordKey kv.Key, rawRow []byte) (bool, error) {
 			oprEndTime := time.Now()
 			logSlowOperations(oprEndTime.Sub(oprStartTime), "iterateSnapshotKeys in updateColumnWorker fetchRowColVals", 0)
 			oprStartTime = oprEndTime
