@@ -1243,6 +1243,76 @@ func (w *baseIndexWorker) AddMetricInfo(cnt float64) {
 	w.metricCounter.Add(cnt)
 }
 
+func (w *baseIndexWorker) GetTask() (*BackfillJob, error) {
+	return nil, nil
+}
+
+func (w *baseIndexWorker) String() string {
+	return w.tp.String()
+}
+
+func (w *baseIndexWorker) UpdateTask(bJob *BackfillJob) error {
+	sess, ok := w.backfillCtx.sessCtx.(*session)
+	if !ok {
+		return errors.Errorf("sess ctx:%#v convert session failed", w.backfillCtx.sessCtx)
+	}
+
+	_, err := sess.execute(context.Background(), "begin", "update_backfill_task")
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		if err == nil {
+			_, err = sess.execute(context.Background(), "commit", "update_backfill_task")
+			return
+		}
+		_, err1 := sess.execute(context.Background(), "rollback", "update_backfill_task")
+		if err1 != nil {
+			logutil.BgLogger().Info("[ddl] index worker update task rollback failed", zap.Error(err1))
+		}
+	}()
+
+	jobs, err := GetBackfillJobs(sess, BackfillTable, fmt.Sprintf("job_id = %d and ele_id = %d and section_id = %d and ele_key = '%s'",
+		bJob.JobID, bJob.EleID, bJob.ID, bJob.EleKey), "update_backfill_task")
+	if err == nil {
+		if len(jobs) == 0 {
+			return dbterror.ErrDDLJobNotFound.FastGen("get zero backfill bJob, lease is timeout")
+		}
+		if jobs[0].InstanceID != bJob.InstanceID {
+			return dbterror.ErrDDLJobNotFound.FastGenByArgs(fmt.Sprintf("get a backfill bJob %v, want instance ID %s", jobs[0], bJob.Instance_ID))
+		}
+		err = updateBackfillJob(sess, BackfillTable, bJob, "update_backfill_task")
+	}
+
+	return err
+}
+
+func (w *baseIndexWorker) FinishTask(bJob *BackfillJob) error {
+	sess, ok := w.backfillCtx.sessCtx.(*session)
+	if !ok {
+		return errors.Errorf("sess ctx:%#v convert session failed", w.backfillCtx.sessCtx)
+	}
+	_, err := sess.execute(context.Background(), "begin", "finish_backfill_task")
+	if err != nil {
+		return err
+	}
+
+	if err = RemoveBackfillJob(sess, false, bJob); err == nil {
+		err = AddBackfillHistoryJob(sess, []*BackfillJob{bJob})
+	}
+
+	if err == nil {
+		_, err = sess.execute(context.Background(), "commit", "finish_backfill_task")
+	} else {
+		_, err1 := sess.execute(context.Background(), "rollback", "finish_backfill_task")
+		if err1 != nil {
+			logutil.BgLogger().Info("[ddl] index worker finish task rollback failed", zap.Error(err1))
+		}
+	}
+	return err
+}
+
 // mockNotOwnerErrOnce uses to make sure `notOwnerErr` only mock error once.
 var mockNotOwnerErrOnce uint32
 

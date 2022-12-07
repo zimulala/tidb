@@ -156,6 +156,22 @@ func (w *mergeIndexWorker) BackfillDataInTxn(taskRange reorgBackfillTask) (taskC
 func (w *mergeIndexWorker) AddMetricInfo(cnt float64) {
 }
 
+func (w *mergeIndexWorker) String() string {
+	return model.TypeAddIndexMergeTmpWorker.String()
+}
+
+func (w *mergeIndexWorker) GetTask() (*BackfillJob, error) {
+	panic("[ddl] merge index worker GetTask function doesn't implement")
+}
+
+func (w *mergeIndexWorker) UpdateTask(job *BackfillJob) error {
+	panic("[ddl] merge index worker UpdateTask function doesn't implement")
+}
+
+func (w *mergeIndexWorker) FinishTask(job *BackfillJob) error {
+	panic("[ddl] merge index worker FinishTask function doesn't implement")
+}
+
 func (w *mergeIndexWorker) fetchTempIndexVals(txn kv.Transaction, taskRange reorgBackfillTask) ([]*temporaryIndexRecord, kv.Key, bool, error) {
 	startTime := time.Now()
 	w.tmpIdxRecords = w.tmpIdxRecords[:0]

@@ -1198,6 +1198,22 @@ func (w *updateColumnWorker) AddMetricInfo(cnt float64) {
 	w.metricCounter.Add(cnt)
 }
 
+func (w *updateColumnWorker) String() string {
+	return model.TypeUpdateColumnBackfill.String()
+}
+
+func (w *updateColumnWorker) GetTask() (*BackfillJob, error) {
+	panic("[ddl] update column worker GetTask function doesn't implement")
+}
+
+func (w *updateColumnWorker) UpdateTask(job *BackfillJob) error {
+	panic("[ddl] update column worker UpdateTask function doesn't implement")
+}
+
+func (w *updateColumnWorker) FinishTask(job *BackfillJob) error {
+	panic("[ddl] update column worker FinishTask function doesn't implement")
+}
+
 type rowRecord struct {
 	key     []byte        // It's used to lock a record. Record it to reduce the encoding time.
 	vals    []byte        // It's the record.
