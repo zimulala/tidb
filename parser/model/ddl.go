@@ -419,13 +419,7 @@ type JobMeta struct {
 
 // BackfillMeta is meta info of the backfill job.
 type BackfillMeta struct {
-	CurrKey    []byte `json:"curr_key"`
-	StartKey   []byte `json:"start_key"`
-	EndKey     []byte `json:"end_key"`
 	EndInclude bool   `json:"end_include"`
-	StartTS    uint64 `json:"start_ts"`
-	FinishTS   uint64 `json:"finish_ts"`
-	RowCount   int64  `json:"row_count"`
 	ErrMsg     string `json:"err_msg"`
 
 	SQLMode       mysql.SQLMode                    `json:"sql_mode"`

@@ -31,6 +31,7 @@ import (
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/metrics"
 	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
@@ -46,6 +47,7 @@ import (
 	decoder "github.com/pingcap/tidb/util/rowDecoder"
 	"github.com/pingcap/tidb/util/timeutil"
 	"github.com/pingcap/tidb/util/topsql"
+	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/zap"
 )
@@ -57,9 +59,11 @@ const (
 	typeUpdateColumnWorker     backfillerType = 1
 	typeCleanUpIndexWorker     backfillerType = 2
 	typeAddIndexMergeTmpWorker backfillerType = 3
+
+	// InstanceLease is the instance lease.
+	InstanceLease = 1 * time.Minute
 )
 
-// String implements fmt.Stringer interface.
 func (bWT backfillerType) String() string {
 	switch bWT {
 	case typeAddIndexWorker:
@@ -73,6 +77,49 @@ func (bWT backfillerType) String() string {
 	default:
 		return "unknown"
 	}
+}
+
+// BackfillJob is for a tidb_ddl_backfill table's record.
+type BackfillJob struct {
+	ID            int64
+	JobID         int64
+	EleID         int64
+	EleKey        []byte
+	Tp            backfillerType
+	State         model.JobState
+	StoreID       int64
+	InstanceID    string
+	InstanceLease types.Time
+	// range info
+	CurrKey  []byte
+	StartKey []byte
+	EndKey   []byte
+
+	StartTS  uint64
+	FinishTS uint64
+	RowCount int64
+	Meta     *model.BackfillMeta
+}
+
+// AbbrStr returns the BackfillJob's info without the Meta info.
+func (bj *BackfillJob) AbbrStr() string {
+	return fmt.Sprintf("ID:%d, JobID:%d, EleID:%d, Type:%s, State:%s, InstanceID:%s, InstanceLease:%s",
+		bj.ID, bj.JobID, bj.EleID, bj.Tp, bj.State, bj.InstanceID, bj.InstanceLease)
+}
+
+// GetOracleTime returns the current time from TS.
+func GetOracleTime(se *session) (time.Time, error) {
+	txn, err := se.Txn(true)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return oracle.GetTimeFromTS(txn.StartTS()).UTC(), nil
+}
+
+// GetLeaseGoTime returns a types.Time by adding a lease.
+func GetLeaseGoTime(currTime time.Time, lease time.Duration) types.Time {
+	leaseTime := currTime.Add(lease)
+	return types.NewTime(types.FromGoTime(leaseTime.In(time.UTC)), mysql.TypeTimestamp, types.MaxFsp)
 }
 
 // By now the DDL jobs that need backfilling include:
@@ -126,36 +173,6 @@ func (bWT backfillerType) String() string {
 // For a single range, backfill worker doesn't backfill all the data in one kv transaction.
 // Instead, it is divided into batches, each time a kv transaction completes the backfilling
 // of a partial batch.
-
-type BackfillJob struct {
-	ID             int64
-	JobID          int64
-	EleID          int64
-	EleKey         []byte
-	Tp             backfillerType
-	State          model.JobState
-	StoreID        int64
-	Instance_ID    string
-	Instance_Lease types.Time
-	Meta           *model.BackfillMeta
-}
-
-type backfiller interface {
-	BackfillDataInTxn(handleRange reorgBackfillTask) (taskCtx backfillTaskContext, errInTxn error)
-	AddMetricInfo(float64)
-	GetTask() (*BackfillJob, error)
-	UpdateTask(bJob *BackfillJob) error
-	FinishTask(bJob *BackfillJob) error
-	String() string
-}
-
-type backfillResult struct {
-	taskID     int
-	addedCount int
-	scanCount  int
-	nextKey    kv.Key
-	err        error
-}
 
 // backfillTaskContext is the context of the batch adding indices or updating column values.
 // After finishing the batch adding indices or updating column values, result in backfillTaskContext will be merged into backfillResult.
