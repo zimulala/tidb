@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/ddl/util/gpool"
+	"github.com/pingcap/tidb/util/gpool"
 	"go.uber.org/zap"
 )
 

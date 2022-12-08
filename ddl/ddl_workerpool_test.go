@@ -43,7 +43,7 @@ func TestBackfillWorkerPool(t *testing.T) {
 			return wk, nil
 		}
 	}
-	pool := newBackfillWorkerPool(pools.NewResourcePool(f(), 1, 2, 0))
+	pool := newBackfillContextPool(pools.NewResourcePool(f(), 1, 2, 0))
 	bwp, err := pool.get()
 	require.NoError(t, err)
 	require.Equal(t, 1, bwp.id)

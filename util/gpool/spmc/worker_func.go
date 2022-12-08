@@ -18,7 +18,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/pingcap/tidb/ddl/util/gpool"
+	"github.com/pingcap/tidb/util/gpool"
 )
 
 var (

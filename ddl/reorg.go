@@ -142,10 +142,19 @@ func (rc *reorgCtx) increaseRowCount(count int64) {
 	atomic.AddInt64(&rc.rowCount, count)
 }
 
-func (rc *reorgCtx) getRowCountAndKey() (int64, kv.Key, *meta.Element) {
-	row := atomic.LoadInt64(&rc.rowCount)
+func (rc *reorgCtx) getRowCountAndKey(sess *session, jobID int64) (int64, kv.Key, *meta.Element) {
 	h, _ := (rc.doneKey.Load()).(nullableKey)
 	element, _ := (rc.element.Load()).(*meta.Element)
+
+	var row int64
+	var err error
+	if IsDistReorgEnable() {
+		row, err = GetHandledRowCount(sess, BackfillHistoryTable, fmt.Sprintf("job_id = %d and ele_id = %d and ele_key = '%s'",
+			jobID, element.ID, element.TypeKey), "get_row_count")
+		logutil.BgLogger().Warn("get handled row count failed", zap.Stringer("element", element), zap.Error(err))
+	} else {
+		row = atomic.LoadInt64(&rc.rowCount)
+	}
 	return row, h.key, element
 }
 
@@ -197,7 +206,7 @@ func (w *worker) runReorgJob(rh *reorgHandler, reorgInfo *reorgInfo, tblInfo *mo
 		}
 	}
 
-	rc := w.getReorgCtx(job)
+	rc := w.getReorgCtx(job.ID)
 	if rc == nil {
 		// This job is cancelling, we should return ErrCancelledDDLJob directly.
 		// Q: Is there any possibility that the job is cancelling and has no reorgCtx?
@@ -233,7 +242,7 @@ func (w *worker) runReorgJob(rh *reorgHandler, reorgInfo *reorgInfo, tblInfo *mo
 			d.removeReorgCtx(job)
 			return dbterror.ErrCancelledDDLJob
 		}
-		rowCount, _, _ := rc.getRowCountAndKey()
+		rowCount, _, _ := rc.getRowCountAndKey(w.sess, job.ID)
 		if err != nil {
 			logutil.BgLogger().Warn("[ddl] run reorg job done", zap.Int64("handled rows", rowCount), zap.Error(err))
 		} else {
@@ -263,7 +272,7 @@ func (w *worker) runReorgJob(rh *reorgHandler, reorgInfo *reorgInfo, tblInfo *mo
 		// We return dbterror.ErrWaitReorgTimeout here too, so that outer loop will break.
 		return dbterror.ErrWaitReorgTimeout
 	case <-time.After(waitTimeout):
-		rowCount, doneKey, currentElement := rc.getRowCountAndKey()
+		rowCount, doneKey, currentElement := rc.getRowCountAndKey(w.sess, job.ID)
 		job.SetRowCount(rowCount)
 		updateBackfillProgress(w, reorgInfo, tblInfo, rowCount)
 
@@ -279,8 +288,7 @@ func (w *worker) runReorgJob(rh *reorgHandler, reorgInfo *reorgInfo, tblInfo *mo
 
 		logutil.BgLogger().Info("[ddl] run reorg job wait timeout",
 			zap.Duration("wait time", waitTimeout),
-			zap.ByteString("element type", currentElement.TypeKey),
-			zap.Int64("element ID", currentElement.ID),
+			zap.Stringer("element", currentElement),
 			zap.Int64("total added row count", rowCount),
 			zap.String("done key", hex.EncodeToString(doneKey)),
 			zap.Error(err))
@@ -291,7 +299,7 @@ func (w *worker) runReorgJob(rh *reorgHandler, reorgInfo *reorgInfo, tblInfo *mo
 }
 
 func (w *worker) mergeWarningsIntoJob(job *model.Job) {
-	rc := w.getReorgCtx(job)
+	rc := w.getReorgCtx(job.ID)
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	partWarnings := rc.mu.warnings
@@ -354,21 +362,25 @@ func getTableTotalCount(w *worker, tblInfo *model.TableInfo) int64 {
 	return rows[0].GetInt64(0)
 }
 
-func (dc *ddlCtx) isReorgRunnable(job *model.Job) error {
+func (dc *ddlCtx) isReorgRunnable(jobIDs ...int64) error {
 	if isChanClosed(dc.ctx.Done()) {
 		// Worker is closed. So it can't do the reorganization.
 		return dbterror.ErrInvalidWorker.GenWithStack("worker is closed")
 	}
 
-	if dc.getReorgCtx(job).isReorgCanceled() {
-		// Job is cancelled. So it can't be done.
-		return dbterror.ErrCancelledDDLJob
-	}
+	jobID := jobIDs[0]
+	if len(jobIDs) == 1 {
+		// TODO: Do check for interrupt backfill job.
+		if dc.getReorgCtx(jobID).isReorgCanceled() {
+			// Job is cancelled. So it can't be done.
+			return dbterror.ErrCancelledDDLJob
+		}
 
-	if !dc.isOwner() {
-		// If it's not the owner, we will try later, so here just returns an error.
-		logutil.BgLogger().Info("[ddl] DDL is not the DDL owner", zap.String("ID", dc.uuid))
-		return errors.Trace(dbterror.ErrNotOwner)
+		if !dc.isOwner() {
+			// If it's not the owner, we will try later, so here just returns an error.
+			logutil.BgLogger().Info("[ddl] DDL is not the DDL owner", zap.String("ID", dc.uuid))
+			return errors.Trace(dbterror.ErrNotOwner)
+		}
 	}
 	return nil
 }

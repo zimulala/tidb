@@ -17,7 +17,7 @@ package spmc
 import (
 	"time"
 
-	"github.com/pingcap/tidb/ddl/util/gpool"
+	"github.com/pingcap/tidb/util/gpool"
 )
 
 type loopQueue[T any, U any, C any, CT any, TF gpool.Context[CT]] struct {
