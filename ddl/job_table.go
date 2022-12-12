@@ -855,7 +855,7 @@ func GetHandledRowCount(sess *session, tblName, condition string, label string) 
 	}
 	var rowCount int64
 	for _, row := range rows {
-		cnt := row.GetInt64(14)
+		cnt := row.GetInt64(0)
 		rowCount += cnt
 	}
 	logutil.BgLogger().Info(fmt.Sprintf("get row cnt *****************************  job cnt:%d, sql:%s, lable:%s, row cnt:%d", len(rows), condition, label, rowCount))

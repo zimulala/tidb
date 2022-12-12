@@ -149,7 +149,7 @@ func (rc *reorgCtx) getRowCountAndKey(sess *session, jobID int64) (int64, kv.Key
 	var row int64
 	var err error
 	if IsDistReorgEnable() {
-		row, err = GetHandledRowCount(sess, BackfillHistoryTable, fmt.Sprintf("job_id = %d and ele_id = %d and ele_key = '%s'",
+		row, err = GetHandledRowCount(sess, BackfillHistoryTable, fmt.Sprintf("ddl_job_id = %d and ele_id = %d and ele_key = '%s'",
 			jobID, element.ID, element.TypeKey), "get_row_count")
 		logutil.BgLogger().Warn("get handled row count failed", zap.Stringer("element", element), zap.Error(err))
 	} else {

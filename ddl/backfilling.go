@@ -1525,7 +1525,7 @@ func checkBackfillJobCount(sess *session, jobID, currEleID int64, currEleKey []b
 		return true, 0, nil
 	}
 
-	backfillJobCnt, err = GetBackfillJobCount(sess, BackfillTable, fmt.Sprintf("job_id = %d and ele_id = %d and ele_key = '%s'",
+	backfillJobCnt, err = GetBackfillJobCount(sess, BackfillTable, fmt.Sprintf("ddl_job_id = %d and ele_id = %d and ele_key = '%s'",
 		jobID, currEleID, currEleKey), "check_backfill_job_count")
 	if err != nil {
 		return false, 0, errors.Trace(err)
@@ -1541,7 +1541,7 @@ func getBackfillJobWithRetry(sess *session, tableName string, jobID, currEleID i
 		descStr = "desc"
 	}
 	for i := 0; i < retrySQLTimes; i++ {
-		bJobs, err = GetBackfillJobs(sess, tableName, fmt.Sprintf("job_id = %d and ele_id = %d and ele_key = '%s' order by job_id, ele_id, ele_key, section_id %s limit 1",
+		bJobs, err = GetBackfillJobs(sess, tableName, fmt.Sprintf("ddl_job_id = %d and ele_id = %d and ele_key = '%s' order by ddl_job_id, ele_id, ele_key, id %s limit 1",
 			jobID, currEleID, currEleKey, descStr), "check_backfill_job_state")
 		if err != nil {
 			logutil.BgLogger().Warn("[ddl] GetBackfillJobs failed", zap.Error(err))
@@ -1598,7 +1598,7 @@ func finishFailedBackfillJobs(sessCtx sessionctx.Context, bJob *BackfillJob) err
 	}
 
 	// TODO: Batch by batch update backfill jobs and insert backfill history jobs.
-	bJobs, err := GetBackfillJobs(sess, BackfillTable, fmt.Sprintf("job_id = %d and ele_id = %d and ele_key = '%s'",
+	bJobs, err := GetBackfillJobs(sess, BackfillTable, fmt.Sprintf("ddl_job_id = %d and ele_id = %d and ele_key = '%s'",
 		bJob.JobID, bJob.EleID, bJob.EleKey), "update_backfill_job")
 	if err != nil {
 		_, err1 := sess.execute(context.Background(), "rollback", "finish_failed_backfill_job")

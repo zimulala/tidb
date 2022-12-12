@@ -1283,7 +1283,7 @@ func (w *baseIndexWorker) UpdateTask(bJob *BackfillJob) error {
 		}
 	}()
 
-	jobs, err := GetBackfillJobs(sess, BackfillTable, fmt.Sprintf("job_id = %d and ele_id = %d and section_id = %d and ele_key = '%s'",
+	jobs, err := GetBackfillJobs(sess, BackfillTable, fmt.Sprintf("ddl_job_id = %d and ele_id = %d and id = %d and ele_key = '%s'",
 		bJob.JobID, bJob.EleID, bJob.ID, bJob.EleKey), "update_backfill_task")
 	if err == nil {
 		if len(jobs) == 0 {
