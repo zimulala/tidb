@@ -799,6 +799,12 @@ func (dc *ddlCtx) sendTasksAndWait(scheduler *backfillScheduler, totalAddedCount
 			zap.String("task failed error", err.Error()),
 			zap.String("take time", elapsedTime.String()),
 			zap.NamedError("updateHandleError", err1))
+		failpoint.Inject("MockGetIndexRecordErr", func() {
+			// Make sure this job didn't failed because by the "Write conflict" error.
+			if dbterror.ErrNotOwner.Equal(err) {
+				time.Sleep(50 * time.Millisecond)
+			}
+		})
 		return errors.Trace(err)
 	}
 
@@ -832,6 +838,7 @@ func getBatchTasks(t table.Table, reorgInfo *reorgInfo, kvRanges []kv.KeyRange) 
 	pt := t.(table.PhysicalTable)
 	jobCtx := reorgInfo.d.jobContext(reorgInfo.Job.ID)
 	for i, keyRange := range kvRanges {
+		startKey := keyRange.StartKey
 		endKey := keyRange.EndKey
 		endK, err := getRangeEndKey(jobCtx, reorgInfo.d.store, job.Priority, prefix, keyRange.StartKey, endKey)
 		if err != nil {
@@ -841,6 +848,12 @@ func getBatchTasks(t table.Table, reorgInfo *reorgInfo, kvRanges []kv.KeyRange) 
 				zap.String("end key", hex.EncodeToString(endKey)), zap.String("current end key", hex.EncodeToString(endK)))
 			endKey = endK
 		}
+		if len(startKey) == 0 {
+			startKey = prefix
+		}
+		if len(endKey) == 0 {
+			endKey = prefix.PrefixNext()
+		}
 
 		task := &reorgBackfillTask{
 			id:              i,
@@ -848,7 +861,7 @@ func getBatchTasks(t table.Table, reorgInfo *reorgInfo, kvRanges []kv.KeyRange) 
 			physicalTableID: physicalTableID,
 			physicalTable:   pt,
 			priority:        reorgInfo.Priority,
-			startKey:        keyRange.StartKey,
+			startKey:        startKey,
 			endKey:          endKey,
 			// If the boundaries overlap, we should ignore the preceding endKey.
 			endInclude: endK.Cmp(keyRange.EndKey) != 0 || i == len(kvRanges)-1}

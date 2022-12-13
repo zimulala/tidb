@@ -682,6 +682,9 @@ func (w *worker) onCreateIndex(d *ddlCtx, t *meta.Meta, job *model.Job, isPK boo
 		details := collectTrace(job.ID)
 		logutil.BgLogger().Info("[ddl] &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&--------------------------  finish add index job", zap.String("job", job.String()),
 			zap.String("time details", details))
+		if job.ReorgMeta.ReorgTp == model.ReorgTypeLitMerge {
+			ingest.LitBackCtxMgr.Unregister(job.ID)
+		}
 	default:
 		err = dbterror.ErrInvalidDDLState.GenWithStackByArgs("index", tblInfo.State)
 	}
@@ -968,6 +971,9 @@ func onDropIndex(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
 		// Finish this job.
 		if job.IsRollingback() {
 			job.FinishTableJob(model.JobStateRollbackDone, model.StateNone, ver, tblInfo)
+			if job.ReorgMeta.ReorgTp == model.ReorgTypeLitMerge {
+				ingest.LitBackCtxMgr.Unregister(job.ID)
+			}
 			job.Args[0] = indexInfo.ID
 		} else {
 			// the partition ids were append by convertAddIdxJob2RollbackJob, it is weird, but for the compatibility,
@@ -1340,7 +1346,7 @@ func (w *baseIndexWorker) getIndexRecord(idxInfo *model.IndexInfo, handle kv.Han
 				failpoint.Return(nil, errors.Trace(dbterror.ErrCantDecodeRecord.GenWithStackByArgs("index",
 					errors.New("mock can't decode record error"))))
 			case "modifyColumnNotOwnerErr":
-				if idxInfo.Name.O == "_Idx$_idx" && handle.IntValue() == 7168 && atomic.CompareAndSwapUint32(&mockNotOwnerErrOnce, 0, 1) {
+				if idxInfo.Name.O == "_Idx$_idx_0" && handle.IntValue() == 7168 && atomic.CompareAndSwapUint32(&mockNotOwnerErrOnce, 0, 1) {
 					failpoint.Return(nil, errors.Trace(dbterror.ErrNotOwner))
 				}
 			case "addIdxNotOwnerErr":
