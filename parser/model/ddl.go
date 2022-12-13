@@ -428,6 +428,7 @@ type BackfillMeta struct {
 	Warnings      map[errors.ErrorID]*terror.Error `json:"warnings"`
 	WarningsCount map[errors.ErrorID]int64         `json:"warnings_count"`
 	Location      *TimeZoneLocation                `json:"location"`
+	ReorgTp       ReorgType                        `json:"reorg_tp"`
 
 	*JobMeta `json:"job_meta"`
 }

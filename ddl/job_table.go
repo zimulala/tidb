@@ -26,6 +26,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
+	"github.com/pingcap/tidb/ddl/ingest"
 	ddlutil "github.com/pingcap/tidb/ddl/util"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta"
@@ -431,7 +432,12 @@ func (d *ddl) loadBackfillJobAndRun() {
 		traceID := bJob.ID + 100
 		initializeTrace(traceID)
 
-		if IsEnableFastReorg() {
+		if bJob.Meta.ReorgTp == model.ReorgTypeLitMerge {
+			if !ingest.LitInitialized {
+				logutil.BgLogger().Warn("[ddl] we can't do LitMerg",
+					zap.Bool("LitInitialized", ingest.LitInitialized), zap.String("bJob", bJob.AbbrStr()))
+				return
+			}
 			runBackfillJobsWithLightning(d, sess, bJob, jobCtx)
 		} else {
 			runBackfillJobs(d, sess, bJob, jobCtx)
@@ -456,9 +462,8 @@ func runBackfillJobs(d *ddl, sess *session, bJob *BackfillJob, jobCtx *JobContex
 	}
 
 	workerCnt := int(variable.GetDDLReorgWorkerCounter())
-	batch := int(variable.GetDDLReorgBatchSize())
 	// TODO: Different worker using different newBackfillerFunc.
-	bwCtx, err := newBackfillWorkerContext(d, dbInfo.Name.O, tbl, workerCnt, batch,
+	bwCtx, err := newBackfillWorkerContext(d, dbInfo.Name.O, tbl, workerCnt, bJob.Meta.ReorgTp,
 		func(bfCtx *backfillCtx) (backfiller, error) {
 			decodeColMap, err := makeupDecodeColMap(sess, tbl.(table.PhysicalTable))
 			if err != nil {
@@ -677,7 +682,7 @@ func getJobsBySQL(sess *session, tbl, condition string) ([]*model.Job, error) {
 }
 
 func syncBackfillHistoryJobs(sess *session, uuid string, backfillJob *BackfillJob) error {
-	sql := fmt.Sprintf("update mysql.%s set state = %d where job_id = %d and ele_id = %d and ele_key = '%s' and exec_id = '%s' limit 1;",
+	sql := fmt.Sprintf("update mysql.%s set state = %d where ddl_job_id = %d and ele_id = %d and ele_key = '%s' and exec_id = '%s' limit 1;",
 		BackfillHistoryTable, model.JobStateSynced, backfillJob.JobID, backfillJob.EleID, backfillJob.EleKey, uuid)
 	logutil.BgLogger().Warn("update *****************************   " + fmt.Sprintf("sql:%v, sess:%#v", sql, sess))
 	_, err := sess.execute(context.Background(), sql, "sync_backfill_history_job")
@@ -731,6 +736,7 @@ func addBackfillJobs(sess *session, tableName string, backfillJobs []*BackfillJo
 				bj.CurrKey, bj.StartKey, bj.EndKey, bj.StartTS, bj.FinishTS, bj.RowCount, mateByte)
 		}
 		_, err = sess.execute(context.Background(), sql, label)
+		logutil.BgLogger().Warn("insert *****************************   " + fmt.Sprintf("sql:%v, sess:%#v", sql, sess))
 		return errors.Trace(err)
 	})
 }
@@ -895,11 +901,12 @@ func GetBackfillJobs(sess *session, tblName, condition string, label string) ([]
 		}
 		bJobs = append(bJobs, &bJob)
 	}
+	logutil.BgLogger().Warn("get *****************************   " + fmt.Sprintf("sql:%v, label:%#v, bJobs:%v", condition, label, bJobs))
 	return bJobs, nil
 }
 
 func getUnsyncedInstanceIDs(sess *session, jobID int64, label string) ([]string, error) {
-	sql := fmt.Sprintf("select sum(state = %d) as tmp, exec_id from mysql.tidb_ddl_backfill_history where job_id = %d group by exec_id having tmp = 0;",
+	sql := fmt.Sprintf("select sum(state = %d) as tmp, exec_id from mysql.tidb_ddl_backfill_history where ddl_job_id = %d group by exec_id having tmp = 0;",
 		model.JobStateSynced, jobID)
 	logutil.BgLogger().Info(fmt.Sprintf("get unsynced exec ID ***************************** 00 lable:%s, sql:%s", sql, label))
 	rows, err := sess.execute(context.Background(), sql, label)
@@ -923,6 +930,7 @@ func RemoveBackfillJob(sess *session, isOneEle bool, backfillJob *BackfillJob) e
 		sql += fmt.Sprintf(" and id = %d", backfillJob.ID)
 	}
 	_, err := sess.execute(context.Background(), sql, "remove_backfill_job")
+	logutil.BgLogger().Info(fmt.Sprintf("remove ***************************** 00 sql:%s", sql))
 	return err
 }
 

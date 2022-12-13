@@ -262,7 +262,7 @@ type backfillWorkerContext struct {
 
 type newBackfillerFunc func(bfCtx *backfillCtx) (bf backfiller, err error)
 
-func newBackfillWorkerContext(d *ddl, schemaName string, tbl table.Table, workerCnt int, batch int, bfFunc newBackfillerFunc) (*backfillWorkerContext, error) {
+func newBackfillWorkerContext(d *ddl, schemaName string, tbl table.Table, workerCnt int, reorgTp model.ReorgType, bfFunc newBackfillerFunc) (*backfillWorkerContext, error) {
 	if workerCnt <= 0 {
 		return nil, nil
 	}
@@ -279,11 +279,6 @@ func newBackfillWorkerContext(d *ddl, schemaName string, tbl table.Table, worker
 			logutil.BgLogger().Fatal("[ddl] dispatch backfill jobs loop get session failed, it should not happen, please try restart TiDB", zap.Error(err))
 		}
 		sess := newSession(se)
-		reorgTp := model.ReorgTypeNone
-		if IsEnableFastReorg() {
-			// TODO: set reorgTp
-			reorgTp = model.ReorgTypeLitMerge
-		}
 		bfCtx := newBackfillCtx(d.ddlCtx, sess, reorgTp, schemaName, tbl)
 		bf, err := bfFunc(bfCtx)
 		if err != nil {
@@ -584,7 +579,7 @@ func (w *backfillWorker) handleBackfillTask(d *ddlCtx, task *reorgBackfillTask, 
 			batchStartTime = time.Now()
 			task.bfJob.CurrKey = result.nextKey
 			if err := w.updateLease(w.uuid, task.bfJob); err != nil {
-				logutil.BgLogger().Info("[ddl] handle backfill task, update lease failed", zap.Stringer("worker", w),
+				logutil.BgLogger().Info("[ddl] backfill worker handle task, update lease failed", zap.Stringer("worker", w),
 					zap.String("task", task.String()), zap.String("bj", task.bfJob.AbbrStr()), zap.Error(err))
 				result.err = err
 				return result
@@ -605,11 +600,6 @@ func (w *backfillWorker) handleBackfillTask(d *ddlCtx, task *reorgBackfillTask, 
 
 func (w *backfillWorker) runTask(task *reorgBackfillTask) {
 	logutil.BgLogger().Info("[ddl] backfill worker start", zap.Stringer("worker", w))
-	task, more := <-w.taskCh
-	if !more {
-		logutil.BgLogger().Info("[ddl] backfill worker exit", zap.Stringer("worker", w))
-		return
-	}
 	w.setDDLLabelForTopSQL(task.jobID, task.sqlQuery)
 
 	logutil.BgLogger().Debug("[ddl] backfill worker got task", zap.Int("workerID", w.id), zap.String("task", task.String()))
@@ -617,10 +607,8 @@ func (w *backfillWorker) runTask(task *reorgBackfillTask) {
 		if w.id == 0 {
 			result := &backfillResult{taskID: task.id, addedCount: 0, nextKey: nil, err: errors.Errorf("mock backfill error")}
 			w.resultCh <- result
-			failpoint.Continue()
 		}
 	})
-
 	failpoint.Inject("mockHighLoadForAddIndex", func() {
 		sqlPrefixes := []string{"alter"}
 		topsql.MockHighCPULoad(task.sqlQuery, sqlPrefixes, 5)
@@ -638,6 +626,11 @@ func (w *backfillWorker) runTask(task *reorgBackfillTask) {
 			zap.Stringer("worker", w), zap.Error(result.err))
 		return
 	}
+	traceID := task.bfJob.JobID + 100
+	finish := injectSpan(traceID, fmt.Sprintf("handle-job-%d-task-%d", task.bfJob.JobID, task.bfJob.ID))
+	task.bfJob.RowCount = int64(result.addedCount)
+	w.finishJob(task.bfJob)
+	finish()
 }
 
 func (w *backfillWorker) run(d *ddlCtx, bf backfiller, job *model.Job) {
@@ -1329,6 +1322,7 @@ func addBatchBackfillJobs(sess *session, bfWorkerType backfillerType, reorgInfo 
 		bm := &model.BackfillMeta{
 			IsUnique:   isUnique,
 			EndInclude: task.endInclude,
+			ReorgTp:    reorgInfo.Job.ReorgMeta.ReorgTp,
 			SQLMode:    reorgInfo.ReorgMeta.SQLMode,
 			Location:   reorgInfo.ReorgMeta.Location,
 			JobMeta: &model.JobMeta{
