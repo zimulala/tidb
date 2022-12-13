@@ -1318,7 +1318,7 @@ func (dc *ddlCtx) waitBackfillJob(worker *backfillWorker, bfJob *BackfillJob) er
 }
 
 func addBatchBackfillJobs(sess *session, bfWorkerType backfillerType, reorgInfo *reorgInfo, notDistTask bool,
-	batchTasks []*reorgBackfillTask, bJobs []*BackfillJob, id *int64) error {
+	batchTasks []*reorgBackfillTask, bJobs []*BackfillJob, isUnique bool, id *int64) error {
 	bJobs = bJobs[:0]
 	instanceID := emptyInstance
 	if notDistTask {
@@ -1327,6 +1327,7 @@ func addBatchBackfillJobs(sess *session, bfWorkerType backfillerType, reorgInfo 
 	// TODO: Adjust the number of ranges(region) for each task.
 	for _, task := range batchTasks {
 		bm := &model.BackfillMeta{
+			IsUnique:   isUnique,
 			EndInclude: task.endInclude,
 			SQLMode:    reorgInfo.ReorgMeta.SQLMode,
 			Location:   reorgInfo.ReorgMeta.Location,
@@ -1385,6 +1386,11 @@ func (dc *ddlCtx) controlWritePhysicalTableRecord(sess *session, t table.Physica
 		currBackfillJobID = maxBfJob.ID + 1
 	}
 
+	var isUnique bool
+	if bfWorkerType == typeAddIndexWorker {
+		idxInfo := model.FindIndexInfoByID(t.Meta().Indices, reorgInfo.currElement.ID)
+		isUnique = idxInfo.Unique
+	}
 	logutil.BgLogger().Info("[ddl] control write physical table record ----------------- 00",
 		zap.Int64("jobID", reorgInfo.Job.ID), zap.Reflect("maxBfJob", maxBfJob))
 	isFirstOps := true
@@ -1400,7 +1406,7 @@ func (dc *ddlCtx) controlWritePhysicalTableRecord(sess *session, t table.Physica
 		}
 		batchTasks := getBatchTasks(t, reorgInfo, kvRanges)
 		notNeedDistProcess := isFirstOps && (len(kvRanges) < minDistTaskCnt)
-		if err = addBatchBackfillJobs(sess, bfWorkerType, reorgInfo, notNeedDistProcess, batchTasks, bJobs, &currBackfillJobID); err != nil {
+		if err = addBatchBackfillJobs(sess, bfWorkerType, reorgInfo, notNeedDistProcess, batchTasks, bJobs[:0], isUnique, &currBackfillJobID); err != nil {
 			return errors.Trace(err)
 		}
 		isFirstOps = false

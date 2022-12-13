@@ -691,6 +691,20 @@ func (d *ddl) prepareWorkers4ConcurrencyDDL() {
 	d.wg.Run(d.startDispatchLoop)
 }
 
+func (d *ddl) prepareBackfillWorkers() {
+	workerFactory := func() func() (pools.Resource, error) {
+		return func() (pools.Resource, error) {
+			bk := newBackfillWorker(context.Background(), d.ddlCtx, int(backfillWorkerID.Add(1)), nil)
+			metrics.DDLCounter.WithLabelValues(fmt.Sprintf("%s_%s", metrics.CreateDDL, bk.String())).Inc()
+			return bk, nil
+		}
+	}
+	d.backfillCtxPool = newBackfillContextPool(pools.NewResourcePool(workerFactory(), backfillWorkerCnt, backfillWorkerCnt, 0))
+	d.backfillWorkerPool = spmc.NewSPMCPool[*reorgBackfillTask, *backfillResult, int, *backfillWorker, *backfillWorkerContext]("backfill", int32(backfillWorkerCnt))
+	d.backfillJobCh = make(chan struct{}, 1)
+	d.wg.Run(d.startDispatchBackfillJobsLoop)
+}
+
 func (d *ddl) prepareWorkers4legacyDDL() {
 	d.workers = make(map[workerType]*worker, 2)
 	d.workers[generalWorker] = newWorker(d.ctx, generalWorker, d.sessPool, d.delRangeMgr, d.ddlCtx, false)
@@ -726,6 +740,7 @@ func (d *ddl) Start(ctxPool *pools.ResourcePool) error {
 
 	d.prepareWorkers4ConcurrencyDDL()
 	d.prepareWorkers4legacyDDL()
+	d.prepareBackfillWorkers()
 
 	if config.TableLockEnabled() {
 		d.wg.Add(1)
@@ -806,6 +821,12 @@ func (d *ddl) close() {
 	d.schemaSyncer.Close()
 	if d.reorgWorkerPool != nil {
 		d.reorgWorkerPool.close()
+	}
+	if d.backfillCtxPool != nil {
+		d.backfillCtxPool.close()
+	}
+	if d.backfillWorkerPool != nil {
+		d.backfillWorkerPool.ReleaseAndWait()
 	}
 	if d.generalDDLWorkerPool != nil {
 		d.generalDDLWorkerPool.close()

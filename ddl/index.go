@@ -789,7 +789,7 @@ func doReorgWorkForCreateIndexMultiSchema(w *worker, d *ddlCtx, t *meta.Meta, jo
 	return true, ver, err
 }
 
-func doReorgWorkForCreateIndex(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job,
+func doReorgWorkForCreateIndexCopy(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job,
 	tbl table.Table, indexInfo *model.IndexInfo) (done bool, ver int64, err error) {
 	bfProcess := pickBackfillType(w, job)
 	if !bfProcess.NeedMergeProcess() {
@@ -840,6 +840,60 @@ func doReorgWorkForCreateIndex(w *worker, d *ddlCtx, t *meta.Meta, job *model.Jo
 				return false, ver, errors.Trace(err)
 			}
 			bc.SetDone()
+		case model.ReorgTypeTxnMerge:
+			done, ver, err = runReorgJobAndHandleErr(w, d, t, job, tbl, indexInfo, false)
+			if err != nil || !done {
+				return false, ver, errors.Trace(err)
+			}
+		}
+		indexInfo.BackfillState = model.BackfillStateReadyToMerge
+		ver, err = updateVersionAndTableInfo(d, t, job, tbl.Meta(), true)
+		return false, ver, errors.Trace(err)
+	case model.BackfillStateReadyToMerge:
+		logutil.BgLogger().Info("[ddl] index backfill state ready to merge", zap.Int64("job ID", job.ID),
+			zap.String("table", tbl.Meta().Name.O), zap.String("index", indexInfo.Name.O))
+		indexInfo.BackfillState = model.BackfillStateMerging
+		if bfProcess == model.ReorgTypeLitMerge {
+			ingest.LitBackCtxMgr.Unregister(job.ID)
+		}
+		job.SnapshotVer = 0 // Reset the snapshot version for merge index reorg.
+		ver, err = updateVersionAndTableInfo(d, t, job, tbl.Meta(), true)
+		return false, ver, errors.Trace(err)
+	case model.BackfillStateMerging:
+		done, ver, err = runReorgJobAndHandleErr(w, d, t, job, tbl, indexInfo, true)
+		if !done {
+			return false, ver, err
+		}
+		indexInfo.BackfillState = model.BackfillStateInapplicable // Prevent double-write on this index.
+		return true, ver, nil
+	default:
+		return false, 0, dbterror.ErrInvalidDDLState.GenWithStackByArgs("backfill", indexInfo.BackfillState)
+	}
+}
+
+func doReorgWorkForCreateIndex(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job,
+	tbl table.Table, indexInfo *model.IndexInfo) (done bool, ver int64, err error) {
+	bfProcess := pickBackfillType(w, job)
+	if !bfProcess.NeedMergeProcess() {
+		return runReorgJobAndHandleErr(w, d, t, job, tbl, indexInfo, false)
+	}
+	switch indexInfo.BackfillState {
+	case model.BackfillStateRunning:
+		logutil.BgLogger().Info("[ddl] index backfill state running",
+			zap.Int64("job ID", job.ID), zap.String("table", tbl.Meta().Name.O),
+			zap.Bool("ingest mode", bfProcess == model.ReorgTypeLitMerge),
+			zap.String("index", indexInfo.Name.O))
+		switch bfProcess {
+		case model.ReorgTypeLitMerge:
+			done, ver, err = runReorgJobAndHandleErr(w, d, t, job, tbl, indexInfo, false)
+			if err != nil {
+				// TODO:
+				err = tryFallbackToTxnMerge(job, err)
+				return false, ver, errors.Trace(err)
+			}
+			if !done {
+				return false, ver, nil
+			}
 		case model.ReorgTypeTxnMerge:
 			done, ver, err = runReorgJobAndHandleErr(w, d, t, job, tbl, indexInfo, false)
 			if err != nil || !done {
@@ -1967,10 +2021,9 @@ func runBackfillJobsWithLightning(d *ddl, sess *session, bfJob *BackfillJob, job
 		logutil.BgLogger().Warn("[ddl] lightning loaded")
 		return
 	}
-	// TODO: set indexInfo.Unique
-	isUnique := false
 	var err error
-	bc, err = ingest.LitBackCtxMgr.Register(d.ctx, isUnique, bfJob.JobID, bfJob.Meta.SQLMode)
+	logutil.BgLogger().Warn(fmt.Sprintf("------------------------------------ bf:%#v", bfJob))
+	bc, err = ingest.LitBackCtxMgr.Register(d.ctx, bfJob.Meta.IsUnique, bfJob.JobID, bfJob.Meta.SQLMode)
 	if err != nil {
 		// TODO: tryFallbackToTxnMerge
 		logutil.BgLogger().Warn("[ddl] lightning register error", zap.Error(err))
@@ -1987,7 +2040,7 @@ func runBackfillJobsWithLightning(d *ddl, sess *session, bfJob *BackfillJob, job
 	}
 
 	finish := injectSpan(bfJob.JobID, "finish-import")
-	err = bc.FinishImport(bfJob.EleID, isUnique, tbl)
+	err = bc.FinishImport(bfJob.EleID, bfJob.Meta.IsUnique, tbl)
 	if err != nil {
 		if kv.ErrKeyExists.Equal(err) {
 			logutil.BgLogger().Warn("[ddl] import index duplicate key, convert job to rollback", zap.String("job", bfJob.AbbrStr()), zap.Error(err))

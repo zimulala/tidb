@@ -420,6 +420,7 @@ type JobMeta struct {
 
 // BackfillMeta is meta info of the backfill job.
 type BackfillMeta struct {
+	IsUnique   bool   `json:"is_unique"`
 	EndInclude bool   `json:"end_include"`
 	ErrMsg     string `json:"err_msg"`
 
@@ -427,7 +428,8 @@ type BackfillMeta struct {
 	Warnings      map[errors.ErrorID]*terror.Error `json:"warnings"`
 	WarningsCount map[errors.ErrorID]int64         `json:"warnings_count"`
 	Location      *TimeZoneLocation                `json:"location"`
-	*JobMeta      `json:"job_meta"`
+
+	*JobMeta `json:"job_meta"`
 }
 
 // Encode encodes BackfillMeta with json format.
