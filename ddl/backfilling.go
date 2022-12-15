@@ -1145,15 +1145,6 @@ func (b *backfillScheduler) Close() {
 // The above operations are completed in a transaction.
 // Finally, update the concurrent processing of the total number of rows, and store the completed handle value.
 func (dc *ddlCtx) writePhysicalTableRecord(sessPool *sessionPool, t table.PhysicalTable, bfWorkerType backfillerType, reorgInfo *reorgInfo) error {
-	// TODO: Support typeAddIndexMergeTmpWorker.
-	if IsDistReorgEnable() && bfWorkerType == typeAddIndexWorker {
-		sCtx, err := sessPool.get()
-		if err != nil {
-			return errors.Trace(err)
-		}
-		defer sessPool.put(sCtx)
-		return dc.controlWritePhysicalTableRecord(newSession(sCtx), t, bfWorkerType, reorgInfo)
-	}
 	job := reorgInfo.Job
 	totalAddedCount := job.GetRowCount()
 
@@ -1286,30 +1277,6 @@ func injectCheckBackfillWorkerNum(curWorkerSize int, isMergeWorker bool) error {
 	return nil
 }
 
-func (dc *ddlCtx) waitBackfillJob(worker *backfillWorker, bfJob *BackfillJob) error {
-	startTime := time.Now()
-	result := <-worker.resultCh
-	logutil.BgLogger().Warn("--------------------------- get backfill job result " + worker.String())
-	addedCount := int64(result.addedCount)
-	err := result.err
-
-	elapsedTime := time.Since(startTime)
-	if err != nil {
-		metrics.BatchAddIdxHistogram.WithLabelValues(metrics.LblError).Observe(elapsedTime.Seconds())
-	} else {
-		metrics.BatchAddIdxHistogram.WithLabelValues(metrics.LblOK).Observe(elapsedTime.Seconds())
-	}
-	nextKey := result.nextKey
-	logutil.BgLogger().Warn("[ddl] backfill worker handle batch tasks failed",
-		zap.String("elementType", bfJob.Tp.String()),
-		zap.Int64("elementID", bfJob.EleID),
-		zap.String("nextHandle", hex.EncodeToString(nextKey)),
-		zap.Int64("batchAddedCount", addedCount),
-		zap.String("takeTime", elapsedTime.String()),
-		zap.Error(err))
-	return errors.Trace(err)
-}
-
 func addBatchBackfillJobs(sess *session, bfWorkerType backfillerType, reorgInfo *reorgInfo, notDistTask bool,
 	batchTasks []*reorgBackfillTask, bJobs []*BackfillJob, isUnique bool, id *int64) error {
 	bJobs = bJobs[:0]
@@ -1355,41 +1322,13 @@ func addBatchBackfillJobs(sess *session, bfWorkerType backfillerType, reorgInfo 
 	return nil
 }
 
-func (dc *ddlCtx) controlWritePhysicalTableRecord(sess *session, t table.PhysicalTable, bfWorkerType backfillerType, reorgInfo *reorgInfo) error {
-	defer injectSpan(reorgInfo.Job.ID, "control-write-records")()
-	startKey, endKey := reorgInfo.StartKey, reorgInfo.EndKey
-	if startKey == nil && endKey == nil {
-		return nil
-	}
-
-	if err := dc.isReorgRunnable(reorgInfo.Job.ID); err != nil {
-		return errors.Trace(err)
-	}
-
-	currBackfillJobID := int64(1)
-	isFinished, maxBfJob, err := getMaxBackfillJob(sess, reorgInfo.Job.ID, reorgInfo.currElement.ID, reorgInfo.currElement.TypeKey)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if isFinished {
-		return nil
-	}
-	if maxBfJob != nil {
-		// TODO: Do we need to use EndKey.Next?
-		startKey = maxBfJob.EndKey
-		currBackfillJobID = maxBfJob.ID + 1
-	}
-
-	var isUnique bool
-	if bfWorkerType == typeAddIndexWorker {
-		idxInfo := model.FindIndexInfoByID(t.Meta().Indices, reorgInfo.currElement.ID)
-		isUnique = idxInfo.Unique
-	}
-	logutil.BgLogger().Info("[ddl] control write physical table record ----------------- 00",
-		zap.Int64("jobID", reorgInfo.Job.ID), zap.Reflect("maxBfJob", maxBfJob))
+func (dc *ddlCtx) splitTableBackfillTasks(sess *session, reorgInfo *reorgInfo, pTbls []table.PhysicalTable, isUnique bool,
+	bfWorkerType backfillerType, startKey kv.Key, currBackfillJobID int64) error {
+	endKey := reorgInfo.EndKey
 	isFirstOps := true
 	bJobs := make([]*BackfillJob, 0, genTaskBatch)
 	batch := genTaskBatch
+	t := pTbls[0]
 	for {
 		kvRanges, err := splitTableRanges(t, reorgInfo.d.store, startKey, endKey)
 		if err != nil {
@@ -1432,6 +1371,44 @@ func (dc *ddlCtx) controlWritePhysicalTableRecord(sess *session, t table.Physica
 			time.Sleep(time.Second)
 		}
 		startKey = remains[0].StartKey
+	}
+	return nil
+}
+
+func (dc *ddlCtx) controlWritePhysicalTableRecord(sess *session, t table.PhysicalTable, bfWorkerType backfillerType, reorgInfo *reorgInfo) error {
+	defer injectSpan(reorgInfo.Job.ID, "control-write-records")()
+	startKey, endKey := reorgInfo.StartKey, reorgInfo.EndKey
+	if startKey == nil && endKey == nil {
+		return nil
+	}
+
+	if err := dc.isReorgRunnable(reorgInfo.Job.ID); err != nil {
+		return errors.Trace(err)
+	}
+
+	currBackfillJobID := int64(1)
+	isFinished, maxBfJob, err := getMaxBackfillJob(sess, reorgInfo.Job.ID, reorgInfo.currElement.ID, reorgInfo.currElement.TypeKey)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if isFinished {
+		return nil
+	}
+	if maxBfJob != nil {
+		startKey = maxBfJob.EndKey
+		currBackfillJobID = maxBfJob.ID + 1
+	}
+
+	var isUnique bool
+	if bfWorkerType == typeAddIndexWorker {
+		idxInfo := model.FindIndexInfoByID(t.Meta().Indices, reorgInfo.currElement.ID)
+		isUnique = idxInfo.Unique
+	}
+	logutil.BgLogger().Info("[ddl] control write physical table record ----------------- 00",
+		zap.Int64("jobID", reorgInfo.Job.ID), zap.Reflect("maxBfJob", maxBfJob))
+	err = dc.splitTableBackfillTasks(sess, reorgInfo, []table.PhysicalTable{t}, isUnique, bfWorkerType, startKey, currBackfillJobID)
+	if err != nil {
+		return errors.Trace(err)
 	}
 
 	var backfillJobFinished bool

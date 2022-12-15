@@ -438,8 +438,12 @@ func (d *ddl) loadBackfillJobAndRun() {
 					zap.Bool("LitInitialized", ingest.LitInitialized), zap.String("bJob", bJob.AbbrStr()))
 				return
 			}
+			logutil.BgLogger().Info("[ddl] &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&  litMerge")
+			logutil.BgLogger().Info("run backfill job with LitMerge", zap.String("bJob", bJob.AbbrStr()))
 			runBackfillJobsWithLightning(d, sess, bJob, jobCtx)
 		} else {
+			logutil.BgLogger().Info("[ddl] &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&  txnMerge")
+			logutil.BgLogger().Info("run backfill job with TxnMerge", zap.String("bJob", bJob.AbbrStr()))
 			runBackfillJobs(d, sess, bJob, jobCtx)
 		}
 
@@ -939,8 +943,8 @@ func updateBackfillJob(sess *session, tableName string, backfillJob *BackfillJob
 	if err != nil {
 		return err
 	}
-	sql := fmt.Sprintf("update mysql.%s set exec_id = '%s', exec_lease = '%s', state = %d, backfill_meta = '%s' where ddl_job_id = %d and ele_id = %d and ele_key = '%s' and id = %d",
-		tableName, backfillJob.InstanceID, backfillJob.InstanceLease, backfillJob.State, mate, backfillJob.JobID, backfillJob.EleID, backfillJob.EleKey, backfillJob.ID)
+	sql := fmt.Sprintf("update mysql.%s set exec_id = '%s', exec_lease = '%s', state = %d, curr_key = '%s', row_count = %d, backfill_meta = '%s' where ddl_job_id = %d and ele_id = %d and ele_key = '%s' and id = %d",
+		tableName, backfillJob.InstanceID, backfillJob.InstanceLease, backfillJob.State, backfillJob.CurrKey, backfillJob.RowCount, mate, backfillJob.JobID, backfillJob.EleID, backfillJob.EleKey, backfillJob.ID)
 	_, err = sess.execute(context.Background(), sql, label)
 	return err
 }

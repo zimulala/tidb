@@ -142,21 +142,10 @@ func (rc *reorgCtx) increaseRowCount(count int64) {
 	atomic.AddInt64(&rc.rowCount, count)
 }
 
-func (rc *reorgCtx) getRowCountAndKey(sess *session, jobID int64) (int64, kv.Key, *meta.Element) {
+func (rc *reorgCtx) getRowCountAndKey() (int64, kv.Key, *meta.Element) {
+	row := atomic.LoadInt64(&rc.rowCount)
 	h, _ := (rc.doneKey.Load()).(nullableKey)
 	element, _ := (rc.element.Load()).(*meta.Element)
-
-	var row int64
-	if IsDistReorgEnable() {
-		var err error
-		row, err = GetHandledRowCount(sess, BackfillHistoryTable, fmt.Sprintf("ddl_job_id = %d and ele_id = %d and ele_key = '%s'",
-			jobID, element.ID, element.TypeKey), "get_row_count")
-		if err != nil {
-			logutil.BgLogger().Warn("get handled row count failed", zap.Stringer("element", element), zap.Error(err))
-		}
-	} else {
-		row = atomic.LoadInt64(&rc.rowCount)
-	}
 	return row, h.key, element
 }
 
@@ -244,7 +233,7 @@ func (w *worker) runReorgJob(rh *reorgHandler, reorgInfo *reorgInfo, tblInfo *mo
 			d.removeReorgCtx(job)
 			return dbterror.ErrCancelledDDLJob
 		}
-		rowCount, _, _ := rc.getRowCountAndKey(w.sess, job.ID)
+		rowCount, _, _ := rc.getRowCountAndKey()
 		if err != nil {
 			logutil.BgLogger().Warn("[ddl] run reorg job done", zap.Int64("handled rows", rowCount), zap.Error(err))
 		} else {
@@ -274,7 +263,7 @@ func (w *worker) runReorgJob(rh *reorgHandler, reorgInfo *reorgInfo, tblInfo *mo
 		// We return dbterror.ErrWaitReorgTimeout here too, so that outer loop will break.
 		return dbterror.ErrWaitReorgTimeout
 	case <-time.After(waitTimeout):
-		rowCount, doneKey, currentElement := rc.getRowCountAndKey(w.sess, job.ID)
+		rowCount, doneKey, currentElement := rc.getRowCountAndKey()
 		job.SetRowCount(rowCount)
 		updateBackfillProgress(w, reorgInfo, tblInfo, rowCount)
 

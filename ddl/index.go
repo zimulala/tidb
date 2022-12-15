@@ -1768,6 +1768,15 @@ func (w *worker) addTableIndex(t table.Table, reorgInfo *reorgInfo) error {
 			}
 		}
 	} else {
+		// TODO: Support typeAddIndexMergeTmpWorker and partitionTable.
+		if IsDistReorgEnable() && !reorgInfo.mergingTmpIdx {
+			sCtx, err := w.sessPool.get()
+			if err != nil {
+				return errors.Trace(err)
+			}
+			defer w.sessPool.put(sCtx)
+			return w.controlWritePhysicalTableRecord(newSession(sCtx), t.(table.PhysicalTable), typeAddIndexWorker, reorgInfo)
+		}
 		//nolint:forcetypeassert
 		err = w.addPhysicalTableIndex(t.(table.PhysicalTable), reorgInfo)
 	}
