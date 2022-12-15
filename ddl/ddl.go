@@ -694,7 +694,7 @@ func (d *ddl) prepareWorkers4ConcurrencyDDL() {
 func (d *ddl) prepareBackfillWorkers() {
 	workerFactory := func() func() (pools.Resource, error) {
 		return func() (pools.Resource, error) {
-			bk := newBackfillWorker(context.Background(), d.ddlCtx, int(backfillWorkerID.Add(1)), nil)
+			bk := newBackfillWorker(context.Background(), int(backfillWorkerID.Add(1)), nil)
 			metrics.DDLCounter.WithLabelValues(fmt.Sprintf("%s_%s", metrics.CreateDDL, bk.String())).Inc()
 			return bk, nil
 		}

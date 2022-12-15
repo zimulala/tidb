@@ -764,7 +764,7 @@ func GetBackfillJobsForOneEle(sess *session, batch int, excludedJobIDs []int64, 
 	var bJobs []*BackfillJob
 	s := newSession(sess)
 	err = runInTxn(s, func(se *session) error {
-		currTime, err := GetOracleTime(s)
+		currTime, err := GetOracleTimeInTxn(s)
 		if err != nil {
 			return err
 		}
@@ -797,7 +797,7 @@ func GetAndMarkBackfillJobsForOneEle(sess *session, batch int, jobID int64, uuid
 	var bJobs []*BackfillJob
 	s := newSession(sess)
 	err := runInTxn(s, func(se *session) error {
-		currTime, err := GetOracleTime(se)
+		currTime, err := GetOracleTimeInTxn(se)
 		if err != nil {
 			return err
 		}

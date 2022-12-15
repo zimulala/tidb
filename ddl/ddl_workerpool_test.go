@@ -37,7 +37,7 @@ func TestDDLWorkerPool(t *testing.T) {
 func TestBackfillWorkerPool(t *testing.T) {
 	f := func() func() (pools.Resource, error) {
 		return func() (pools.Resource, error) {
-			wk := newBackfillWorker(context.Background(), nil, 1, nil)
+			wk := newBackfillWorker(context.Background(), 1, nil)
 			return wk, nil
 		}
 	}

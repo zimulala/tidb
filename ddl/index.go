@@ -39,6 +39,7 @@ import (
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/tablecodec"
@@ -1246,7 +1247,6 @@ type baseIndexWorker struct {
 	rowMap      map[int64]types.Datum
 	rowDecoder  *decoder.RowDecoder
 
-	sqlMode    mysql.SQLMode
 	jobContext *JobContext
 }
 
@@ -1327,35 +1327,21 @@ func (w *baseIndexWorker) UpdateTask(bJob *BackfillJob) error {
 		return errors.Errorf("sess ctx:%#v convert session failed", w.backfillCtx.sessCtx)
 	}
 
-	_, err := sess.execute(context.Background(), "begin", "update_backfill_task")
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if err == nil {
-			_, err = sess.execute(context.Background(), "commit", "update_backfill_task")
-			return
+	return runInTxn(sess, func(se *session) error {
+		jobs, err := GetBackfillJobs(sess, BackfillTable, fmt.Sprintf("ddl_job_id = %d and ele_id = %d and id = %d and ele_key = '%s'",
+			bJob.JobID, bJob.EleID, bJob.ID, bJob.EleKey), "update_backfill_task")
+		if err != nil {
+			return err
 		}
-		_, err1 := sess.execute(context.Background(), "rollback", "update_backfill_task")
-		if err1 != nil {
-			logutil.BgLogger().Info("[ddl] index worker update task rollback failed", zap.Error(err1))
-		}
-	}()
 
-	jobs, err := GetBackfillJobs(sess, BackfillTable, fmt.Sprintf("ddl_job_id = %d and ele_id = %d and id = %d and ele_key = '%s'",
-		bJob.JobID, bJob.EleID, bJob.ID, bJob.EleKey), "update_backfill_task")
-	if err == nil {
 		if len(jobs) == 0 {
 			return dbterror.ErrDDLJobNotFound.FastGen("get zero backfill bJob, lease is timeout")
 		}
 		if jobs[0].InstanceID != bJob.InstanceID {
 			return dbterror.ErrDDLJobNotFound.FastGenByArgs(fmt.Sprintf("get a backfill bJob %v, want instance ID %s", jobs[0], bJob.InstanceID))
 		}
-		err = updateBackfillJob(sess, BackfillTable, bJob, "update_backfill_task")
-	}
-
-	return err
+		return updateBackfillJob(sess, BackfillTable, bJob, "update_backfill_task")
+	})
 }
 
 func (w *baseIndexWorker) FinishTask(bJob *BackfillJob) error {
@@ -1363,24 +1349,13 @@ func (w *baseIndexWorker) FinishTask(bJob *BackfillJob) error {
 	if !ok {
 		return errors.Errorf("sess ctx:%#v convert session failed", w.backfillCtx.sessCtx)
 	}
-	_, err := sess.execute(context.Background(), "begin", "finish_backfill_task")
-	if err != nil {
-		return err
-	}
-
-	if err = RemoveBackfillJob(sess, false, bJob); err == nil {
-		err = AddBackfillHistoryJob(sess, []*BackfillJob{bJob})
-	}
-
-	if err == nil {
-		_, err = sess.execute(context.Background(), "commit", "finish_backfill_task")
-	} else {
-		_, err1 := sess.execute(context.Background(), "rollback", "finish_backfill_task")
-		if err1 != nil {
-			logutil.BgLogger().Info("[ddl] index worker finish task rollback failed", zap.Error(err1))
+	return runInTxn(sess, func(se *session) error {
+		err := RemoveBackfillJob(sess, false, bJob)
+		if err != nil {
+			return err
 		}
-	}
-	return err
+		return AddBackfillHistoryJob(sess, []*BackfillJob{bJob})
+	})
 }
 
 func (w *baseIndexWorker) GetCtx() *backfillCtx {
@@ -1478,7 +1453,7 @@ func (w *baseIndexWorker) fetchRowColVals(txn kv.Transaction, taskRange reorgBac
 	taskDone := false
 	oprStartTime := startTime
 	jobID := taskRange.getJobID()
-	err := iterateSnapshotKeys(w.dCtx.jobContext(jobID), w.sessCtx.GetStore(), taskRange.priority, taskRange.physicalTable.RecordPrefix(), txn.StartTS(),
+	err := iterateSnapshotKeys(w.GetCtx().jobContext(jobID), w.sessCtx.GetStore(), taskRange.priority, taskRange.physicalTable.RecordPrefix(), txn.StartTS(),
 		taskRange.startKey, taskRange.endKey, func(handle kv.Handle, recordKey kv.Key, rawRow []byte) (bool, error) {
 			oprEndTime := time.Now()
 			logSlowOperations(oprEndTime.Sub(oprStartTime), "iterateSnapshotKeys in baseIndexWorker fetchRowColVals", 0)
@@ -1650,7 +1625,7 @@ func (w *addIndexWorker) BackfillDataInTxn(handleRange reorgBackfillTask) (taskC
 		taskCtx.addedCount = 0
 		taskCtx.scanCount = 0
 		txn.SetOption(kv.Priority, handleRange.priority)
-		if tagger := w.dCtx.getResourceGroupTaggerForTopSQL(jobID); tagger != nil {
+		if tagger := w.GetCtx().getResourceGroupTaggerForTopSQL(jobID); tagger != nil {
 			txn.SetOption(kv.ResourceGroupTagger, tagger)
 		}
 
@@ -1769,7 +1744,11 @@ func (w *worker) addTableIndex(t table.Table, reorgInfo *reorgInfo) error {
 		}
 	} else {
 		// TODO: Support typeAddIndexMergeTmpWorker and partitionTable.
-		if IsDistReorgEnable() && !reorgInfo.mergingTmpIdx {
+		isDistReorg, err := w.sess.GetSessionVars().GlobalVarsAccessor.GetGlobalSysVar(variable.TiDBDDLEnableDistributeReorg)
+		if err != nil {
+			return err
+		}
+		if isDistReorg == variable.On && !reorgInfo.mergingTmpIdx {
 			sCtx, err := w.sessPool.get()
 			if err != nil {
 				return errors.Trace(err)
@@ -1926,7 +1905,7 @@ func (w *cleanUpIndexWorker) BackfillDataInTxn(handleRange reorgBackfillTask) (t
 		taskCtx.addedCount = 0
 		taskCtx.scanCount = 0
 		txn.SetOption(kv.Priority, handleRange.priority)
-		if tagger := w.dCtx.getResourceGroupTaggerForTopSQL(handleRange.getJobID()); tagger != nil {
+		if tagger := w.GetCtx().getResourceGroupTaggerForTopSQL(handleRange.getJobID()); tagger != nil {
 			txn.SetOption(kv.ResourceGroupTagger, tagger)
 		}
 
