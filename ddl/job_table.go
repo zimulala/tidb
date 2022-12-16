@@ -928,6 +928,7 @@ func getUnsyncedInstanceIDs(sess *session, jobID int64, label string) ([]string,
 // RemoveBackfillJob removes the backfill jobs from the tidb_ddl_backfill table.
 // If isOneEle is true, removes all jobs with backfillJob's ddl_job_id, ele_id and ele_key. Otherwise, removes the backfillJob.
 func RemoveBackfillJob(sess *session, isOneEle bool, backfillJob *BackfillJob) error {
+	logutil.BgLogger().Info(fmt.Sprintf("remove ***************************** xx sql:%#v", backfillJob))
 	sql := fmt.Sprintf("delete from mysql.tidb_ddl_backfill where ddl_job_id = %d and ele_id = %d and ele_key = '%s'",
 		backfillJob.JobID, backfillJob.EleID, backfillJob.EleKey)
 	if !isOneEle {
