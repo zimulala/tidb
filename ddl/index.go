@@ -1362,6 +1362,19 @@ func (w *baseIndexWorker) GetCtx() *backfillCtx {
 	return w.backfillCtx
 }
 
+func newBaseIndexWorkerContext(d *ddl, sess *session, schemaName string, tbl table.Table, workerCnt int, bfJob *BackfillJob, jobCtx *JobContext) (*backfillWorkerContext, error) {
+	return newBackfillWorkerContext(d, schemaName, tbl, workerCnt, bfJob.Meta.ReorgTp,
+		func(bfCtx *backfillCtx) (backfiller, error) {
+			decodeColMap, err := makeupDecodeColMap(sess, tbl.(table.PhysicalTable))
+			if err != nil {
+				logutil.BgLogger().Debug("[ddl] make up decode col map failed", zap.Error(err))
+				return nil, errors.Trace(err)
+			}
+			bf, err1 := newAddIndexWorker(decodeColMap, bfCtx, jobCtx, bfJob.JobID, bfJob.EleID, bfJob.EleKey)
+			return bf, err1
+		})
+}
+
 // mockNotOwnerErrOnce uses to make sure `notOwnerErr` only mock error once.
 var mockNotOwnerErrOnce uint32
 

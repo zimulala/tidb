@@ -467,18 +467,9 @@ func runBackfillJobs(d *ddl, sess *session, bJob *BackfillJob, jobCtx *JobContex
 
 	workerCnt := int(variable.GetDDLReorgWorkerCounter())
 	// TODO: Different worker using different newBackfillerFunc.
-	bwCtx, err := newBackfillWorkerContext(d, dbInfo.Name.O, tbl, workerCnt, bJob.Meta.ReorgTp,
-		func(bfCtx *backfillCtx) (backfiller, error) {
-			decodeColMap, err := makeupDecodeColMap(sess, tbl.(table.PhysicalTable))
-			if err != nil {
-				logutil.BgLogger().Debug("[ddl] make up decode col map failed", zap.Error(err))
-				return nil, errors.Trace(err)
-			}
-			bf, err1 := newAddIndexWorker(decodeColMap, bfCtx, jobCtx, bJob.JobID, bJob.EleID, bJob.EleKey)
-			return bf, err1
-		})
+	bwCtx, err := newBaseIndexWorkerContext(d, sess, dbInfo.Name.O, tbl, workerCnt, bJob, jobCtx)
 	if err != nil {
-		logutil.BgLogger().Debug("[ddl] new add index worker failed", zap.Error(err))
+		logutil.BgLogger().Info("[ddl] new add index worker context failed", zap.Error(err))
 		return nil, errors.Trace(err)
 	}
 	bwMgr := newBackfilWorkerManager(bwCtx)
