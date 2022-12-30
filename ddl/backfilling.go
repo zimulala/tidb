@@ -339,7 +339,7 @@ func handleTask(task *reorgBackfillTask, _ int, bfWorker *backfillWorker) *backf
 
 func getTasks(d *ddlCtx, sess *session, tbl table.Table, runningJobID int64, concurrency int) ([]*reorgBackfillTask, error) {
 	// TODO: if err is write conflict, we need retry
-	// TODO: Handle runningJobIDs. At present, only add index is processed. In the future, different elements need to be distinguished.
+	// TODO: At present, only add index is processed. In the future, different elements need to be distinguished.
 	bJobs, err := GetAndMarkBackfillJobsForOneEle(sess, concurrency, runningJobID, d.uuid, InstanceLease)
 	if err != nil {
 		// TODO: test: if all tidbs can't get the unmark backfill job(a tidb mark a backfill job, other tidbs returned, then the tidb can't handle this job.)
@@ -1471,7 +1471,8 @@ func checkJobIsSynced(sess *session, jobID int64) (bool, error) {
 			return true, nil
 		}
 
-		logutil.BgLogger().Info("[ddl] checkJobIsSynced failed", zap.Int("tryTimes", i), zap.Error(err))
+		logutil.BgLogger().Info("[ddl] checkJobIsSynced failed",
+			zap.Int("unsyncedInstanceIDs", len(unsyncedInstanceIDs)), zap.Int("tryTimes", i), zap.Error(err))
 		time.Sleep(retrySQLInterval)
 	}
 

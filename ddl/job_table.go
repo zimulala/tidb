@@ -461,7 +461,7 @@ func runBackfillJobs(d *ddl, sess *session, bJob *BackfillJob, jobCtx *JobContex
 	logutil.BgLogger().Warn("00 ******** run backfill jobs", zap.Int64("job id", bJob.JobID))
 	dbInfo, tbl, err := d.getTableByTxn(d.store, bJob.Meta.SchemaID, bJob.Meta.TableID)
 	if err != nil {
-		logutil.BgLogger().Warn("[ddl] backfill job get table failed", zap.String("bfJob", bJob.AbbrStr()), zap.Error(err))
+		logutil.BgLogger().Warn("[ddl] runBackfillJobs gets table failed", zap.String("bfJob", bJob.AbbrStr()), zap.Error(err))
 		return nil, err
 	}
 
@@ -938,6 +938,7 @@ func updateBackfillJob(sess *session, tableName string, backfillJob *BackfillJob
 	sql := fmt.Sprintf("update mysql.%s set exec_id = '%s', exec_lease = '%s', state = %d, curr_key = '%s', row_count = %d, backfill_meta = '%s' where ddl_job_id = %d and ele_id = %d and ele_key = '%s' and id = %d",
 		tableName, backfillJob.InstanceID, backfillJob.InstanceLease, backfillJob.State, backfillJob.CurrKey, backfillJob.RowCount, mate, backfillJob.JobID, backfillJob.EleID, backfillJob.EleKey, backfillJob.ID)
 	_, err = sess.execute(context.Background(), sql, label)
+	logutil.BgLogger().Warn("update *****************************   " + fmt.Sprintf("sql:%v, label:%#v, err:%v", sql, label, err))
 	return err
 }
 

@@ -544,3 +544,34 @@ func TestSimpleExecBackfillJobs(t *testing.T) {
 	// 6      jobID1     eleID1    JobStateNone
 	// 7      jobID1     eleID1    JobStateNone
 }
+
+func TestFailedExecBackfillJobs(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	se := ddl.NewSession(tk.Session())
+	d := dom.DDL()
+
+	jobID1 := int64(1)
+	eleID1 := int64(11)
+	uuid := d.GetID()
+	cnt := 3
+	instanceLease := ddl.InstanceLease
+	bJobsTestCases := makeAddIdxBackfillJobs(1, 2, jobID1, eleID1, cnt, "alter table add index idx(a)")
+	err := ddl.AddBackfillJobs(se, bJobsTestCases)
+	require.NoError(t, err)
+
+	var wg util.WaitGroupWrapper
+	bJobs, err := ddl.GetAndMarkBackfillJobsForOneEle(se, 1, jobID1, uuid, instanceLease)
+	wg.Run(func() {
+		tk1 := testkit.NewTestKit(t, store)
+		tk1.MustExec("use test")
+		se1 := ddl.NewSession(tk1.Session())
+		bJobs1, err1 := ddl.GetAndMarkBackfillJobsForOneEle(se1, 1, jobID1, uuid, instanceLease)
+		require.NoError(t, err1)
+		require.Len(t, bJobs1, 1)
+	})
+	require.NoError(t, err)
+	require.Len(t, bJobs, 1)
+	wg.Wait()
+}
