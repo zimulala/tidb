@@ -69,7 +69,7 @@ const (
 	minGenTaskBatch     = 1024
 	minDistTaskCnt      = 16
 	retrySQLTimes       = 3
-	retrySQLInterval    = 500 * time.Millisecond
+	retrySQLInterval    = 300 * time.Millisecond
 )
 
 func (bT backfillerType) String() string {
@@ -337,27 +337,37 @@ func handleTask(task *reorgBackfillTask, _ int, bfWorker *backfillWorker) *backf
 	return ret
 }
 
-func getTasks(d *ddlCtx, sess *session, tbl table.Table, runningJobID int64, concurrency int) ([]*reorgBackfillTask, error) {
-	// TODO: if err is write conflict, we need retry
+func GetTasks(d *ddlCtx, sess *session, tbl table.Table, runningJobID int64, concurrency int) ([]*reorgBackfillTask, error) {
 	// TODO: At present, only add index is processed. In the future, different elements need to be distinguished.
-	bJobs, err := GetAndMarkBackfillJobsForOneEle(sess, concurrency, runningJobID, d.uuid, InstanceLease)
-	if err != nil {
-		// TODO: test: if all tidbs can't get the unmark backfill job(a tidb mark a backfill job, other tidbs returned, then the tidb can't handle this job.)
-		if dbterror.ErrDDLJobNotFound.Equal(err) {
-			logutil.BgLogger().Info("no backfill job, handle backfill task finished")
-			return nil, err
-		}
-		// TODO: retry get backfill jobs
-	}
-	tasks := make([]*reorgBackfillTask, 0, len(bJobs))
-	for _, bJ := range bJobs {
-		task, err := d.backfillJob2Task(tbl, bJ)
+	var err error
+	var bJobs []*BackfillJob
+	for i := 0; i < retrySQLTimes; i++ {
+		bJobs, err = GetAndMarkBackfillJobsForOneEle(sess, concurrency, runningJobID, d.uuid, InstanceLease)
 		if err != nil {
-			return nil, err
+			// TODO: test: if all tidbs can't get the unmark backfill job(a tidb mark a backfill job, other tidbs returned, then the tidb can't handle this job.)
+			if dbterror.ErrDDLJobNotFound.Equal(err) {
+				logutil.BgLogger().Info("no backfill job, handle backfill task finished")
+				return nil, err
+			}
+			if kv.ErrWriteConflict.Equal(err) {
+				logutil.BgLogger().Info("GetAndMarkBackfillJobsForOneEle failed", zap.Error(err))
+				time.Sleep(retrySQLInterval)
+				continue
+			}
 		}
-		tasks = append(tasks, task)
+
+		tasks := make([]*reorgBackfillTask, 0, len(bJobs))
+		for _, bJ := range bJobs {
+			task, err := d.backfillJob2Task(tbl, bJ)
+			if err != nil {
+				return nil, err
+			}
+			tasks = append(tasks, task)
+		}
+		return tasks, nil
 	}
-	return tasks, nil
+
+	return nil, err
 }
 
 func (bwm *backfilWorkerManager) waitFinalResult(resultCh <-chan *backfillResult) {

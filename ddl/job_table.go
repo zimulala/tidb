@@ -477,7 +477,7 @@ func runBackfillJobs(d *ddl, sess *session, bJob *BackfillJob, jobCtx *JobContex
 		return handleTask(task, 0, bfWorker)
 	})
 	proFunc := func() ([]*reorgBackfillTask, error) {
-		return getTasks(d.ddlCtx, sess, tbl, bJob.JobID, workerCnt*2)
+		return GetTasks(d.ddlCtx, sess, tbl, bJob.JobID, workerCnt*2)
 	}
 	// add new task
 	resultCh, control := d.backfillWorkerPool.AddProduceBySlice(proFunc, 0, bwCtx, spmc.WithConcurrency(workerCnt))
@@ -1066,6 +1066,18 @@ func runInTxn(se *session, f func(*session) error) (err error) {
 	if err != nil {
 		return err
 	}
+	failpoint.Inject("NotifyBeginTxnCh", func(val failpoint.Value) {
+		//nolint:forcetypeassert
+		v := val.(int)
+		if v == 1 {
+			mockDDLErrOnce = 1
+			TestNotifyBeginTxnCh <- struct{}{}
+		} else if v == 2 && mockDDLErrOnce == 1 {
+			<-TestNotifyBeginTxnCh
+			mockDDLErrOnce = 0
+		}
+	})
+
 	err = f(se)
 	if err != nil {
 		se.rollback()
