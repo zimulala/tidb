@@ -16,19 +16,14 @@ package gpool
 
 import (
 	"errors"
-	"math"
+	"sync/atomic"
 	"time"
 )
 
 const (
-	// DefaultPoolSize is the default capacity for a default goroutine pool.
-	DefaultPoolSize = math.MaxInt32
-
 	// DefaultCleanIntervalTime is the interval time to clean up goroutines.
-	DefaultCleanIntervalTime = time.Second
-)
+	DefaultCleanIntervalTime = 5 * time.Second
 
-const (
 	// OPENED represents that the pool is opened.
 	OPENED = iota
 
@@ -37,24 +32,38 @@ const (
 )
 
 var (
-	//
-	//--------------------------Error types for the Ants API------------------------------
-
-	// ErrLackPoolFunc will be returned when invokers don't provide function for pool.
-	ErrLackPoolFunc = errors.New("must provide function for pool")
-
-	// ErrInvalidPoolExpiry will be returned when setting a negative number as the periodic duration to purge goroutines.
-	ErrInvalidPoolExpiry = errors.New("invalid expiry for pool")
-
 	// ErrPoolClosed will be returned when submitting task to a closed pool.
 	ErrPoolClosed = errors.New("this pool has been closed")
 
 	// ErrPoolOverload will be returned when the pool is full and no workers available.
 	ErrPoolOverload = errors.New("too many goroutines blocked on submit or Nonblocking is set")
 
-	// ErrInvalidPreAllocSize will be returned when trying to set up a negative capacity under PreAlloc mode.
-	ErrInvalidPreAllocSize = errors.New("can not set up a negative capacity under PreAlloc mode")
-
-	// ErrTimeout will be returned after the operations timed out.
-	ErrTimeout = errors.New("operation timed out")
+	// ErrProducerClosed will be returned when the producer is closed.
+	ErrProducerClosed = errors.New("this producer has been closed")
 )
+
+// BasePool is base class of pool
+type BasePool struct {
+	name      string
+	generator atomic.Uint64
+}
+
+// NewBasePool is to create a new BasePool.
+func NewBasePool() BasePool {
+	return BasePool{}
+}
+
+// SetName is to set name.
+func (p *BasePool) SetName(name string) {
+	p.name = name
+}
+
+// Name is to get name.
+func (p *BasePool) Name() string {
+	return p.name
+}
+
+// NewTaskID is to get a new task ID.
+func (p *BasePool) NewTaskID() uint64 {
+	return p.generator.Add(1)
+}

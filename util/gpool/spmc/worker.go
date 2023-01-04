@@ -15,27 +15,24 @@
 package spmc
 
 import (
-	"time"
-
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/util/gpool"
+	"github.com/pingcap/tidb/resourcemanager/pooltask"
+	atomicutil "go.uber.org/atomic"
 	"go.uber.org/zap"
 )
 
 // goWorker is the actual executor who runs the tasks,
 // it starts a goroutine that accepts tasks and
 // performs function calls.
-type goWorker[T any, U any, C any, CT any, TF gpool.Context[CT]] struct {
+type goWorker[T any, U any, C any, CT any, TF pooltask.Context[CT]] struct {
 	// pool who owns this worker.
 	pool *Pool[T, U, C, CT, TF]
 
 	// taskBoxCh is a job should be done.
-	taskBoxCh chan *gpool.TaskBox[T, U, C, CT, TF]
-
-	exit chan struct{}
+	taskBoxCh chan *pooltask.TaskBox[T, U, C, CT, TF]
 
 	// recycleTime will be updated when putting a worker back into queue.
-	recycleTime time.Time
+	recycleTime atomicutil.Time
 }
 
 // run starts a goroutine to repeat the process
@@ -43,7 +40,6 @@ type goWorker[T any, U any, C any, CT any, TF gpool.Context[CT]] struct {
 func (w *goWorker[T, U, C, CT, TF]) run() {
 	w.pool.addRunning(1)
 	go func() {
-		//log.Info("worker start")
 		defer func() {
 			w.pool.addRunning(-1)
 			w.pool.workerCache.Put(w)
@@ -62,29 +58,15 @@ func (w *goWorker[T, U, C, CT, TF]) run() {
 			if f == nil {
 				return
 			}
-			switch f.GetStatus() {
-			case gpool.PendingTask:
-				f.SetStatus(gpool.RunningTask)
-			case gpool.StopTask:
-				continue
-			case gpool.RunningTask:
-				log.Error("worker got task running")
-				continue
-			}
+			w.pool.subWaitingTask()
 			ctx := f.GetContextFunc().GetContext()
 			if f.GetResultCh() != nil {
-				for t := range f.GeTaskCh() {
-					f.GetResultCh() <- w.pool.consumerFunc(t, f.ConstArgs(), ctx)
+				for t := range f.GetTaskCh() {
+					f.GetResultCh() <- w.pool.consumerFunc(t.Task, f.ConstArgs(), ctx)
 					f.Done()
-					if f.GetStatus() == gpool.PendingTask {
-						w.taskBoxCh <- f
-						break
-					}
 				}
-				f.SetStatus(gpool.StopTask)
 			}
 			if ok := w.pool.revertWorker(w); !ok {
-				//log.Info("exit here")
 				return
 			}
 		}

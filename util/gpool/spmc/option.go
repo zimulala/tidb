@@ -14,13 +14,15 @@
 
 package spmc
 
-import "time"
+import (
+	"time"
+)
 
 // Option represents the optional function.
 type Option func(opts *Options)
 
 func loadOptions(options ...Option) *Options {
-	opts := new(Options)
+	opts := DefaultOption()
 	for _, option := range options {
 		option(opts)
 	}
@@ -38,23 +40,24 @@ type Options struct {
 	// used for more than `ExpiryDuration`.
 	ExpiryDuration time.Duration
 
+	// LimitDuration is a period in the limit mode.
+	LimitDuration time.Duration
+
 	// Max number of goroutine blocking on pool.Submit.
 	// 0 (default value) means no such limit.
 	MaxBlockingTasks int
 
-	// PreAlloc indicates whether to make memory pre-allocation when initializing Pool.
-	PreAlloc bool
-
-	// When Nonblocking is true, Pool.Submit will never be blocked.
+	// When Nonblocking is true, Pool.AddProduce will never be blocked.
 	// ErrPoolOverload will be returned when Pool.Submit cannot be done at once.
 	// When Nonblocking is true, MaxBlockingTasks is inoperative.
 	Nonblocking bool
 }
 
-// WithOptions accepts the whole options config.
-func WithOptions(options Options) Option {
-	return func(opts *Options) {
-		*opts = options
+// DefaultOption is the default option.
+func DefaultOption() *Options {
+	return &Options{
+		LimitDuration: 200 * time.Millisecond,
+		Nonblocking:   true,
 	}
 }
 
@@ -62,13 +65,6 @@ func WithOptions(options Options) Option {
 func WithExpiryDuration(expiryDuration time.Duration) Option {
 	return func(opts *Options) {
 		opts.ExpiryDuration = expiryDuration
-	}
-}
-
-// WithPreAlloc indicates whether it should malloc for workers.
-func WithPreAlloc(preAlloc bool) Option {
-	return func(opts *Options) {
-		opts.PreAlloc = preAlloc
 	}
 }
 

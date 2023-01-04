@@ -28,7 +28,6 @@ import (
 	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/sessionctx"
-	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/sessiontxn"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/types"
@@ -42,9 +41,6 @@ import (
 // This test checks the chosen job records to see if there are wrong scheduling, if job A and job B cannot run concurrently,
 // then the all the record of job A must before or after job B, no cross record between these 2 jobs should be in between.
 func TestDDLScheduling(t *testing.T) {
-	if !variable.EnableConcurrentDDL.Load() {
-		t.Skipf("test requires concurrent ddl")
-	}
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	tk := testkit.NewTestKit(t, store)
@@ -263,7 +259,7 @@ func TestSimpleExecBackfillJobs(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, bJobs)
 	bJobs, err = ddl.GetAndMarkBackfillJobsForOneEle(se, 1, jobID1, uuid, instanceLease)
-	require.EqualError(t, err, dbterror.ErrDDLJobNotFound.FastGen("get zero backfill job, lease is timeout").Error())
+	require.EqualError(t, err, dbterror.ErrDDLJobNotFound.FastGen("get zero backfill job").Error())
 	require.Nil(t, bJobs)
 	allCnt, err := ddl.GetBackfillJobCount(se, ddl.BackfillTable, fmt.Sprintf("ddl_job_id = %d and ele_id = %d and ele_key = '%s'",
 		jobID1, eleID2, meta.IndexElementKey), "check_backfill_job_count")
@@ -297,10 +293,10 @@ func TestSimpleExecBackfillJobs(t *testing.T) {
 		expectJob = bjTestCases[3]
 	}
 	require.Equal(t, expectJob, bJobs[0])
-	previousTime, err := ddl.GetOracleTimeInTxn(se)
+	previousTime, err := ddl.GetOracleTimeWithStartTS(se)
 	require.EqualError(t, err, "[kv:8024]invalid transaction")
 	readInTxn(se, func(sessionctx.Context) {
-		previousTime, err = ddl.GetOracleTimeInTxn(se)
+		previousTime, err = ddl.GetOracleTimeWithStartTS(se)
 		require.NoError(t, err)
 	})
 
@@ -315,7 +311,7 @@ func TestSimpleExecBackfillJobs(t *testing.T) {
 	equalBackfillJob(t, expectJob, bJobs[0], ddl.GetLeaseGoTime(previousTime, instanceLease))
 	var currTime time.Time
 	readInTxn(se, func(sessionctx.Context) {
-		currTime, err = ddl.GetOracleTimeInTxn(se)
+		currTime, err = ddl.GetOracleTimeWithStartTS(se)
 		require.NoError(t, err)
 	})
 	currGoTime := ddl.GetLeaseGoTime(currTime, instanceLease)
@@ -369,14 +365,14 @@ func TestSimpleExecBackfillJobs(t *testing.T) {
 	// ------------------------
 	// 0      jobID2     eleID2
 	readInTxn(se, func(sessionctx.Context) {
-		currTime, err = ddl.GetOracleTimeInTxn(se)
+		currTime, err = ddl.GetOracleTimeWithStartTS(se)
 		require.NoError(t, err)
 	})
 	condition := fmt.Sprintf("exec_ID = '' or exec_lease < '%v' and ddl_job_id = %d order by ddl_job_id", currTime.Add(-instanceLease), jobID2)
 	bJobs, err = ddl.GetBackfillJobs(se, ddl.BackfillHistoryTable, condition, "test_get_bj")
 	require.NoError(t, err)
 	require.Len(t, bJobs, 1)
-	require.Greater(t, bJobs[0].FinishTS, uint64(0))
+	require.Equal(t, bJobs[0].FinishTS, uint64(0))
 
 	// test GetMaxBackfillJob and GetInterruptedBackfillJobsForOneEle
 	bjob, err := ddl.GetMaxBackfillJob(se, bJobs3[0].JobID, bJobs3[0].EleID, eleKey)

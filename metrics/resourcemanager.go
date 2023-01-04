@@ -12,9 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !featuretag
+package metrics
 
-package concurrencyddl
+import "github.com/prometheus/client_golang/prometheus"
 
-// TiDBEnableConcurrentDDL is a feature tag
-const TiDBEnableConcurrentDDL bool = true
+var (
+	// EMACPUUsageGauge means exponential moving average of CPU usage
+	EMACPUUsageGauge = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "tidb",
+		Subsystem: "rm",
+		Name:      "ema_cpu_usage",
+		Help:      "exponential moving average of CPU usage",
+	})
+)

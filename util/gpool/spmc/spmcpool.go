@@ -15,63 +15,69 @@
 package spmc
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/pingcap/log"
+	"github.com/pingcap/tidb/resourcemanager/pooltask"
 	"github.com/pingcap/tidb/util/gpool"
+	"github.com/pingcap/tidb/util/logutil"
+	atomicutil "go.uber.org/atomic"
 	"go.uber.org/zap"
 )
 
 // Pool is a single producer, multiple consumer goroutine pool.
-type Pool[T any, U any, C any, CT any, TF gpool.Context[CT]] struct {
+// T is the type of the task. We can treat it as input.
+// U is the type of the result. We can treat it as output.
+// C is the type of the const parameter. if Our task look like y = ax + b, C acts like b as const parameter.
+// CT is the type of the context. It needs to be read/written parallel.
+// TF is the type of the context getter. It is used to get a context.
+// if we don't need to use CT/TF, we can define CT as any and TF as NilContext.
+type Pool[T any, U any, C any, CT any, TF pooltask.Context[CT]] struct {
+	gpool.BasePool
 	workerCache   sync.Pool
+	workers       *loopQueue[T, U, C, CT, TF]
 	lock          sync.Locker
-	workers       workerArray[T, U, C, CT, TF]
-	taskCh        chan *gpool.TaskBox[T, U, C, CT, TF]
+	cond          *sync.Cond
+	taskCh        chan *pooltask.TaskBox[T, U, C, CT, TF]
 	options       *Options
 	stopCh        chan struct{}
 	consumerFunc  func(T, C, CT) U
-	cond          *sync.Cond
-	name          string
-	taskManager   gpool.TaskManager[T, U, C, CT, TF]
-	generator     atomic.Uint64
 	capacity      atomic.Int32
 	running       atomic.Int32
 	state         atomic.Int32
-	waiting       atomic.Int32
-	heartbeatDone atomic.Int32
+	waiting       atomic.Int32 // waiting is the number of goroutines that are waiting for the pool to be available.
+	heartbeatDone atomic.Bool
+
+	waitingTask atomicutil.Uint32 // waitingTask is the number of tasks that are waiting for the pool to be available.
 }
 
 // NewSPMCPool create a single producer, multiple consumer goroutine pool.
-func NewSPMCPool[T any, U any, C any, CT any, TF gpool.Context[CT]](name string, size int32, options ...Option) *Pool[T, U, C, CT, TF] {
+func NewSPMCPool[T any, U any, C any, CT any, TF pooltask.Context[CT]](name string, size int32, options ...Option) *Pool[T, U, C, CT, TF] {
 	opts := loadOptions(options...)
 	if expiry := opts.ExpiryDuration; expiry <= 0 {
 		opts.ExpiryDuration = gpool.DefaultCleanIntervalTime
 	}
-
 	result := &Pool[T, U, C, CT, TF]{
-		taskCh:      make(chan *gpool.TaskBox[T, U, C, CT, TF], 128),
-		stopCh:      make(chan struct{}),
-		lock:        gpool.NewSpinLock(),
-		name:        name,
-		taskManager: gpool.NewTaskManager[T, U, C, CT, TF](size),
-		options:     opts,
+		BasePool: gpool.NewBasePool(),
+		taskCh:   make(chan *pooltask.TaskBox[T, U, C, CT, TF], 128),
+		stopCh:   make(chan struct{}),
+		lock:     gpool.NewSpinLock(),
+		options:  opts,
 	}
+	result.SetName(name)
+	result.state.Store(int32(gpool.OPENED))
 	result.workerCache.New = func() interface{} {
 		return &goWorker[T, U, C, CT, TF]{
 			pool: result,
-			exit: make(chan struct{}),
 		}
 	}
 	result.capacity.Add(size)
-	if result.options.PreAlloc {
-		result.workers = newWorkerArray[T, U, C, CT, TF](loopQueueType, int(size))
-	} else {
-		result.workers = newWorkerArray[T, U, C, CT, TF](stackType, 0)
-	}
+	result.workers = newWorkerLoopQueue[T, U, C, CT, TF](int(size))
 	result.cond = sync.NewCond(result.lock)
+	// Start a goroutine to clean up expired workers periodically.
 	go result.purgePeriodically()
 	return result
 }
@@ -81,7 +87,7 @@ func (p *Pool[T, U, C, CT, TF]) purgePeriodically() {
 	heartbeat := time.NewTicker(p.options.ExpiryDuration)
 	defer func() {
 		heartbeat.Stop()
-		p.heartbeatDone.Store(1)
+		p.heartbeatDone.Store(true)
 	}()
 	for {
 		select {
@@ -111,7 +117,7 @@ func (p *Pool[T, U, C, CT, TF]) purgePeriodically() {
 		// or another case where the pool capacity has been Tuned up,
 		// while some invokers still get stuck in "p.cond.Wait()",
 		// then it ought to wake all those invokers.
-		if p.Running() == 0 || (p.Waiting() > 0 && p.Free() > 0) {
+		if p.Running() == 0 || (p.Waiting() > 0 && p.Free() > 0) || p.waitingTask.Load() > 0 {
 			p.cond.Broadcast()
 		}
 	}
@@ -120,11 +126,12 @@ func (p *Pool[T, U, C, CT, TF]) purgePeriodically() {
 // Tune changes the capacity of this pool, note that it is noneffective to the infinite or pre-allocation pool.
 func (p *Pool[T, U, C, CT, TF]) Tune(size int) {
 	capacity := p.Cap()
-	if capacity == -1 || size <= 0 || size == capacity || p.options.PreAlloc {
+	if capacity == -1 || size <= 0 || size == capacity {
 		return
 	}
 	p.capacity.Store(int32(size))
 	if size > capacity {
+		// boost
 		if size-capacity == 1 {
 			p.cond.Signal()
 			return
@@ -170,9 +177,16 @@ func (p *Pool[T, U, C, CT, TF]) addWaiting(delta int) {
 	p.waiting.Add(int32(delta))
 }
 
-// Release closes this pool and releases the worker queue.
-func (p *Pool[T, U, C, CT, TF]) Release() {
-	log.Info("release", zap.Stack("stack"))
+func (p *Pool[T, U, C, CT, TF]) addWaitingTask() {
+	p.waitingTask.Inc()
+}
+
+func (p *Pool[T, U, C, CT, TF]) subWaitingTask() {
+	p.waitingTask.Dec()
+}
+
+// release closes this pool and releases the worker queue.
+func (p *Pool[T, U, C, CT, TF]) release() {
 	if !p.state.CompareAndSwap(gpool.OPENED, gpool.CLOSED) {
 		return
 	}
@@ -182,6 +196,7 @@ func (p *Pool[T, U, C, CT, TF]) Release() {
 	// There might be some callers waiting in retrieveWorker(), so we need to wake them up to prevent
 	// those callers blocking infinitely.
 	p.cond.Broadcast()
+	close(p.taskCh)
 }
 
 func isClose(exitCh chan struct{}) bool {
@@ -200,9 +215,10 @@ func (p *Pool[T, U, C, CT, TF]) ReleaseAndWait() {
 	}
 
 	close(p.stopCh)
-	p.Release()
+	p.release()
 	for {
-		if p.Running() == 0 && p.heartbeatDone.Load() == 1 {
+		// Wait for all workers to exit and all task to be completed.
+		if p.Running() == 0 && p.heartbeatDone.Load() && p.waitingTask.Load() == 0 {
 			return
 		}
 	}
@@ -213,46 +229,48 @@ func (p *Pool[T, U, C, CT, TF]) SetConsumerFunc(consumerFunc func(T, C, CT) U) {
 	p.consumerFunc = consumerFunc
 }
 
-func (p *Pool[T, U, C, CT, TF]) addNewTask(taskid uint64) {
-	p.taskManager.CreatTask(taskid)
-}
-
-func (p *Pool[T, U, C, CT, TF]) addNewTaskMeta(taskid uint64, task *gpool.TaskBox[T, U, C, CT, TF]) {
-	p.taskManager.AddTask(taskid, task)
-}
-
 // AddProduceBySlice is to add Produce by a slice.
-func (p *Pool[T, U, C, CT, TF]) AddProduceBySlice(producer func() ([]T, error), constArg C, contextFn TF, options ...TaskOption) (<-chan U, gpool.TaskController[T, U, C, CT, TF]) {
+// Producer need to return ErrProducerClosed when to exit.
+func (p *Pool[T, U, C, CT, TF]) AddProduceBySlice(producer func() ([]T, error), constArg C, contextFn TF, options ...TaskOption) (<-chan U, pooltask.TaskController[T, U, C, CT, TF]) {
 	opt := loadTaskOptions(options...)
-	taskID := p.generator.Add(1)
+	taskID := p.NewTaskID()
 	var wg sync.WaitGroup
 	result := make(chan U, opt.ResultChanLen)
 	closeCh := make(chan struct{})
-	tc := gpool.NewTaskController[T, U, C, CT, TF](p, taskID, closeCh, &wg)
-	p.addNewTask(taskID)
-	taskCh := make(chan T, opt.TaskChanLen)
+	inputCh := make(chan pooltask.Task[T], opt.TaskChanLen)
+	tc := pooltask.NewTaskController[T, U, C, CT, TF](p, taskID, closeCh, &wg, result)
 	for i := 0; i < opt.Concurrency; i++ {
 		err := p.run()
 		if err == gpool.ErrPoolClosed {
 			break
 		}
-		taskBox := gpool.NewTaskBox[T, U, C, CT, TF](constArg, contextFn, &wg, taskCh, result, taskID)
-		p.addNewTaskMeta(taskID, &taskBox)
+		taskBox := pooltask.NewTaskBox[T, U, C, CT, TF](constArg, contextFn, &wg, inputCh, result, taskID)
+		p.addWaitingTask()
 		p.taskCh <- &taskBox
 	}
 	go func() {
 		defer func() {
+			if r := recover(); r != nil {
+				logutil.BgLogger().Error("producer panic", zap.Any("recover", r), zap.Stack("stack"))
+			}
 			close(closeCh)
-			close(taskCh)
+			close(inputCh)
 		}()
 		for {
 			tasks, err := producer()
 			if err != nil {
+				if errors.Is(err, gpool.ErrProducerClosed) {
+					return
+				}
+				log.Error("producer error", zap.Error(err))
 				return
 			}
 			for _, task := range tasks {
 				wg.Add(1)
-				taskCh <- task
+				task := pooltask.Task[T]{
+					Task: task,
+				}
+				inputCh <- task
 			}
 		}
 	}()
@@ -260,36 +278,46 @@ func (p *Pool[T, U, C, CT, TF]) AddProduceBySlice(producer func() ([]T, error), 
 }
 
 // AddProducer is to add producer.
-func (p *Pool[T, U, C, CT, TF]) AddProducer(producer func() (T, error), constArg C, contextFn TF, options ...TaskOption) (<-chan U, gpool.TaskController[T, U, C, CT, TF]) {
+// Producer need to return ErrProducerClosed when to exit.
+func (p *Pool[T, U, C, CT, TF]) AddProducer(producer func() (T, error), constArg C, contextFn TF, options ...TaskOption) (<-chan U, pooltask.TaskController[T, U, C, CT, TF]) {
 	opt := loadTaskOptions(options...)
-	taskID := p.generator.Add(1)
+	taskID := p.NewTaskID()
 	var wg sync.WaitGroup
 	result := make(chan U, opt.ResultChanLen)
 	closeCh := make(chan struct{})
-	p.addNewTask(taskID)
-	tc := gpool.NewTaskController[T, U, C, CT, TF](p, taskID, closeCh, &wg)
-	taskCh := make(chan T, opt.TaskChanLen)
+	inputCh := make(chan pooltask.Task[T], opt.TaskChanLen)
+	tc := pooltask.NewTaskController[T, U, C, CT, TF](p, taskID, closeCh, &wg, result)
 	for i := 0; i < opt.Concurrency; i++ {
 		err := p.run()
 		if err == gpool.ErrPoolClosed {
 			break
 		}
-		taskBox := gpool.NewTaskBox[T, U, C, CT, TF](constArg, contextFn, &wg, taskCh, result, taskID)
-		p.addNewTaskMeta(taskID, &taskBox)
+		p.addWaitingTask()
+		taskBox := pooltask.NewTaskBox[T, U, C, CT, TF](constArg, contextFn, &wg, inputCh, result, taskID)
 		p.taskCh <- &taskBox
 	}
 	go func() {
 		defer func() {
+			if r := recover(); r != nil {
+				logutil.BgLogger().Error("producer panic", zap.Any("recover", r), zap.Stack("stack"))
+			}
 			close(closeCh)
-			close(taskCh)
+			close(inputCh)
 		}()
 		for {
 			task, err := producer()
 			if err != nil {
+				if errors.Is(err, gpool.ErrProducerClosed) {
+					return
+				}
+				log.Error("producer error", zap.Error(err))
 				return
 			}
 			wg.Add(1)
-			taskCh <- task
+			t := pooltask.Task[T]{
+				Task: task,
+			}
+			inputCh <- t
 		}
 	}()
 	return result, tc
@@ -364,12 +392,11 @@ func (p *Pool[T, U, C, CT, TF]) retrieveWorker() (w *goWorker[T, U, C, CT, TF]) 
 
 // revertWorker puts a worker back into free pool, recycling the goroutines.
 func (p *Pool[T, U, C, CT, TF]) revertWorker(worker *goWorker[T, U, C, CT, TF]) bool {
-	if capacity := p.Cap(); (capacity > 0 && p.Running() > capacity) || p.IsClosed() {
-		log.Info("wwz", zap.Int("running", p.Running()), zap.Int("capacity", capacity))
+	if capacity := p.Cap(); capacity > 0 && p.Running() > capacity || p.IsClosed() {
 		p.cond.Broadcast()
 		return false
 	}
-	worker.recycleTime = time.Now()
+	worker.recycleTime.Store(time.Now())
 	p.lock.Lock()
 
 	if p.IsClosed() {
@@ -380,6 +407,9 @@ func (p *Pool[T, U, C, CT, TF]) revertWorker(worker *goWorker[T, U, C, CT, TF]) 
 	err := p.workers.insert(worker)
 	if err != nil {
 		p.lock.Unlock()
+		if err == errQueueIsFull && p.waitingTask.Load() > 0 {
+			return true
+		}
 		return false
 	}
 
@@ -387,9 +417,4 @@ func (p *Pool[T, U, C, CT, TF]) revertWorker(worker *goWorker[T, U, C, CT, TF]) 
 	p.cond.Signal()
 	p.lock.Unlock()
 	return true
-}
-
-// DeleteTask is to delete task.
-func (p *Pool[T, U, C, CT, TF]) DeleteTask(id uint64) {
-	p.taskManager.DeleteTask(id)
 }

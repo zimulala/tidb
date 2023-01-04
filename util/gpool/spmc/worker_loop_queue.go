@@ -17,10 +17,19 @@ package spmc
 import (
 	"time"
 
-	"github.com/pingcap/tidb/util/gpool"
+	"github.com/pingcap/errors"
+	"github.com/pingcap/tidb/resourcemanager/pooltask"
 )
 
-type loopQueue[T any, U any, C any, CT any, TF gpool.Context[CT]] struct {
+var (
+	// errQueueIsFull will be returned when the worker queue is full.
+	errQueueIsFull = errors.New("the queue is full")
+
+	// errQueueIsReleased will be returned when trying to insert item to a released worker queue.
+	errQueueIsReleased = errors.New("the queue is released could not accept item anymore")
+)
+
+type loopQueue[T any, U any, C any, CT any, TF pooltask.Context[CT]] struct {
 	items  []*goWorker[T, U, C, CT, TF]
 	expiry []*goWorker[T, U, C, CT, TF]
 	head   int
@@ -29,7 +38,7 @@ type loopQueue[T any, U any, C any, CT any, TF gpool.Context[CT]] struct {
 	isFull bool
 }
 
-func newWorkerLoopQueue[T any, U any, C any, CT any, TF gpool.Context[CT]](size int) *loopQueue[T, U, C, CT, TF] {
+func newWorkerLoopQueue[T any, U any, C any, CT any, TF pooltask.Context[CT]](size int) *loopQueue[T, U, C, CT, TF] {
 	return &loopQueue[T, U, C, CT, TF]{
 		items: make([]*goWorker[T, U, C, CT, TF], size),
 		size:  size,
@@ -128,12 +137,13 @@ func (wq *loopQueue[T, U, C, CT, TF]) retrieveExpiry(duration time.Duration) []*
 	return wq.expiry
 }
 
+// binarySearch is to find the first worker which is idle for more than duration.
 func (wq *loopQueue[T, U, C, CT, TF]) binarySearch(expiryTime time.Time) int {
 	var mid, nlen, basel, tmid int
 	nlen = len(wq.items)
 
 	// if no need to remove work, return -1
-	if wq.isEmpty() || expiryTime.Before(wq.items[wq.head].recycleTime) {
+	if wq.isEmpty() || expiryTime.Before(wq.items[wq.head].recycleTime.Load()) {
 		return -1
 	}
 
@@ -155,7 +165,7 @@ func (wq *loopQueue[T, U, C, CT, TF]) binarySearch(expiryTime time.Time) int {
 		mid = l + ((r - l) >> 1)
 		// calculate true mid position from mapped mid position
 		tmid = (mid + basel + nlen) % nlen
-		if expiryTime.Before(wq.items[tmid].recycleTime) {
+		if expiryTime.Before(wq.items[tmid].recycleTime.Load()) {
 			r = mid - 1
 		} else {
 			l = mid + 1

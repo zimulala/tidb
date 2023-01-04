@@ -806,8 +806,12 @@ func doReorgWorkForModifyColumnMultiSchema(w *worker, d *ddlCtx, t *meta.Meta, j
 func doReorgWorkForModifyColumn(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job, tbl table.Table,
 	oldCol, changingCol *model.ColumnInfo, changingIdxs []*model.IndexInfo) (done bool, ver int64, err error) {
 	job.ReorgMeta.ReorgTp = model.ReorgTypeTxn
-	rh := newReorgHandler(t, w.sess, w.concurrentDDL)
-	reorgInfo, err := getReorgInfo(d.jobContext(job.ID), d, rh, job, tbl, BuildElements(changingCol, changingIdxs), false)
+	rh := newReorgHandler(t, w.sess)
+	dbInfo, err := t.GetDatabase(job.SchemaID)
+	if err != nil {
+		return false, ver, errors.Trace(err)
+	}
+	reorgInfo, err := getReorgInfo(d.jobContext(job.ID), d, rh, job, dbInfo, tbl, BuildElements(changingCol, changingIdxs), false)
 	if err != nil || reorgInfo.first {
 		// If we run reorg firstly, we should update the job snapshot version
 		// and then run the reorg next time.
@@ -1038,30 +1042,9 @@ func BuildElements(changingCol *model.ColumnInfo, changingIdxs []*model.IndexInf
 	return elements
 }
 
-func (w *worker) updatePhysicalTableRow(t table.Table, reorgInfo *reorgInfo) error {
+func (w *worker) updatePhysicalTableRow(t table.PhysicalTable, reorgInfo *reorgInfo) error {
 	logutil.BgLogger().Info("[ddl] start to update table row", zap.String("job", reorgInfo.Job.String()), zap.String("reorgInfo", reorgInfo.String()))
-	if tbl, ok := t.(table.PartitionedTable); ok {
-		done := false
-		for !done {
-			p := tbl.GetPartition(reorgInfo.PhysicalTableID)
-			if p == nil {
-				return dbterror.ErrCancelledDDLJob.GenWithStack("Can not find partition id %d for table %d", reorgInfo.PhysicalTableID, t.Meta().ID)
-			}
-			err := w.writePhysicalTableRecord(w.sessPool, p, typeUpdateColumnWorker, reorgInfo)
-			if err != nil {
-				return err
-			}
-			done, err = w.updateReorgInfo(tbl, reorgInfo)
-			if err != nil {
-				return errors.Trace(err)
-			}
-		}
-		return nil
-	}
-	if tbl, ok := t.(table.PhysicalTable); ok {
-		return w.writePhysicalTableRecord(w.sessPool, tbl, typeUpdateColumnWorker, reorgInfo)
-	}
-	return dbterror.ErrCancelledDDLJob.GenWithStack("internal error for phys tbl id: %d tbl id: %d", reorgInfo.PhysicalTableID, t.Meta().ID)
+	return w.writePhysicalTableRecord(w.sessPool, t, typeUpdateColumnWorker, reorgInfo)
 }
 
 // TestReorgGoroutineRunning is only used in test to indicate the reorg goroutine has been started.
@@ -1083,26 +1066,23 @@ func (w *worker) updateCurrentElement(t table.Table, reorgInfo *reorgInfo) error
 			}
 		}
 	})
+	// TODO: Support partition tables.
 	if bytes.Equal(reorgInfo.currElement.TypeKey, meta.ColumnElementKey) {
-		err := w.updatePhysicalTableRow(t, reorgInfo)
+		//nolint:forcetypeassert
+		err := w.updatePhysicalTableRow(t.(table.PhysicalTable), reorgInfo)
 		if err != nil {
 			return errors.Trace(err)
 		}
 	}
 
-	var physTbl table.PhysicalTable
-	if tbl, ok := t.(table.PartitionedTable); ok {
-		physTbl = tbl.GetPartition(reorgInfo.PhysicalTableID)
-	} else if tbl, ok := t.(table.PhysicalTable); ok {
-		physTbl = tbl
-	}
 	// Get the original start handle and end handle.
 	currentVer, err := getValidCurrentVersion(reorgInfo.d.store)
 	if err != nil {
 		return errors.Trace(err)
 	}
+	//nolint:forcetypeassert
 	originalStartHandle, originalEndHandle, err := getTableRange(reorgInfo.d.jobContext(reorgInfo.Job.ID), reorgInfo.d,
-		physTbl, currentVer.Ver, reorgInfo.Job.Priority)
+		t.(table.PhysicalTable), currentVer.Ver, reorgInfo.Job.Priority)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1162,10 +1142,11 @@ type updateColumnWorker struct {
 	rowDecoder *decoder.RowDecoder
 	rowMap     map[int64]types.Datum
 
+	// For SQL Mode and warnings.
 	jobContext *JobContext
 }
 
-func newUpdateColumnWorker(sessCtx sessionctx.Context, id int, t table.Table, decodeColMap map[int64]decoder.Column, reorgInfo *reorgInfo, jc *JobContext) *updateColumnWorker {
+func newUpdateColumnWorker(sessCtx sessionctx.Context, t table.PhysicalTable, decodeColMap map[int64]decoder.Column, reorgInfo *reorgInfo, jc *JobContext) *updateColumnWorker {
 	if !bytes.Equal(reorgInfo.currElement.TypeKey, meta.ColumnElementKey) {
 		logutil.BgLogger().Error("Element type for updateColumnWorker incorrect", zap.String("jobQuery", reorgInfo.Query),
 			zap.String("reorgInfo", reorgInfo.String()))
@@ -1195,19 +1176,19 @@ func (w *updateColumnWorker) AddMetricInfo(cnt float64) {
 	w.metricCounter.Add(cnt)
 }
 
-func (w *updateColumnWorker) String() string {
+func (*updateColumnWorker) String() string {
 	return typeUpdateColumnWorker.String()
 }
 
-func (w *updateColumnWorker) GetTask() (*BackfillJob, error) {
+func (*updateColumnWorker) GetTask() (*BackfillJob, error) {
 	panic("[ddl] update column worker GetTask function doesn't implement")
 }
 
-func (w *updateColumnWorker) UpdateTask(job *BackfillJob) error {
+func (*updateColumnWorker) UpdateTask(*BackfillJob) error {
 	panic("[ddl] update column worker UpdateTask function doesn't implement")
 }
 
-func (w *updateColumnWorker) FinishTask(job *BackfillJob) error {
+func (*updateColumnWorker) FinishTask(*BackfillJob) error {
 	panic("[ddl] update column worker FinishTask function doesn't implement")
 }
 
@@ -1690,6 +1671,15 @@ func updateColumnDefaultValue(d *ddlCtx, t *meta.Meta, job *model.Job, newCol *m
 		job.State = model.JobStateCancelled
 		return ver, infoschema.ErrColumnNotExists.GenWithStackByArgs(newCol.Name, tblInfo.Name)
 	}
+
+	if hasDefaultValue, _, err := checkColumnDefaultValue(newContext(d.store), table.ToColumn(oldCol.Clone()), newCol.DefaultValue); err != nil {
+		job.State = model.JobStateCancelled
+		return ver, errors.Trace(err)
+	} else if !hasDefaultValue {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrInvalidDefaultValue.GenWithStackByArgs(newCol.Name)
+	}
+
 	// The newCol's offset may be the value of the old schema version, so we can't use newCol directly.
 	oldCol.DefaultValue = newCol.DefaultValue
 	oldCol.DefaultValueBit = newCol.DefaultValueBit
