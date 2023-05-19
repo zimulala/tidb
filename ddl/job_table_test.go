@@ -174,3 +174,122 @@ func check(t *testing.T, record []int64, ids ...int64) {
 		}
 	}
 }
+
+func TestUpgradingRelatedJobState(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("CREATE TABLE e (id INT NOT NULL) PARTITION BY RANGE (id) (PARTITION p1 VALUES LESS THAN (50), PARTITION p2 VALUES LESS THAN (100));")
+	tk.MustExec("CREATE TABLE e2 (id INT NOT NULL);")
+	tk.MustExec("CREATE TABLE e3 (id INT NOT NULL);")
+
+	d := dom.DDL()
+
+	testCases := []struct {
+		sql                 string
+		schemaState         model.SchemaState
+		upgradeState        bool
+		jobStateForBefore   model.JobState
+		retJobStateForAfter model.JobState
+	}{
+		{"alter table e2 add index idx(id)", model.StateNone, true, model.JobStateRunning, model.JobStateRunning},
+		{"alter table e2 add index idx1(id)", model.StateNone, true, model.JobStateRunning, model.JobStateRunning},
+		{"alter table e2 add index idx2(id)", model.StateNone, true, model.JobStateRunning, model.JobStateRunning},
+		{"create table e5 (id int)", model.StateNone, true, model.JobStateRunning, model.JobStateRunning},
+		{"ALTER TABLE e EXCHANGE PARTITION p1 WITH TABLE e2;", model.StateNone, true, model.JobStateRunning, model.JobStateRunning},
+		{"alter table e add index idx(id)", model.StateNone, true, model.JobStateRunning, model.JobStateRunning},
+		{"alter table e add partition (partition p3 values less than (150))", model.StateNone, true, model.JobStateRunning, model.JobStateRunning},
+		{"create table e4 (id int)", model.StateNone, true, model.JobStateRunning, model.JobStateRunning},
+		{"alter table e3 add index idx1(id)", model.StateNone, true, model.JobStateRunning, model.JobStateRunning},
+		{"ALTER TABLE e EXCHANGE PARTITION p1 WITH TABLE e3;", model.StateNone, true, model.JobStateRunning, model.JobStateRunning},
+	}
+
+	hook := &callback.TestDDLCallback{}
+	var wg util.WaitGroupWrapper
+	wg.Add(1)
+	var once sync.Once
+	hook.OnGetJobBeforeExported = func(jobType string) {
+		once.Do(func() {
+			for i, tc := range testCases {
+				wg.Run(func() {
+					tk := testkit.NewTestKit(t, store)
+					tk.MustExec("use test")
+					recordSet, _ := tk.Exec(tc.sql)
+					if recordSet != nil {
+						require.NoError(t, recordSet.Close())
+					}
+				})
+				for {
+					time.Sleep(time.Millisecond * 100)
+					jobs, err := ddl.GetAllDDLJobs(testkit.NewTestKit(t, store).Session(), nil)
+					require.NoError(t, err)
+					if len(jobs) == i+1 {
+						break
+					}
+				}
+			}
+			wg.Done()
+		})
+	}
+	hook.OnGetJobAfterExported = func(jobType string, getJob *model.Job) {
+		once.Do(func() {
+			for _, tc := range testCases {
+				if getJob.Query == tc.sql && getJob.SchemaState == tc.schemaState {
+					require.Equal(t, tc.retJobStateForAfter, tc.jobStateForBefore)
+				}
+			}
+			wg.Done()
+		})
+	}
+
+	record := make([]int64, 0, 16)
+	hook.OnGetJobAfterExported = func(jobType string, job *model.Job) {
+		// record the job schedule order
+		record = append(record, job.ID)
+	}
+
+	err := failpoint.Enable("github.com/pingcap/tidb/ddl/mockRunJobTime", `return(true)`)
+	require.NoError(t, err)
+	defer func() {
+		err := failpoint.Disable("github.com/pingcap/tidb/ddl/mockRunJobTime")
+		require.NoError(t, err)
+	}()
+
+	d.SetHook(hook)
+	wg.Wait()
+
+	// sort all the job id.
+	ids := make(map[int64]struct{}, 16)
+	for _, id := range record {
+		ids[id] = struct{}{}
+	}
+
+	sortedIDs := make([]int64, 0, 16)
+	for id := range ids {
+		sortedIDs = append(sortedIDs, id)
+	}
+	slices.Sort(sortedIDs)
+
+	// map the job id to the DDL sequence.
+	// sortedIDs may looks like [30, 32, 34, 36, ...], it is the same order with the job in `testCases`, 30 is the first job in `testCases`, 32 is second...
+	// record may looks like [30, 30, 32, 32, 34, 32, 36, 34, ...]
+	// and the we map the record to the DDL sequence, [0, 0, 1, 1, 2, 1, 3, 2, ...]
+	for i := range record {
+		idx, b := slices.BinarySearch(sortedIDs, record[i])
+		require.True(t, b)
+		record[i] = int64(idx)
+	}
+
+	check(t, record, 0, 1, 2)
+	check(t, record, 0, 4)
+	check(t, record, 1, 4)
+	check(t, record, 2, 4)
+	check(t, record, 4, 5)
+	check(t, record, 4, 6)
+	check(t, record, 4, 9)
+	check(t, record, 5, 6)
+	check(t, record, 5, 9)
+	check(t, record, 6, 9)
+	check(t, record, 8, 9)
+}
