@@ -24,8 +24,12 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/domain/infosync"
 	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/session"
+	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/util/logutil"
+	"github.com/pingcap/tidb/util/sqlexec"
 	"go.uber.org/zap"
 )
 
@@ -100,6 +104,40 @@ func (h ClusterUpgradeHandler) StartUpgrade() (hasDone bool, err error) {
 
 	err = session.SyncUpgradeState(se, 10*time.Second)
 	return false, err
+}
+
+func hasCancellingJob(sctx sessionctx.Context) error {
+	var results sqlexec.RecordSet
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnOthers)
+	sql := "admin show ddl jobs;"
+	results, err := sctx.(sqlexec.SQLExecutor).ExecuteInternal(ctx, sql)
+	if err != nil {
+		logutil.BgLogger().Error(`ExecuteInternal`, zap.String("sql", sql), zap.Error(err))
+		return err
+	}
+	if results == nil {
+		return nil
+	}
+
+	defer terror.Call(results.Close)
+	for {
+		req := results.NewChunk(nil)
+		if err = results.Next(ctx, req); err != nil {
+			break
+		}
+
+		if req.NumRows() == 0 {
+			break
+		}
+
+		for i := 0; i < req.NumRows(); i++ {
+			if req.GetRow(i).GetString(11) == model.JobStateCancelling.String() {
+				return errors.Errorf("There is a DDL job in cancelling status cannot be upgraded")
+			}
+		}
+	}
+
+	return nil
 }
 
 // FinishUpgrade is used to finish the upgrade.
