@@ -83,7 +83,7 @@ const (
 
 	shardRowIDBitsMax = 15
 
-	batchAddingJobs = 10
+	batchAddingJobs = 20
 
 	reorgWorkerCnt   = 10
 	generalWorkerCnt = 1
@@ -266,6 +266,7 @@ type limitJobTask struct {
 	job      *model.Job
 	err      chan error
 	cacheErr error
+	ver      int64
 }
 
 // ddl is used to handle the statements that define the structure or schema of the database.
@@ -359,6 +360,8 @@ type ddlCtx struct {
 	// backfillJobCh gets notification if any backfill jobs coming.
 	backfillJobCh chan struct{}
 
+	limitVerCh chan *limitJobTask
+
 	*waitSchemaSyncedController
 	*schemaVersionManager
 	// recording the running jobs.
@@ -400,22 +403,66 @@ type ddlCtx struct {
 type schemaVersionManager struct {
 	schemaVersionMu sync.Mutex
 	// lockOwner stores the job ID that is holding the lock.
-	lockOwner atomicutil.Int64
+	lockOwner         atomicutil.Int64
+	step              int64
+	currSchemaVersion int64
+	endSchemaVersion  int64
 }
 
-func newSchemaVersionManager() *schemaVersionManager {
+func newSchemaVersionManager(store kv.Storage) *schemaVersionManager {
 	return &schemaVersionManager{}
+	// sv := &schemaVersionManager{step: 200}
+	// err := kv.RunInNewTxn(kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL), store, true, func(ctx context.Context, txn kv.Transaction) error {
+	// 	var err error
+	// 	m := meta.NewMeta(txn)
+	// 	sv.endSchemaVersion, err = m.GenSchemaVersions(sv.step)
+	// 	return err
+	// })
+	// if err != nil {
+	// 	logutil.BgLogger().Fatal("xxx new======================================", zap.Error(err))
+	// }
+	// sv.currSchemaVersion = sv.endSchemaVersion - sv.step
+	// logutil.BgLogger().Info("xxx new======================================", zap.Int64("curr version", sv.currSchemaVersion))
+	// return sv
 }
 
 func (sv *schemaVersionManager) setSchemaVersion(job *model.Job, store kv.Storage) (schemaVersion int64, err error) {
-	sv.lockSchemaVersion(job.ID)
-	err = kv.RunInNewTxn(kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL), store, true, func(ctx context.Context, txn kv.Transaction) error {
-		var err error
-		m := meta.NewMeta(txn)
-		schemaVersion, err = m.GenSchemaVersion()
-		return err
-	})
-	return schemaVersion, err
+	// sv.lockSchemaVersion(job.ID)
+	// err = kv.RunInNewTxn(kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL), store, true, func(ctx context.Context, txn kv.Transaction) error {
+	// 	var err error
+	// 	m := meta.NewMeta(txn)
+	// 	schemaVersion, err = m.GenSchemaVersion()
+	// 	return err
+	// })
+	// return schemaVersion, err
+	return verNum.Add(1), nil
+	// sv.schemaVersionMu.Lock()
+	// ver := sv.currSchemaVersion + 1
+	// hasCache := ver < sv.endSchemaVersion
+	// if hasCache {
+	// 	sv.currSchemaVersion++
+	// }
+	// sv.schemaVersionMu.Unlock()
+	// logutil.BgLogger().Warn("xxx ----------------------------------- 00", zap.Bool("cache", hasCache), zap.Int64("ver", ver))
+	// if hasCache {
+	// 	return ver, nil
+	// }
+
+	// err = kv.RunInNewTxn(kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL), store, true, func(ctx context.Context, txn kv.Transaction) error {
+	// 	var err error
+	// 	m := meta.NewMeta(txn)
+	// 	schemaVersion, err = m.GenSchemaVersions(sv.step)
+	// 	return err
+	// })
+	// if err != nil {
+	// 	return 0, err
+	// }
+	// sv.schemaVersionMu.Lock()
+	// sv.currSchemaVersion++
+	// sv.endSchemaVersion = schemaVersion
+	// logutil.BgLogger().Warn("xxx ----------------------------------- 11", zap.Int64("curr ver", sv.currSchemaVersion), zap.Int64("ver", sv.endSchemaVersion))
+	// sv.schemaVersionMu.Unlock()
+	// return ver, nil
 }
 
 // lockSchemaVersion gets the lock to prevent the schema version from being updated.
@@ -430,12 +477,17 @@ func (sv *schemaVersionManager) lockSchemaVersion(jobID int64) {
 }
 
 // unlockSchemaVersion releases the lock.
-func (sv *schemaVersionManager) unlockSchemaVersion(jobID int64) {
-	ownerID := sv.lockOwner.Load()
-	if ownerID == jobID {
-		sv.lockOwner.Store(0)
-		sv.schemaVersionMu.Unlock()
-	}
+func (sv *schemaVersionManager) unlockSchemaVersion(ch chan *limitJobTask, jobID int64, ver int64) {
+	t := &limitJobTask{ver: ver, err: make(chan error)}
+	logutil.BgLogger().Info(fmt.Sprintf("xxx -------------- jobID:%d, a new verion :%v, start", jobID, ver))
+	ch <- t
+	<-t.err
+	logutil.BgLogger().Info(fmt.Sprintf("xxx -------------- jobID:%d, a new verion :%v, end", jobID, ver))
+	// ownerID := sv.lockOwner.Load()
+	// if ownerID == jobID {
+	// 	sv.lockOwner.Store(0)
+	// 	sv.schemaVersionMu.Unlock()
+	// }
 }
 
 func (dc *ddlCtx) isOwner() bool {
@@ -673,7 +725,8 @@ func newDDL(ctx context.Context, options ...Option) *ddl {
 		infoCache:                  opt.InfoCache,
 		tableLockCkr:               deadLockCkr,
 		etcdCli:                    opt.EtcdCli,
-		schemaVersionManager:       newSchemaVersionManager(),
+		limitVerCh:                 make(chan *limitJobTask, batchAddingJobs),
+		schemaVersionManager:       newSchemaVersionManager(opt.Store),
 		waitSchemaSyncedController: newWaitSchemaSyncedController(),
 		runningJobIDs:              make([]string, 0, jobRecordCapacity),
 	}
@@ -765,6 +818,7 @@ func (d *ddl) Start(ctxPool *pools.ResourcePool) error {
 	logutil.BgLogger().Info("start DDL", zap.String("category", "ddl"), zap.String("ID", d.uuid), zap.Bool("runWorker", config.GetGlobalConfig().Instance.TiDBEnableDDL.Load()))
 
 	d.wg.Run(d.limitDDLJobs)
+	d.wg.Run(d.limitVersions)
 	d.sessPool = sess.NewSessionPool(ctxPool, d.store)
 	d.ownerManager.SetBeOwnerHook(func() {
 		var err error
@@ -1053,7 +1107,7 @@ func (d *ddl) DoDDLJob(ctx sessionctx.Context, job *model.Job) error {
 	}
 	// Get a global job ID and put the DDL job in the queue.
 	setDDLJobQuery(ctx, job)
-	task := &limitJobTask{job, make(chan error), nil}
+	task := &limitJobTask{job, make(chan error), nil, 0}
 	d.limitJobCh <- task
 
 	failpoint.Inject("mockParallelSameDDLJobTwice", func(val failpoint.Value) {
@@ -1061,7 +1115,7 @@ func (d *ddl) DoDDLJob(ctx sessionctx.Context, job *model.Job) error {
 			<-task.err
 			// The same job will be put to the DDL queue twice.
 			job = job.Clone()
-			task1 := &limitJobTask{job, make(chan error), nil}
+			task1 := &limitJobTask{job, make(chan error), nil, 0}
 			d.limitJobCh <- task1
 			// The second job result is used for test.
 			task = task1

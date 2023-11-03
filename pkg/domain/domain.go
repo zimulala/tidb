@@ -255,6 +255,8 @@ func (do *Domain) loadInfoSchema(startTS uint64) (infoschema.InfoSchema, bool, i
 	// 3. There are less 100 diffs.
 	// 4. No regenrated schema diff.
 	startTime := time.Now()
+	logutil.BgLogger().Warn(fmt.Sprintf("xxx--------------------------------------- current ver:%v, need ver:%v",
+		currentSchemaVersion, neededSchemaVersion))
 	if currentSchemaVersion != 0 && neededSchemaVersion > currentSchemaVersion && neededSchemaVersion-currentSchemaVersion < LoadSchemaDiffVersionGapThreshold {
 		is, relatedChanges, err := do.tryLoadSchemaDiffs(m, currentSchemaVersion, neededSchemaVersion)
 		if err == nil {

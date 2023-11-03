@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -53,6 +54,7 @@ import (
 )
 
 var (
+	verNum = atomicutil.NewInt64(0)
 	// ddlWorkerID is used for generating the next DDL worker ID.
 	ddlWorkerID = atomicutil.NewInt32(0)
 	// backfillContextID is used for generating the next backfill context ID.
@@ -221,6 +223,84 @@ func (d *ddl) limitDDLJobs() {
 			d.addBatchDDLJobs(tasks)
 		case <-d.ctx.Done():
 			return
+		}
+	}
+}
+
+type versTasks struct {
+	tasks []*limitJobTask
+}
+
+func (rs *versTasks) Len() int {
+	return len(rs.tasks)
+}
+
+func (rs *versTasks) Less(i, j int) bool {
+	return rs.tasks[i].ver < rs.tasks[j].ver
+}
+
+func (rs *versTasks) Swap(i, j int) {
+	rs.tasks[i], rs.tasks[j] = rs.tasks[j], rs.tasks[i]
+}
+
+func (rs *versTasks) Push(x interface{}) {
+	rs.tasks = append(rs.tasks, x.(*limitJobTask))
+	logutil.BgLogger().Info(fmt.Sprintf("xxx--------------------------- curr tasks:%#v, len:%d", rs.tasks, len(rs.tasks)))
+}
+
+func (rs *versTasks) Pop() interface{} {
+	old := rs.tasks
+	n := len(old)
+	x := old[0]
+	rs.tasks = old[1:n]
+	return x
+}
+
+func (d *ddl) limitVersions() {
+	tasks := &versTasks{make([]*limitJobTask, 0, batchAddingJobs)}
+	doneTasks := make([]*limitJobTask, 0, batchAddingJobs)
+	currVer := int64(0)
+	for {
+		select {
+		case task := <-d.limitVerCh:
+			doneTasks = doneTasks[:0]
+			tasks.Push(task)
+			taskLen := len(d.limitVerCh)
+			for i := 0; i < taskLen; i++ {
+				t := <-d.limitVerCh
+				tasks.Push(t)
+			}
+			logutil.BgLogger().Info(fmt.Sprintf("xxx--------------------------- curr ver:%v, tasks:%#v, len:%d",
+				currVer, tasks, tasks.Len()))
+			sort.Sort(tasks)
+			step := int64(0)
+			for i := 0; i < tasks.Len(); i++ {
+				if tasks.tasks[i].ver > currVer+1 {
+					break
+				}
+				currVer++
+				doneTasks = append(doneTasks, tasks.Pop().(*limitJobTask))
+				step++
+				logutil.BgLogger().Info(fmt.Sprintf("xxx--------------------------- curr ver:%v, task ver:%v, step:%v",
+					currVer, tasks.tasks[i], step))
+			}
+			for step != 0 {
+				err := kv.RunInNewTxn(kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL), d.store, true, func(ctx context.Context, txn kv.Transaction) error {
+					var err error
+					m := meta.NewMeta(txn)
+					_, err = m.GenSchemaVersions(step)
+					return err
+				})
+				logutil.BgLogger().Info("xxx--------------------------- gen ver", zap.Int64("step", step), zap.Error(err))
+				if err == nil {
+					break
+				}
+				time.Sleep(time.Second * 1)
+			}
+
+			for _, dT := range doneTasks {
+				dT.err <- nil
+			}
 		}
 	}
 }
@@ -786,12 +866,13 @@ func (w *worker) HandleDDLJobTable(d *ddlCtx, job *model.Job) (int64, error) {
 	d.mu.RUnlock()
 
 	if job.IsCancelled() {
-		defer d.unlockSchemaVersion(job.ID)
+		defer d.unlockSchemaVersion(d.limitVerCh, job.ID, schemaVer)
 		w.sess.Reset()
 		err = w.HandleJobDone(d, job, t)
 		return 0, err
 	}
 
+	ver := schemaVer
 	if runJobErr != nil && !job.IsRollingback() && !job.IsRollbackDone() {
 		// If the running job meets an error
 		// and the job state is rolling back, it means that we have already handled this error.
@@ -808,20 +889,20 @@ func (w *worker) HandleDDLJobTable(d *ddlCtx, job *model.Job) (int64, error) {
 	err = w.registerMDLInfo(job, schemaVer)
 	if err != nil {
 		w.sess.Rollback()
-		d.unlockSchemaVersion(job.ID)
+		d.unlockSchemaVersion(d.limitVerCh, job.ID, ver)
 		return 0, err
 	}
 	err = w.updateDDLJob(job, runJobErr != nil)
 	if err = w.handleUpdateJobError(t, job, err); err != nil {
 		w.sess.Rollback()
-		d.unlockSchemaVersion(job.ID)
+		d.unlockSchemaVersion(d.limitVerCh, job.ID, ver)
 		return 0, err
 	}
 	writeBinlog(d.binlogCli, txn, job)
 	// reset the SQL digest to make topsql work right.
 	w.sess.GetSessionVars().StmtCtx.ResetSQLDigest(job.Query)
 	err = w.sess.Commit()
-	d.unlockSchemaVersion(job.ID)
+	d.unlockSchemaVersion(d.limitVerCh, job.ID, ver)
 	if err != nil {
 		return 0, err
 	}
