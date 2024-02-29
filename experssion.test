@@ -1,0 +1,658 @@
+--echo #
+--echo # CREATE TABLE - column with func as DEFAULT then test DROP column.
+--echo #
+CREATE TABLE t1 (i int, b JSON DEFAULT (JSON_OBJECT("key", i)));
+INSERT INTO t1(i) VALUES (1);
+INSERT INTO t1 SET i = 10;
+INSERT INTO t1(i, b) VALUES (2, DEFAULT);
+INSERT INTO t1 SET i = 20, b = DEFAULT;
+INSERT INTO t1(i, b) VALUES (3, JSON_OBJECT("key", 3));
+INSERT INTO t1 SET i = 30, b = JSON_OBJECT("key", 30);
+SELECT * FROM t1;
+ALTER TABLE t1 DROP COLUMN b;
+DROP TABLE t1;
+
+--echo #
+--echo # CREATE TABLE - column with INDEX and func as DEFAULT
+--echo #
+CREATE TABLE t1 (i int, b char(255) DEFAULT (md5(i)), INDEX (b(10)));
+INSERT INTO t1(i) VALUES (1);
+INSERT INTO t1(i, b) VALUES (2, DEFAULT);
+INSERT INTO t1(i, b) VALUES (3, "some string");
+SELECT * FROM t1;
+DROP TABLE t1;
+
+--echo #
+--echo # Test ALTER table ADD column with DEFAULT
+--echo #
+CREATE TABLE t1 (i int);
+INSERT INTO t1(i) VALUES (1),(2);
+ALTER TABLE t1 ADD COLUMN b JSON DEFAULT (JSON_OBJECT("key",i));
+INSERT INTO t1(i) VALUES (3);
+INSERT INTO t1(i, b) VALUES (4, DEFAULT);
+INSERT INTO t1(i, b) VALUES (5, JSON_OBJECT("key", 5));
+SELECT * FROM t1;
+DROP TABLE t1;
+
+--echo #
+--echo # Test ALTER table ADD column with DEFAULT then ALTER TABLE SET DEFAULT func
+--echo #
+CREATE TABLE t1 (i int);
+INSERT INTO t1(i) VALUES (1),(2);
+ALTER TABLE t1 ADD COLUMN b JSON;
+ALTER TABLE t1 ALTER COLUMN b SET DEFAULT (JSON_OBJECT("key",i));
+INSERT INTO t1(i) VALUES (3);
+INSERT INTO t1(i, b) VALUES (4, DEFAULT);
+INSERT INTO t1(i, b) VALUES (5, JSON_OBJECT("key", 5));
+SELECT * FROM t1;
+DROP TABLE t1;
+
+
+--echo #
+--echo # Test ALTER table CHANGE column
+--echo #
+CREATE TABLE t1 (i int);
+INSERT INTO t1(i) VALUES (1),(2);
+ALTER TABLE t1 ADD COLUMN b JSON DEFAULT (JSON_ARRAY());
+INSERT INTO t1(i) VALUES (4);
+ALTER TABLE t1 CHANGE COLUMN b new_b JSON DEFAULT (JSON_OBJECT("key",i));
+INSERT INTO t1(i) VALUES (5);
+INSERT INTO t1(i, new_b) VALUES (6, DEFAULT);
+INSERT INTO t1(i, new_b) VALUES (7, JSON_OBJECT("key", 7));
+SELECT * FROM t1;
+DROP TABLE t1;
+
+CREATE TABLE t1 (i int, b int DEFAULT (123 * 1));
+--error ER_DEFAULT_VAL_GENERATED_NON_PRIOR
+ALTER TABLE t1 CHANGE COLUMN i new_i JSON DEFAULT (JSON_ARRAY(b));
+DROP TABLE t1;
+
+--echo #
+--echo # Test ALTER table MODIFY column
+--echo #
+CREATE TABLE t1 (i int);
+INSERT INTO t1(i) VALUES (1),(2);
+ALTER TABLE t1 ADD COLUMN b JSON DEFAULT (JSON_ARRAY());
+INSERT INTO t1(i) VALUES (4);
+ALTER TABLE t1 MODIFY COLUMN b JSON DEFAULT (JSON_OBJECT("key",i)) FIRST;
+INSERT INTO t1(i) VALUES (5);
+INSERT INTO t1(i, b) VALUES (6, DEFAULT);
+INSERT INTO t1(i, b) VALUES (7, JSON_OBJECT("key", 7));
+SELECT * FROM t1;
+DROP TABLE t1;
+
+CREATE TABLE t1 (i int, b int DEFAULT (123 * 1));
+--error ER_DEFAULT_VAL_GENERATED_NON_PRIOR
+ALTER TABLE t1 MODIFY COLUMN i JSON DEFAULT (JSON_ARRAY(b)) FIRST;
+DROP TABLE t1;
+
+--echo #
+--echo # Column order with expression or literal as default value
+--echo #
+CREATE TABLE t1 (i JSON DEFAULT (JSON_ARRAY(b)), b int DEFAULT 123);
+DROP TABLE t1;
+CREATE TABLE t1 (b int DEFAULT 123, i JSON DEFAULT (JSON_ARRAY(b)));
+DROP TABLE t1;
+--error ER_DEFAULT_VAL_GENERATED_NON_PRIOR
+CREATE TABLE t1 (i JSON DEFAULT (JSON_ARRAY(b)), b int DEFAULT (123 * 1));
+CREATE TABLE t1 (b int DEFAULT (123 * 1), i JSON DEFAULT (JSON_ARRAY(b)));
+DROP TABLE t1;
+
+--echo #
+--echo # Test CREATE TABLE with column without default then SET a DEFAULT.
+--echo # ALSO TEST DROP DEFAULT
+--echo #
+CREATE TABLE t1 (i int, b JSON);
+INSERT INTO t1(i) VALUES (1),(2);
+ALTER TABLE t1 ALTER COLUMN b SET DEFAULT (JSON_OBJECT("key",i));
+INSERT INTO t1(i) VALUES (3);
+INSERT INTO t1(i, b) VALUES (4, DEFAULT);
+INSERT INTO t1(i, b) VALUES (5, JSON_OBJECT("key", 5));
+ALTER TABLE t1 ALTER COLUMN b DROP DEFAULT;
+INSERT INTO t1(i, b) VALUES (6, NULL);
+SELECT * FROM t1;
+DROP TABLE t1;
+
+--echo #
+--echo # Test func as DEFAULT with auto_increment
+--echo #
+--error ER_DEFAULT_VAL_GENERATED_REF_AUTO_INC
+CREATE TABLE t1 (id int(11) PRIMARY KEY auto_increment,
+                 f1 JSON DEFAULT (JSON_OBJECT("key", id)));
+
+--echo #
+--echo # Test with not-allowed function
+--echo #
+--error ER_DEFAULT_VAL_GENERATED_NAMED_FUNCTION_IS_NOT_ALLOWED
+CREATE TABLE t1 (a varchar(64), b varchar(1024) DEFAULT (load_file(a)));
+
+--echo #
+--echo # Test function set as DEFAULT value which exceeds size
+--echo #
+CREATE TABLE t1 (id char(2) DEFAULT (uuid()));
+--error ER_DATA_TOO_LONG
+INSERT INTO t1 VALUES (),(),();
+DROP TABLE t1;
+
+
+--echo #
+--echo # Test generated funcs with default value.
+--echo #
+-- error ER_WRONG_USAGE
+CREATE TABLE t3 (a INT PRIMARY KEY,
+                 b INT GENERATED ALWAYS AS (-a) VIRTUAL UNIQUE DEFAULT (-1 * 128));
+-- error ER_WRONG_USAGE
+CREATE TABLE t3 (a INT PRIMARY KEY,
+                 c INT GENERATED ALWAYS AS (-a) STORED DEFAULT (-1 * 128));
+
+
+--echo #
+--echo # Create table with DEFAULT()
+--echo #
+--error ER_DEFAULT_AS_VAL_GENERATED
+CREATE TABLE t3 (a INT PRIMARY KEY,
+d INT DEFAULT (-a + 1),
+c INT DEFAULT (DEFAULT(d))
+);
+
+--echo #
+--echo # DROP column that it depends on
+--echo #
+CREATE TABLE t3 (a INT PRIMARY KEY,
+d INT DEFAULT (-a + 1),
+c INT DEFAULT (-d)
+);
+
+--error ER_DEFAULT_AS_VAL_GENERATED
+SELECT DEFAULT(d) from t3;
+--error ER_DEFAULT_AS_VAL_GENERATED
+SELECT DEFAULT(c) from t3;
+--error ER_DEPENDENT_BY_DEFAULT_GENERATED_VALUE
+ALTER TABLE t3 DROP COLUMN d;
+DROP TABLE t3;
+
+
+--echo #
+--echo # Test with REPLACE INTO ..
+--echo #
+
+CREATE TABLE test (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  data VARCHAR(64) DEFAULT NULL,
+  something VARCHAR(64) NOT NULL DEFAULT (CONCAT ('[', data, ']')),
+  PRIMARY KEY (id)
+);
+
+REPLACE INTO test VALUES (1, 'Old', DEFAULT);
+SELECT * FROM test;
+REPLACE INTO test VALUES (1, 'New', DEFAULT);
+SELECT * FROM test;
+DROP TABLE test;
+
+--echo #
+--echo # TINYBLOB  tests
+--echo #
+
+CREATE TABLE t(i INT, b TINYBLOB  DEFAULT (repeat('b', i)));
+SHOW CREATE TABLE t;
+INSERT INTO t values(254, DEFAULT);
+INSERT INTO t values(255, DEFAULT);
+-- error ER_DATA_TOO_LONG
+INSERT INTO t values(256, DEFAULT);
+SELECT i, length(b) FROM t;
+DROP TABLE t;
+
+CREATE TABLE t(i INT);
+INSERT INTO t values(254), (255), (256);
+-- error ER_DATA_TOO_LONG
+ALTER TABLE t ADD COLUMN b TINYBLOB DEFAULT (repeat('b', i));
+SELECT * FROM t;
+DELETE FROM t where i = 256;
+ALTER TABLE t ADD COLUMN b TINYBLOB;
+SELECT i, length(b) FROM t;
+ALTER TABLE t ALTER COLUMN b SET DEFAULT (repeat('b', i));
+SELECT i, length(b) FROM t;
+INSERT INTO t values(254, DEFAULT);
+INSERT INTO t values(255, DEFAULT);
+-- error ER_DATA_TOO_LONG
+INSERT INTO t values(256, DEFAULT);
+ALTER TABLE t ALTER COLUMN b DROP DEFAULT;
+-- error ER_NO_DEFAULT_FOR_FIELD
+INSERT INTO t(i) values(128);
+SELECT i, length(b) FROM t;
+DROP TABLE t;
+
+--echo #
+--echo # MEDIUMBLOB  tests
+--echo #
+
+SET GLOBAL max_allowed_packet = 1073741824;
+
+CREATE TABLE t(i BIGINT, b MEDIUMBLOB  DEFAULT (repeat('b', i)));
+SHOW CREATE TABLE t;
+INSERT INTO t values(16777214, DEFAULT);
+INSERT INTO t values(16777215, DEFAULT);
+-- error ER_DATA_TOO_LONG
+INSERT INTO t values(16777216, DEFAULT);
+SELECT i, length(b) FROM t;
+DROP TABLE t;
+
+CREATE TABLE t(i BIGINT);
+INSERT INTO t values(16777214), (16777215), (16777216);
+-- error ER_DATA_TOO_LONG
+ALTER TABLE t ADD COLUMN b MEDIUMBLOB DEFAULT (repeat('b', i));
+SELECT * FROM t;
+DELETE FROM t where i = 16777216;
+ALTER TABLE t ADD COLUMN b MEDIUMBLOB;
+SELECT i, length(b) FROM t;
+ALTER TABLE t ALTER COLUMN b SET DEFAULT (repeat('b', i));
+SELECT i, length(b) FROM t;
+INSERT INTO t values(16777214, DEFAULT);
+INSERT INTO t values(16777215, DEFAULT);
+-- error ER_DATA_TOO_LONG
+INSERT INTO t values(16777216, DEFAULT);
+ALTER TABLE t ALTER COLUMN b DROP DEFAULT;
+-- error ER_NO_DEFAULT_FOR_FIELD
+INSERT INTO t(i) values(128);
+SELECT i, length(b) FROM t;
+DROP TABLE t;
+
+SET GLOBAL max_allowed_packet=default;
+
+--echo #
+--echo # tests with BLOB
+--echo #
+
+CREATE TABLE t(i INT, b BLOB DEFAULT (repeat('b', i)));
+SHOW CREATE TABLE t;
+INSERT INTO t values(65534, DEFAULT);
+INSERT INTO t values(65535, DEFAULT);
+-- error ER_DATA_TOO_LONG
+INSERT INTO t values(65536, DEFAULT);
+SELECT i, length(b) FROM t;
+DROP TABLE t;
+
+CREATE TABLE t(i INT);
+INSERT INTO t values(65534), (65535), (65536);
+-- error ER_DATA_TOO_LONG
+ALTER TABLE t ADD COLUMN b BLOB DEFAULT (repeat('b', i));
+SELECT * FROM t;
+DELETE FROM t where i = 65536;
+ALTER TABLE t ADD COLUMN b BLOB;
+SELECT i, length(b) FROM t;
+ALTER TABLE t ALTER COLUMN b SET DEFAULT (repeat('b', i));
+SELECT i, length(b) FROM t;
+INSERT INTO t values(65534, DEFAULT);
+INSERT INTO t values(65535, DEFAULT);
+-- error ER_DATA_TOO_LONG
+INSERT INTO t values(65536, DEFAULT);
+ALTER TABLE t ALTER COLUMN b DROP DEFAULT;
+-- error ER_NO_DEFAULT_FOR_FIELD
+INSERT INTO t(i) values(128);
+SELECT i, length(b) FROM t;
+DROP TABLE t;
+
+--echo #
+--echo # MEDIUMBLOB  tests
+--echo # max value for max_allowed_packet is 1073741824 which is < 4294967295
+--echo #
+
+CREATE TABLE t(i BIGINT, b LONGBLOB  DEFAULT (repeat('b', i)));
+SHOW CREATE TABLE t;
+-- error ER_WARN_ALLOWED_PACKET_OVERFLOWED
+INSERT INTO t values(4294967295, DEFAULT);
+DROP TABLE t;
+
+CREATE TABLE t(i INT, b BLOB DEFAULT (repeat('b', i)));
+INSERT INTO t values(65534, DEFAULT);
+INSERT INTO t values(65535, DEFAULT);
+-- error ER_DATA_TOO_LONG
+INSERT INTO t values(65536, DEFAULT);
+SELECT i, length(b) FROM t;
+DROP TABLE t;
+
+CREATE TABLE t(i INT);
+INSERT INTO t values(65534), (65535), (65536);
+-- error ER_DATA_TOO_LONG
+ALTER TABLE t ADD COLUMN b BLOB DEFAULT (repeat('b', i));
+SELECT * FROM t;
+DELETE FROM t where i = 65536;
+ALTER TABLE t ADD COLUMN b BLOB;
+SELECT i, length(b) FROM t;
+ALTER TABLE t ALTER COLUMN b SET DEFAULT (repeat('b', i));
+SELECT i, length(b) FROM t;
+INSERT INTO t values(65534, DEFAULT);
+INSERT INTO t values(65535, DEFAULT);
+-- error ER_DATA_TOO_LONG
+INSERT INTO t values(65536, DEFAULT);
+ALTER TABLE t ALTER COLUMN b DROP DEFAULT;
+-- error ER_NO_DEFAULT_FOR_FIELD
+INSERT INTO t(i) values(128);
+SELECT i, length(b) FROM t;
+DROP TABLE t;
+
+
+--echo #
+--echo # Check default expressions together with Generated Columns
+--echo #
+CREATE TABLE t1 (i INT, b char(255) DEFAULT (md5(i)));
+SHOW COLUMNS FROM t1;
+INSERT INTO t1(i) VALUES (1);
+INSERT INTO t1(i, b) VALUES (2, DEFAULT);
+INSERT INTO t1(i, b) VALUES (3, "some string");
+INSERT INTO t1(i, b) VALUES (NULL, DEFAULT);
+SELECT * FROM t1;
+DROP TABLE t1;
+
+CREATE TABLE t1 (i INT, b char(255) DEFAULT (md5(i)), j INT GENERATED ALWAYS AS (i*2));
+SHOW COLUMNS FROM t1;
+INSERT INTO t1(i) VALUES (1);
+INSERT INTO t1(i, b) VALUES (2, DEFAULT);
+INSERT INTO t1(i, b) VALUES (3, "some string");
+INSERT INTO t1(i, b) VALUES (NULL, DEFAULT);
+SELECT * FROM t1;
+DROP TABLE t1;
+
+--echo #
+--echo # Make sure there's no memory leaking after failed ALTER TABLE.
+--echo # (coverage for err tag in open_table_from_share)
+--echo #
+CREATE TABLE t(a int);
+ALTER TABLE t ADD COLUMN b int DEFAULT(
+date_sub(a, INTERVAL A MONTH));
+--error ER_INVALID_GROUP_FUNC_USE
+ALTER TABLE t ADD COLUMN c int DEFAULT (SUM(a));
+DROP TABLE t;
+
+--echo # Function that are now allowed.
+--echo # result is not shown as the data is non-deterministic
+
+
+CREATE TABLE t1 (a varchar(288) DEFAULT (USER()));
+INSERT INTO t1 VALUES ();
+--disable_result_log
+SELECT * FROM t1;
+--enable_result_log
+DROP TABLE t1;
+
+-- error ER_INVALID_DEFAULT
+CREATE TABLE t1 (id char(40) DEFAULT (uuid()) DEFAULT 4);
+-- error ER_INVALID_DEFAULT
+CREATE TABLE t1 (id char(40) DEFAULT 4 DEFAULT (uuid()));
+-- error ER_INVALID_DEFAULT
+CREATE TABLE t1 (id char(40) DEFAULT 4 DEFAULT (uuid()) DEFAULT 10);
+CREATE TABLE t1 (id char(40) DEFAULT 4 DEFAULT 5);
+DROP TABLE t1;
+
+
+--echo #
+--echo # Bug#28046624 	WL#9418: INCORRECT BEHAVIOR OF DEFAULT WITH MODIFY COLUMN
+--echo #
+CREATE TABLE t1 ( i int, j int DEFAULT (i) ) ;
+INSERT INTO t1(i) VALUES (4),(5),(6) ;
+SELECT * FROM t1 ;
+ALTER TABLE t1 MODIFY COLUMN j DOUBLE DEFAULT(i*i);
+SELECT * FROM t1 ;
+INSERT INTO t1(i) VALUES (7);
+SELECT * FROM t1 ;
+DROP TABLE t1;
+
+CREATE TABLE t2 ( i int, j int DEFAULT (i) ) ;
+INSERT INTO t2(i) VALUES (4),(5),(6) ;
+SELECT * FROM t2 ;
+ALTER TABLE t2 MODIFY COLUMN j INT DEFAULT(i*i);
+SELECT * FROM t2 ;
+INSERT INTO t2(i) VALUES (7);
+ALTER TABLE t2 MODIFY COLUMN j DOUBLE DEFAULT(i*100);
+INSERT INTO t2(i) VALUES (8);
+SELECT * FROM t2 ;
+DROP TABLE t2;
+
+
+--echo #
+--echo # Bug#29480711   DEBUG ASSERTION IN CREATE TABLE WITH ENUM OR SET
+--echo # COLUMNS HAVING EXPLICIT DEFAULT
+--echo #
+
+CREATE TABLE t1 (truth ENUM('y','n') DEFAULT('y'));
+CREATE TABLE t2 (truths SET('y','n') DEFAULT('y'));
+INSERT INTO t1 values (DEFAULT);
+INSERT INTO t1 values ();
+INSERT INTO t2 values (DEFAULT);
+INSERT INTO t2 values ();
+SELECT * from t1;
+SELECT * from t2;
+DROP TABLE t1;
+DROP TABLE t2;
+
+CREATE TABLE t1 (truth ENUM('y','n') DEFAULT('s'));
+CREATE TABLE t2 (truths SET('y','n') DEFAULT('p'));
+
+--error 1265
+INSERT INTO t1 values (DEFAULT);
+--error 1265
+INSERT INTO t1 values ();
+--error 1265
+INSERT INTO t2 values (DEFAULT);
+--error 1265
+INSERT INTO t2 values ();
+SELECT * from t1;
+SELECT * from t2;
+DROP TABLE t1;
+DROP TABLE t2;
+
+--echo #
+--echo # Bug#30331053: CREATE TABLE WITH AUTO_INCREMENT AND DEFAULT EXPRESSION
+--echo # SHOULD BE REJECTED
+--echo #
+--error ER_INVALID_DEFAULT
+CREATE TABLE t2 (a INT AUTO_INCREMENT DEFAULT(0));
+
+--echo #
+--echo # Bug#31331454: ALTER TABLE WITH AUTO_INCREMENT AND DEFAULT EXPRESSION
+--echo # SHOULD BE REJECTED
+--echo #
+CREATE TABLE t1 (i INT);
+--error ER_INVALID_DEFAULT
+ALTER TABLE t1 MODIFY COLUMN i INT AUTO_INCREMENT PRIMARY KEY DEFAULT(GROUPING(r));
+ALTER TABLE t1 MODIFY COLUMN i INT AUTO_INCREMENT PRIMARY KEY;
+--error ER_INVALID_DEFAULT
+ALTER TABLE t1 ALTER COLUMN i SET DEFAULT(GROUPING(r));
+DROP TABLE t1;
+
+--echo #
+--echo # Bug#30302907 "ADDITION OF COLUMNS WITH GENERATED DEFAULTS IS
+--echo #               BROKEN IN ALTER TABLE COPY".
+--echo #
+
+--echo #
+--echo # 1) Simple case, when generated column value depends on generated
+--echo #    default value.
+CREATE TABLE t1 (a INT PRIMARY KEY);
+CREATE TABLE t2 LIKE t1;
+CREATE TABLE t3 LIKE t1;
+INSERT INTO t1 VALUES (1), (2);
+INSERT INTO t2 SELECT * FROM t1;
+INSERT INTO t3 SELECT * FROM t1;
+ALTER TABLE t1 ADD COLUMN b INT DEFAULT (a), ADD COLUMN c INT GENERATED ALWAYS AS (-b) STORED;
+--echo # Repeat the test with explicit ALGORITHM=COPY
+ALTER TABLE t2 ADD COLUMN b INT DEFAULT (a), ADD COLUMN c INT GENERATED ALWAYS AS (-b) STORED, ALGORITHM=COPY;
+--echo # INPLACE addition of generated columns and defaults is not supported.
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t3 ADD COLUMN b INT DEFAULT (a), ADD COLUMN c INT GENERATED ALWAYS AS (-b) STORED, ALGORITHM=INPLACE;
+SELECT * FROM t1;
+SELECT * FROM t2;
+SELECT * FROM t3;
+DROP TABLES t1, t2, t3;
+
+--echo #
+--echo # 2) Column with generated default "replaces" old column.
+CREATE TABLE t1 (a INT, b INT);
+CREATE TABLE t2 LIKE t1;
+CREATE TABLE t3 LIKE t1;
+INSERT INTO t1 VALUES (1, 1), (2, 2);
+INSERT INTO t2 SELECT * FROM t1;
+INSERT INTO t3 SELECT * FROM t1;
+ALTER TABLE t1 DROP COLUMN b, ADD COLUMN c INT DEFAULT (a);
+ALTER TABLE t2 DROP COLUMN b, ADD COLUMN c INT DEFAULT (a), ALGORITHM=COPY;
+--echo # INPLACE addition of generated defaults is not supported.
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t3 DROP COLUMN b, ADD COLUMN c INT DEFAULT (a), ALGORITHM=INPLACE;
+SELECT * FROM t1;
+SELECT * FROM t2;
+SELECT * FROM t3;
+DROP TABLES t1, t2, t3;
+
+--echo #
+--echo # 3) Column with generated default which is shifted to new poisition.
+CREATE TABLE t1 (a INT, b INT DEFAULT (1+1));
+CREATE TABLE t2 LIKE t1;
+CREATE TABLE t3 LIKE t1;
+INSERT INTO t1 VALUES (1, 0), (2, 0);
+INSERT INTO t2 SELECT * FROM t1;
+INSERT INTO t3 SELECT * FROM t1;
+ALTER TABLE t1 ADD COLUMN c INT AFTER a;
+ALTER TABLE t2 ADD COLUMN c INT AFTER a, ALGORITHM=COPY;
+ALTER TABLE t3 ADD COLUMN c INT AFTER a, ALGORITHM=INPLACE;
+SELECT * FROM t1;
+SELECT * FROM t2;
+SELECT * FROM t3;
+DROP TABLES t1, t2, t3;
+
+--echo #
+--echo # 4) Complex case. Addition of generated column which depends on
+--echo #    generated default, which depends on generated column, which
+--echo #    which depends on generated default.
+CREATE TABLE t1 (a INT PRIMARY KEY);
+CREATE TABLE t2 LIKE t1;
+CREATE TABLE t3 LIKE t1;
+INSERT INTO t1 VALUES (1), (2), (3);
+INSERT INTO t2 SELECT * FROM t1;
+INSERT INTO t3 SELECT * FROM t1;
+ALTER TABLE t1 ADD COLUMN b INT DEFAULT (a),
+               ADD COLUMN c INT GENERATED ALWAYS AS (-b) STORED,
+               ADD COLUMN d INT DEFAULT (c),
+               ADD COLUMN e INT GENERATED ALWAYS AS (-d) STORED;
+ALTER TABLE t2 ADD COLUMN b INT DEFAULT (a),
+               ADD COLUMN c INT GENERATED ALWAYS AS (-b) STORED,
+               ADD COLUMN d INT DEFAULT (c),
+               ADD COLUMN e INT GENERATED ALWAYS AS (-d) STORED,
+               ALGORITHM=COPY;
+--echo # INPLACE addition of generated columns and defaults is not supported.
+--error ER_ALTER_OPERATION_NOT_SUPPORTED
+ALTER TABLE t3 ADD COLUMN b INT DEFAULT (a),
+               ADD COLUMN c INT GENERATED ALWAYS AS (-b) STORED,
+               ADD COLUMN d INT DEFAULT (c),
+               ADD COLUMN e INT GENERATED ALWAYS AS (-d) STORED,
+               ALGORITHM=INPLACE;
+SELECT * FROM t1;
+SELECT * FROM t2;
+SELECT * FROM t3;
+DROP TABLES t1, t2, t3;
+
+--echo #
+--echo # Bug#29661106 DROP COLUMN FAILS WHEN DEFAULT EXPRESSION RETURNS
+--echo # INCORRECT VALUE
+--echo #
+
+CREATE TABLE t1(i INT, j INT DEFAULT("foobar"));
+ALTER TABLE t1 DROP COLUMN i ;
+DROP TABLE  t1;
+
+CREATE TABLE t2(i INT, j DATETIME DEFAULT(0) );
+ALTER TABLE t2 DROP COLUMN i ;
+DROP TABLE  t2;
+
+
+#
+# Bug#31856459 MISSING COLUMN DEFAULT VALUES FROM INFORMATION_SCHEMA.COLUMNS
+#
+# Verify if BLOB and TEXT field display default expression using
+# I_S.COLUNMNS and SHOW COLUMNS command.
+#
+
+CREATE TABLE t1 (
+   pk_col      INT NOT NULL AUTO_INCREMENT,
+   json_col    JSON,
+   blob_col    BLOB,
+   text_col    TEXT,
+   tblob_col   TINYBLOB,
+   ttext_col   TINYTEXT,
+   json_col_d  JSON DEFAULT (JSON_OBJECT('key','val')),
+   blob_col_d  BLOB DEFAULT ('asda'),
+   text_col_d  TEXT DEFAULT (CONCAT('adasdada','ds')),
+   tblob_col_d TINYBLOB DEFAULT ('asda'),
+   ttext_col_d TINYTEXT DEFAULT (CONCAT('adasdada','ds')),
+   PRIMARY KEY (`pk_col`));
+
+SELECT COLUMN_NAME, COLUMN_DEFAULT, DATA_TYPE, EXTRA
+  FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='t1'
+  ORDER BY COLUMN_NAME;
+
+SHOW COLUMNS FROM t1;
+
+SHOW CREATE TABLE t1;
+
+DROP TABLE t1;
+
+--echo
+--echo # Bug#34463652: DEFAULT() should reject GENERATED columns
+--echo
+
+--echo # Show that we throw an error for the invalid self-reference.
+--echo # We can't get DEFAULT() from a GENERATED column that has no DEFAULT.
+--error ER_NO_DEFAULT_FOR_FIELD
+CREATE TABLE t (a INT,
+                b INT GENERATED ALWAYS AS (DEFAULT(b)));
+--echo # CREATE should have failed, so consequently, so should the DROP.
+DROP TABLE IF EXISTS t;
+--echo
+
+--echo # Show that we throw an error for the invalid reference.
+--echo # We can't get DEFAULT() from a GENERATED column that has no DEFAULT.
+--error ER_NO_DEFAULT_FOR_FIELD
+CREATE TABLE t (a INT,
+                b INT GENERATED ALWAYS AS (5*8),
+                c INT GENERATED ALWAYS AS (DEFAULT(b)));
+--echo # CREATE should have failed, so consequently, so should the DROP.
+DROP TABLE IF EXISTS t;
+--echo
+
+--echo # Show that we throw an error for the self-reference.
+CREATE TABLE t (a INT);
+--error ER_NO_DEFAULT_FOR_FIELD
+ALTER TABLE t ADD COLUMN b INT
+  GENERATED ALWAYS AS (DEFAULT(b)), ALGORITHM=INPLACE;
+--echo # ALTER should have failed, but there's still a table to DROP.
+DROP TABLE IF EXISTS t;
+--echo
+
+--echo # Show that DEFAULT(column) with a column that uses a
+--echo # DEFAULT(expression) rather than a DEFAULT literal still fails.
+CREATE TABLE t (a INT,
+                b INT,
+                c INT DEFAULT (a*77));
+DROP TABLE t;
+--error ER_DEFAULT_AS_VAL_GENERATED
+CREATE TABLE t (a INT,
+                b INT,
+                c INT DEFAULT (a*77),
+                d INT GENERATED ALWAYS AS (DEFAULT(c)));
+--echo
+
+--echo # Show that correct references to DEFAULT still work.
+CREATE TABLE t (a INT,
+                b INT,
+                c INT DEFAULT 77,
+                d INT GENERATED ALWAYS AS (DEFAULT(c)));
+INSERT INTO t VALUES(1,2,3,DEFAULT);
+SELECT * FROM t;
+DROP TABLE IF EXISTS t;
+--echo
+
+--echo # Show that correct references to columns still work.
+CREATE TABLE t (a INT,
+                b INT GENERATED ALWAYS AS (a*5));
+INSERT INTO t VALUES(7,DEFAULT);
+SELECT * FROM t;
+DROP TABLE IF EXISTS t;

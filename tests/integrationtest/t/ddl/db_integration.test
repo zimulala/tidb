@@ -1117,3 +1117,5 @@ create table t(a int);
 --error 1111
 alter table t add column  b int as ((grouping(a))) stored;
 drop table t;
+
+# TestDefaultColumnWithDateFormatAndReplaceAndUpperAndStrToDate
