@@ -1627,6 +1627,34 @@ func TestWriteReorgForColumnTypeChange(t *testing.T) {
 	runTestInSchemaState(t, tk, store, dom, model.StateWriteReorganization, false, dropColumnsSQL, sqls, query)
 }
 
+func TestXxxWriteReorgForColumnTypeChange(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("create database test_db_state default charset utf8 default collate utf8_bin")
+	tk.MustExec("use test_db_state")
+	tk.MustExec(`CREATE TABLE t_ctc (
+  a DOUBLE NULL DEFAULT '1.732088511183121',
+  b char(30) NOT NULL,
+  c int,
+  KEY idx (a,b)
+) ENGINE=InnoDB DEFAULT CHARSET=latin1 COLLATE=latin1_bin COMMENT='…comment';
+`)
+	tk.MustExec("insert into t_ctc values(1, 'a', 11), (2, 'bb', 22)")
+	tk.MustExec("alter table t_ctc drop column c;")
+	tk.MustExec("alter table t_ctc add column c decimal(5, 2);")
+	tk.MustExec("insert into t_ctc values(3, 'c', 33)")
+	defer tk.MustExec("drop table t_ctc")
+
+	sqls := make([]sqlWithErr, 4)
+	sqls[0] = sqlWithErr{"INSERT INTO t_ctc SET b = 'zr36f7ywjquj1curxh9gyrwnx', a = '1.9897043136824033';", nil}
+	sqls[1] = sqlWithErr{"update t_ctc set a = a+1 where b = 'a';", nil}
+	sqls[2] = sqlWithErr{"select * FROM t_ctc;", nil}
+	sqls[3] = sqlWithErr{"DELETE FROM t_ctc;", nil}
+	dropColumnsSQL := "alter table t_ctc modify column a int;"
+	query := &expectQuery{sql: "admin check table t_ctc;", rows: nil}
+	runTestInSchemaState(t, tk, store, dom, model.StateWriteReorganization, false, dropColumnsSQL, sqls, query)
+}
+
 func TestCreateExpressionIndex(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 

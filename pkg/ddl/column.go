@@ -772,6 +772,11 @@ func (w *worker) doModifyColumnTypeWithData(
 		} else {
 			done, ver, err = doReorgWorkForModifyColumn(w, d, t, job, tbl, oldCol, changingCol, changingIdxs)
 		}
+		logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep start")
+		time.Sleep(time.Second * 30)
+		logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep mid")
+		time.Sleep(time.Second * 30)
+		logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep end")
 		if !done {
 			return ver, err
 		}

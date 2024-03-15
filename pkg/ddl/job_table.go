@@ -351,6 +351,8 @@ func (d *ddl) checkAndUpdateClusterState(needUpdate bool) error {
 	return nil
 }
 
+var xx int
+
 func (d *ddl) loadDDLJobAndRun(se *sess.Session, pool *workerPool, getJob func(*sess.Session) (*model.Job, error)) {
 	wk, err := pool.get()
 	if err != nil || wk == nil {
@@ -375,6 +377,10 @@ func (d *ddl) loadDDLJobAndRun(se *sess.Session, pool *workerPool, getJob func(*
 	d.mu.hook.OnGetJobAfter(pool.tp().String(), job)
 	d.mu.RUnlock()
 
+	if xx == 20 {
+		panic("xxx")
+	}
+	xx++
 	d.delivery2Worker(wk, pool, job)
 }
 
