@@ -182,6 +182,11 @@ func onAddColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
+		logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep start")
+		time.Sleep(time.Second * 3)
+		logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep mid")
+		time.Sleep(time.Second * 3)
+		logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep end")
 
 		// Finish this job.
 		job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, tblInfo)
@@ -772,11 +777,6 @@ func (w *worker) doModifyColumnTypeWithData(
 		} else {
 			done, ver, err = doReorgWorkForModifyColumn(w, d, t, job, tbl, oldCol, changingCol, changingIdxs)
 		}
-		logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep start")
-		time.Sleep(time.Second * 30)
-		logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep mid")
-		time.Sleep(time.Second * 30)
-		logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep end")
 		if !done {
 			return ver, err
 		}

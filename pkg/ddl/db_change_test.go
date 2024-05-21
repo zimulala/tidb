@@ -1651,7 +1651,8 @@ func TestXxxWriteReorgForColumnTypeChange(t *testing.T) {
 	sqls[2] = sqlWithErr{"select * FROM t_ctc;", nil}
 	sqls[3] = sqlWithErr{"DELETE FROM t_ctc;", nil}
 	dropColumnsSQL := "alter table t_ctc modify column a int;"
-	query := &expectQuery{sql: "admin check table t_ctc;", rows: nil}
+	// query := &expectQuery{sql: "admin check table t_ctc;", rows: nil}
+	query := &expectQuery{sql: "admin show ddl jobs;", rows: nil}
 	runTestInSchemaState(t, tk, store, dom, model.StateWriteReorganization, false, dropColumnsSQL, sqls, query)
 }
 

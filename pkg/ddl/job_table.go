@@ -378,7 +378,7 @@ func (d *ddl) loadDDLJobAndRun(se *sess.Session, pool *workerPool, getJob func(*
 	d.mu.RUnlock()
 
 	if xx == 20 {
-		panic("xxx")
+		//panic("xxx")
 	}
 	xx++
 	d.delivery2Worker(wk, pool, job)
