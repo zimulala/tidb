@@ -172,6 +172,9 @@ func onAddColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error)
 	case model.StateWriteReorganization:
 		// reorganization -> public
 		// Adjust table column offset.
+		if tblInfo.Name.L == "t_ctc" && columnInfo.Name.L == "adc_1" {
+			logutil.BgLogger().Info("xxx")
+		}
 		offset, err := LocateOffsetToMove(columnInfo.Offset, pos, tblInfo)
 		if err != nil {
 			return ver, errors.Trace(err)
@@ -240,7 +243,11 @@ func checkDropColumnForStatePublic(colInfo *model.ColumnInfo) (err error) {
 	return nil
 }
 
+var WaitChan chan struct{}
+var WaitChan1 chan struct{}
+
 func onDropColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
+	logutil.BgLogger().Info("yyy--------------------------------- 1")
 	tblInfo, colInfo, idxInfos, ifExists, err := checkDropColumn(d, t, job)
 	if err != nil {
 		if ifExists && dbterror.ErrCantDropFieldOrKey.Equal(err) {
@@ -263,6 +270,9 @@ func onDropColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) 
 	case model.StatePublic:
 		// public -> write only
 		colInfo.State = model.StateWriteOnly
+		if tblInfo.Name.L == "t_ctc" {
+			logutil.BgLogger().Info("xxx")
+		}
 		setIndicesState(idxInfos, model.StateWriteOnly)
 		tblInfo.MoveColumnInfo(colInfo.Offset, len(tblInfo.Columns)-1)
 		err = checkDropColumnForStatePublic(colInfo)
@@ -274,12 +284,13 @@ func onDropColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) 
 			return ver, errors.Trace(err)
 		}
 	case model.StateWriteOnly:
+		WaitChan <- struct{}{}
 		// logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep start")
 		// time.Sleep(time.Second * 5)
 		// logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep mid")
 		// time.Sleep(time.Second * 5)
 		// logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep end")
-
+		<-WaitChan1
 		colInfo.State = model.StateDeleteOnly
 		tblInfo.MoveColumnInfo(colInfo.Offset, len(tblInfo.Columns)-1)
 		if len(idxInfos) > 0 {

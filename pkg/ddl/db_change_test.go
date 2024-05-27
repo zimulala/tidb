@@ -17,6 +17,7 @@ package ddl_test
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -40,8 +41,10 @@ import (
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/testkit/external"
 	"github.com/pingcap/tidb/pkg/util"
+	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 // TestShowCreateTable tests the result of "show create table" when we are running "add index" or "add column".
@@ -790,6 +793,8 @@ func runTestInSchemaState(
 	require.NoError(t, err)
 	_, err = se.Execute(context.Background(), "use test_db_state")
 	require.NoError(t, err)
+	wg := sync.WaitGroup{}
+	logutil.BgLogger().Info("zzz------------------------------", zap.Int("cpu", runtime.GOMAXPROCS(0)))
 	cbFunc := func(job *model.Job) {
 		if jobStateOrLastSubJobState(job) == prevState || checkErr != nil {
 			return
@@ -798,6 +803,17 @@ func runTestInSchemaState(
 		if prevState != state {
 			return
 		}
+		wg.Add(1)
+		go func() {
+			wg.Done()
+			logutil.BgLogger().Info("zzz--------------------------------- 1")
+			tk1 := testkit.NewTestKit(t, store)
+			tk1.MustExec("use test_db_state")
+			tk1.MustExec("alter table t_ctc drop column cct_1")
+		}()
+		logutil.BgLogger().Info("zzz--------------------------------- 2")
+		<-ddl.WaitChan
+		logutil.BgLogger().Info("zzz--------------------------------- 3")
 		for _, sqlWithErr := range sqlWithErrs {
 			_, err1 := se.Execute(context.Background(), sqlWithErr.sql)
 			if !terror.ErrorEqual(err1, sqlWithErr.expectErr) {
@@ -805,6 +821,7 @@ func runTestInSchemaState(
 				break
 			}
 		}
+		ddl.WaitChan1 <- struct{}{}
 	}
 	if isOnJobUpdated {
 		callback.OnJobUpdatedExported.Store(&cbFunc)
@@ -815,6 +832,7 @@ func runTestInSchemaState(
 	originalCallback := d.GetHook()
 	d.SetHook(callback)
 	tk.MustExec(alterTableSQL)
+	wg.Wait()
 	require.NoError(t, checkErr)
 	d.SetHook(originalCallback)
 
@@ -1647,15 +1665,17 @@ func TestXxxWriteReorgForColumnTypeChange(t *testing.T) {
 	defer tk.MustExec("drop table t_ctc")
 
 	sqls := make([]sqlWithErr, 3)
+	sqls[0] = sqlWithErr{"begin", nil}
+	sqls[0] = sqlWithErr{"select a, c, d from t_ctc where (a, b) IN (1, 'a'),(2, 'b') FOR UPDATE", nil}
 	sqls[0] = sqlWithErr{"UPDATE t_ctc SET c = 11 WHERE a= 1 AND b = 'a'", nil}
 	sqls[1] = sqlWithErr{"UPDATE t_ctc SET c = 12, d = 'z' WHERE a= 2 AND b = 'b'", nil}
 	sqls[2] = sqlWithErr{"select * FROM t_ctc;", nil}
+	sqls[0] = sqlWithErr{"commit", nil}
 	// dropColumnsSQL := "alter table t_ctc drop column cct_1"
 	dropColumnsSQL := "alter table t_ctc add column adc_1 smallint"
 	query := &expectQuery{sql: "admin check table t_ctc;", rows: nil}
 	// query := &expectQuery{sql: "admin show ddl jobs;", rows: nil}
 	runTestInSchemaState(t, tk, store, dom, model.StateWriteReorganization, true, dropColumnsSQL, sqls, query)
-	tk.MustExec("alter table t_ctc drop column cct_1")
 	tk.MustExec("select * FROM t_ctc;")
 }
 
