@@ -1633,27 +1633,30 @@ func TestXxxWriteReorgForColumnTypeChange(t *testing.T) {
 	tk.MustExec("create database test_db_state default charset utf8 default collate utf8_bin")
 	tk.MustExec("use test_db_state")
 	tk.MustExec(`CREATE TABLE t_ctc (
-  a DOUBLE NULL DEFAULT '1.732088511183121',
+  a int NOT NULL,
   b char(30) NOT NULL,
   c int,
-  KEY idx (a,b)
+  d char(64),
+  PRIMARY KEY(a,b)
 ) ENGINE=InnoDB DEFAULT CHARSET=latin1 COLLATE=latin1_bin COMMENT='…comment';
 `)
-	tk.MustExec("insert into t_ctc values(1, 'a', 11), (2, 'bb', 22)")
-	tk.MustExec("alter table t_ctc drop column c;")
-	tk.MustExec("alter table t_ctc add column c decimal(5, 2);")
-	tk.MustExec("insert into t_ctc values(3, 'c', 33)")
+	tk.MustExec("insert into t_ctc values(1, 'a', 11, 'x'), (2, 'b', 22, 'y')")
+	tk.MustExec("alter table t_ctc add column cct_1 int default 10")
+	tk.MustExec("alter table t_ctc modify cct_1 json")
+	// tk.MustExec("alter table t_ctc add column adc_1 smallint")
 	defer tk.MustExec("drop table t_ctc")
 
-	sqls := make([]sqlWithErr, 4)
-	sqls[0] = sqlWithErr{"INSERT INTO t_ctc SET b = 'zr36f7ywjquj1curxh9gyrwnx', a = '1.9897043136824033';", nil}
-	sqls[1] = sqlWithErr{"update t_ctc set a = a+1 where b = 'a';", nil}
+	sqls := make([]sqlWithErr, 3)
+	sqls[0] = sqlWithErr{"UPDATE t_ctc SET c = 11 WHERE a= 1 AND b = 'a'", nil}
+	sqls[1] = sqlWithErr{"UPDATE t_ctc SET c = 12, d = 'z' WHERE a= 2 AND b = 'b'", nil}
 	sqls[2] = sqlWithErr{"select * FROM t_ctc;", nil}
-	sqls[3] = sqlWithErr{"DELETE FROM t_ctc;", nil}
-	dropColumnsSQL := "alter table t_ctc modify column a int;"
-	// query := &expectQuery{sql: "admin check table t_ctc;", rows: nil}
-	query := &expectQuery{sql: "admin show ddl jobs;", rows: nil}
-	runTestInSchemaState(t, tk, store, dom, model.StateWriteReorganization, false, dropColumnsSQL, sqls, query)
+	// dropColumnsSQL := "alter table t_ctc drop column cct_1"
+	dropColumnsSQL := "alter table t_ctc add column adc_1 smallint"
+	query := &expectQuery{sql: "admin check table t_ctc;", rows: nil}
+	// query := &expectQuery{sql: "admin show ddl jobs;", rows: nil}
+	runTestInSchemaState(t, tk, store, dom, model.StateWriteReorganization, true, dropColumnsSQL, sqls, query)
+	tk.MustExec("alter table t_ctc drop column cct_1")
+	tk.MustExec("select * FROM t_ctc;")
 }
 
 func TestCreateExpressionIndex(t *testing.T) {

@@ -182,11 +182,11 @@ func onAddColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
-		logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep start")
-		time.Sleep(time.Second * 3)
-		logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep mid")
-		time.Sleep(time.Second * 3)
-		logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep end")
+		//logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep start")
+		//time.Sleep(time.Second * 3)
+		//logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep mid")
+		//time.Sleep(time.Second * 3)
+		//logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep end")
 
 		// Finish this job.
 		job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, tblInfo)
@@ -274,7 +274,12 @@ func onDropColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) 
 			return ver, errors.Trace(err)
 		}
 	case model.StateWriteOnly:
-		// write only -> delete only
+		// logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep start")
+		// time.Sleep(time.Second * 5)
+		// logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep mid")
+		// time.Sleep(time.Second * 5)
+		// logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep end")
+
 		colInfo.State = model.StateDeleteOnly
 		tblInfo.MoveColumnInfo(colInfo.Offset, len(tblInfo.Columns)-1)
 		if len(idxInfos) > 0 {
