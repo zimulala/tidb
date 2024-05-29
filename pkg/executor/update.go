@@ -31,8 +31,10 @@ import (
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
+	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/memory"
 	"github.com/tikv/client-go/v2/txnkv/txnsnapshot"
+	"go.uber.org/zap"
 )
 
 // UpdateExec represents a new update executor.
@@ -189,6 +191,13 @@ func (e *UpdateExec) exec(ctx context.Context, _ *expression.Schema, row, newDat
 			e.matched++
 		}
 		tbl := e.tblID2table[content.TblID]
+		if "t_ctc" == tbl.Meta().Name.L {
+			str := ""
+			for _, col := range tbl.Meta().Columns {
+				str += fmt.Sprintf("col ID:%d, offset:%d, type:%v; ", col.ID, col.Offset, col.GetType())
+			}
+			logutil.BgLogger().Info(fmt.Sprintf("update exec -------------cols:%s", str), zap.Int64("ver", e.Ctx().GetInfoSchema().SchemaMetaVersion()), zap.Uint64("ts", e.Ctx().GetSessionVars().TxnCtx.StartTS))
+		}
 		handle := e.handles[i]
 
 		oldData := row[content.Start:content.End]
@@ -263,6 +272,7 @@ func (e *UpdateExec) updateRows(ctx context.Context) (int, error) {
 	}
 	memUsageOfChk := int64(0)
 	totalNumRows := 0
+
 	for {
 		e.memTracker.Consume(-memUsageOfChk)
 		err := exec.Next(ctx, e.Children(0), chk)
@@ -282,6 +292,7 @@ func (e *UpdateExec) updateRows(ctx context.Context) (int, error) {
 			}
 		}
 		txn, err := e.Ctx().Txn(true)
+		logutil.BgLogger().Info("xxx-----------------------------", zap.Uint64("ts", txn.StartTS()))
 		if err == nil {
 			sc := e.Ctx().GetSessionVars().StmtCtx
 			txn.SetOption(kv.ResourceGroupTagger, sc.GetResourceGroupTagger())

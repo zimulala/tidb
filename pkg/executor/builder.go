@@ -76,6 +76,7 @@ import (
 	"github.com/pingcap/tidb/pkg/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
+	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/memory"
 	"github.com/pingcap/tidb/pkg/util/ranger"
 	"github.com/pingcap/tidb/pkg/util/rowcodec"
@@ -86,6 +87,7 @@ import (
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/txnkv"
 	"github.com/tikv/client-go/v2/txnkv/txnsnapshot"
+	"go.uber.org/zap"
 )
 
 // executorBuilder builds an Executor from a Plan.
@@ -2340,6 +2342,10 @@ func (b *executorBuilder) buildUpdate(v *plannercore.Update) exec.Executor {
 	tblID2table := make(map[int64]table.Table, len(v.TblColPosInfos))
 	multiUpdateOnSameTable := make(map[int64]bool)
 	for _, info := range v.TblColPosInfos {
+		if b.is.SchemaMetaVersion() == 66 {
+			logutil.BgLogger().Warn("xxx-------------------------- build update", zap.Int64("ver", b.ctx.GetInfoSchema().SchemaMetaVersion()),
+				zap.Int64("ver", b.is.SchemaMetaVersion()), zap.Uint64("ts", b.ctx.GetSessionVars().TxnCtx.StartTS))
+		}
 		tbl, _ := b.is.TableByID(info.TblID)
 		if _, ok := tblID2table[info.TblID]; ok {
 			multiUpdateOnSameTable[info.TblID] = true

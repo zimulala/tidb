@@ -34,7 +34,9 @@ import (
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/table/tables"
 	"github.com/pingcap/tidb/pkg/util/domainutil"
+	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/sqlexec"
+	"go.uber.org/zap"
 )
 
 // Builder builds a new InfoSchema.
@@ -59,6 +61,9 @@ type Builder struct {
 // Return the detail updated table IDs that are produced from SchemaDiff and an error.
 func (b *Builder) ApplyDiff(m *meta.Meta, diff *model.SchemaDiff) ([]int64, error) {
 	b.schemaMetaVersion = diff.Version
+	if diff.Version == 67 || diff.Version == 66 {
+		logutil.BgLogger().Warn("apply diff", zap.Int64("ver", diff.Version))
+	}
 	switch diff.Type {
 	case model.ActionCreateSchema:
 		return nil, applyCreateSchema(b, m, diff)

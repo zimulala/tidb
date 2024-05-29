@@ -68,6 +68,7 @@ import (
 	"github.com/pingcap/tidb/pkg/util/set"
 	"github.com/pingcap/tidb/pkg/util/size"
 	"github.com/pingcap/tipb/go-tipb"
+	"go.uber.org/zap"
 )
 
 const (
@@ -5855,6 +5856,14 @@ func (b *PlanBuilder) buildUpdate(ctx context.Context, update *ast.UpdateStmt) (
 		tblID2table[id], _ = b.is.TableByID(id)
 	}
 	updt.TblColPosInfos, err = buildColumns2Handle(updt.OutputNames(), tblID2Handle, tblID2table, true)
+	logutil.BgLogger().Warn("xxx-------------------------- build plan", zap.Int64("ver", b.ctx.GetInfoSchema().SchemaMetaVersion()),
+		zap.Int64("ver", b.is.SchemaMetaVersion()), zap.Uint64("ts", b.ctx.GetSessionVars().TxnCtx.StartTS))
+	if b.is.SchemaMetaVersion() == 66 {
+		tbl, _ := b.is.TableByID(106)
+		for _, col := range tbl.Meta().Columns {
+			logutil.BgLogger().Info(fmt.Sprintf("build plan -------------col:%v, ID:%d, offset:%d", col.Name, col.ID, col.Offset))
+		}
+	}
 	if err != nil {
 		return nil, err
 	}

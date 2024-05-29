@@ -31,6 +31,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/expression"
+	exprctx "github.com/pingcap/tidb/pkg/expression/context"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta"
 	"github.com/pingcap/tidb/pkg/meta/autoid"
@@ -441,6 +442,14 @@ func (t *TableCommon) UpdateRecord(ctx context.Context, sctx table.MutateContext
 	if err != nil {
 		return err
 	}
+	logutil.BgLogger().Info("xxx-----------------------------", zap.Uint64("ts", txn.StartTS()))
+	if "t_ctc" == t.Meta().Name.L {
+		str := ""
+		for _, col := range t.Meta().Columns {
+			str += fmt.Sprintf("col ID:%d, offset:%d, type:%v; ", col.ID, col.Offset, col.GetType())
+		}
+		logutil.BgLogger().Info(fmt.Sprintf("update exec -------------cols:%s", str))
+	}
 
 	memBuffer := txn.GetMemBuffer()
 	sh := memBuffer.Staging()
@@ -471,6 +480,9 @@ func (t *TableCommon) UpdateRecord(ctx context.Context, sctx table.MutateContext
 	rowToCheck := make([]types.Datum, 0, numColsCap)
 
 	for _, col := range t.Columns {
+		if t.meta.Name.L == "t_ctc" {
+			logutil.BgLogger().Warn("abc")
+		}
 		var value types.Datum
 		if col.State == model.StateDeleteOnly || col.State == model.StateDeleteReorganization {
 			if col.ChangeStateInfo != nil {
@@ -558,6 +570,15 @@ func (t *TableCommon) UpdateRecord(ctx context.Context, sctx table.MutateContext
 		}
 	}
 
+	if t.Meta().Name.L == "t_ctc" {
+		str := ""
+		for _, col := range t.Meta().Columns {
+			str += fmt.Sprintf("col ID:%d, offset:%d, type:%v; ", col.ID, col.Offset, col.GetType())
+		}
+		logutil.BgLogger().Warn(fmt.Sprintf("xxx update------------------------------------ ts:%v, tbl name:%s, id:%d, cols:%v colIDs:%v, row:%v",
+			txn.StartTS(), t.Meta().Name, t.Meta().ID, str, colIDs, row))
+	}
+
 	writeBufs := sessVars.GetWriteStmtBufs()
 	adjustRowValuesBuf(writeBufs, len(row))
 	key := t.RecordKey(h)
@@ -570,6 +591,13 @@ func (t *TableCommon) UpdateRecord(ctx context.Context, sctx table.MutateContext
 	}
 	if err = memBuffer.Set(key, writeBufs.RowValBuf); err != nil {
 		return err
+	}
+	if t.Meta().Name.L == "t_ctc" {
+		err = decodeRow(t, sctx.GetExprCtx(), h, writeBufs.RowValBuf, sc.TimeZone(), nil)
+		if err != nil {
+			logutil.BgLogger().Warn(fmt.Sprintf("xxx update------------------------------------ ts:%v, tbl name:%s, id:%d, row:%#v, oldData:%v, newData:%v",
+				txn.StartTS(), t.Meta().Name, t.Meta().ID, row, oldData, newData))
+		}
 	}
 
 	failpoint.Inject("updateRecordForceAssertNotExist", func() {
@@ -630,6 +658,75 @@ func (t *TableCommon) UpdateRecord(ctx context.Context, sctx table.MutateContext
 	}
 	sessVars.TxnCtx.UpdateDeltaForTable(t.physicalTableID, 0, 1, colSize)
 	return memBuffer.MayFlush()
+}
+
+// BuildFullDecodeColMap builds a map that contains [columnID -> struct{*table.Column, expression.Expression}] from all columns.
+func BuildFullDecodeColMap(cols []*table.Column, schema *expression.Schema) map[int64]Column {
+	decodeColMap := make(map[int64]Column, len(cols))
+	for _, col := range cols {
+		decodeColMap[col.ID] = Column{
+			Col:     col,
+			GenExpr: schema.Columns[col.Offset].VirtualExpr,
+		}
+	}
+	return decodeColMap
+}
+
+func decodeRow(t table.Table, ectx exprctx.BuildContext, handle kv.Handle, b []byte, decodeLoc *time.Location, row map[int64]types.Datum) error {
+	writableColInfos := make([]*model.ColumnInfo, 0, len(t.WritableCols()))
+	for _, col := range t.WritableCols() {
+		writableColInfos = append(writableColInfos, col.ColumnInfo)
+	}
+	exprCols, _, err := expression.ColumnInfos2ColumnsAndNames(ectx, model.NewCIStr("tpcc"), t.Meta().Name, writableColInfos, t.Meta())
+	if err != nil {
+		return err
+	}
+	mockSchema := expression.NewSchema(exprCols...)
+	decodeColsMap := BuildFullDecodeColMap(t.Cols(), mockSchema)
+
+	return NewRowDecoder(t, t.Cols(), decodeColsMap, handle, b, decodeLoc, row)
+}
+
+// Column contains the info and generated expr of column.
+type Column struct {
+	Col     *table.Column
+	GenExpr expression.Expression
+}
+
+// NewRowDecoder returns a new RowDecoder.
+func NewRowDecoder(tbl table.Table, cols []*table.Column, decodeColMap map[int64]Column, handle kv.Handle, b []byte, decodeLoc *time.Location, row map[int64]types.Datum) error {
+	tblInfo := tbl.Meta()
+	colFieldMap := make(map[int64]*types.FieldType, len(decodeColMap))
+	for id, col := range decodeColMap {
+		colFieldMap[id] = &col.Col.ColumnInfo.FieldType
+	}
+
+	tps := make([]*types.FieldType, len(cols))
+	for _, col := range cols {
+		// Even for changing column in column type change, we target field type uniformly.
+		tps[col.Offset] = &col.FieldType
+	}
+	var pkCols []int64
+	switch {
+	case tblInfo.IsCommonHandle:
+		pkCols = TryGetCommonPkColumnIds(tbl.Meta())
+	case tblInfo.PKIsHandle:
+		pkCols = []int64{tblInfo.GetPkColInfo().ID}
+	default: // support decoding _tidb_rowid.
+		pkCols = []int64{model.ExtraHandleID}
+	}
+
+	var err error
+	if rowcodec.IsNewFormat(b) {
+		row, err = tablecodec.DecodeRowWithMapNew(b, colFieldMap, decodeLoc, row)
+	} else {
+		row, err = tablecodec.DecodeRowWithMap(b, colFieldMap, decodeLoc, row)
+	}
+	if err != nil {
+		return err
+	}
+	row, err = tablecodec.DecodeHandleToDatumMap(handle, pkCols, colFieldMap, decodeLoc, row)
+	return err
 }
 
 func (t *TableCommon) rebuildIndices(ctx table.MutateContext, txn kv.Transaction, h kv.Handle, touched []bool, oldData []types.Datum, newData []types.Datum, opts ...table.CreateIdxOptFunc) error {

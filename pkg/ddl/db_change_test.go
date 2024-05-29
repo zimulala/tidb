@@ -17,7 +17,6 @@ package ddl_test
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -793,35 +792,25 @@ func runTestInSchemaState(
 	require.NoError(t, err)
 	_, err = se.Execute(context.Background(), "use test_db_state")
 	require.NoError(t, err)
-	wg := sync.WaitGroup{}
-	logutil.BgLogger().Info("zzz------------------------------", zap.Int("cpu", runtime.GOMAXPROCS(0)))
 	cbFunc := func(job *model.Job) {
 		if jobStateOrLastSubJobState(job) == prevState || checkErr != nil {
 			return
 		}
 		prevState = jobStateOrLastSubJobState(job)
-		if prevState != state {
+		if prevState != model.StatePublic {
 			return
 		}
-		wg.Add(1)
-		go func() {
-			wg.Done()
-			logutil.BgLogger().Info("zzz--------------------------------- 1")
-			tk1 := testkit.NewTestKit(t, store)
-			tk1.MustExec("use test_db_state")
-			tk1.MustExec("alter table t_ctc drop column cct_1")
-		}()
-		logutil.BgLogger().Info("zzz--------------------------------- 2")
-		<-ddl.WaitChan
-		logutil.BgLogger().Info("zzz--------------------------------- 3")
-		for _, sqlWithErr := range sqlWithErrs {
-			_, err1 := se.Execute(context.Background(), sqlWithErr.sql)
-			if !terror.ErrorEqual(err1, sqlWithErr.expectErr) {
-				checkErr = errors.Errorf("sql: %s, expect err: %v, got err: %v", sqlWithErr.sql, sqlWithErr.expectErr, err1)
-				break
-			}
+		logutil.BgLogger().Info("zzz--------------------------------------------------------------------------------------------------------- 1", zap.Int64("ver", se.GetInfoSchema().SchemaMetaVersion()), zap.Stringer("x", prevState))
+		sqlWithErr := sqlWithErrs[0]
+		_, err1 := se.Execute(context.Background(), sqlWithErr.sql)
+		if !terror.ErrorEqual(err1, sqlWithErr.expectErr) {
+			checkErr = errors.Errorf("sql: %s, expect err: %v, got err: %v", sqlWithErr.sql, sqlWithErr.expectErr, err1)
 		}
-		ddl.WaitChan1 <- struct{}{}
+		logutil.BgLogger().Info("zzz--------------------------------------------------------------------------------------------------------- 2", zap.Int64("ver", se.GetInfoSchema().SchemaMetaVersion()), zap.Stringer("x", prevState))
+		_, err1 = se.Execute(context.Background(), "select * from t_ctc")
+		if !terror.ErrorEqual(err1, sqlWithErr.expectErr) {
+			checkErr = errors.Errorf("sql: %s, expect err: %v, got err: %v", sqlWithErr.sql, sqlWithErr.expectErr, err1)
+		}
 	}
 	if isOnJobUpdated {
 		callback.OnJobUpdatedExported.Store(&cbFunc)
@@ -831,8 +820,39 @@ func runTestInSchemaState(
 	d := dom.DDL()
 	originalCallback := d.GetHook()
 	d.SetHook(callback)
+
 	tk.MustExec(alterTableSQL)
-	wg.Wait()
+	require.NoError(t, checkErr)
+
+	prevState = model.StateNone
+	state = model.StateWriteOnly
+	cbFunc1 := func(job *model.Job) {
+		if jobStateOrLastSubJobState(job) == prevState || checkErr != nil {
+			return
+		}
+		prevState = jobStateOrLastSubJobState(job)
+		if prevState != state {
+			return
+		}
+
+		sqls := sqlWithErrs[1:]
+		for i, sqlWithErr := range sqls {
+			logutil.BgLogger().Info("zzz--------------------------------------------------------------------------------------------------------- 3",
+				zap.Int64("ver", se.GetInfoSchema().SchemaMetaVersion()), zap.Int("no.", i), zap.String("sql", sqlWithErr.sql))
+			_, err1 := se.Execute(context.Background(), sqlWithErr.sql)
+			if !terror.ErrorEqual(err1, sqlWithErr.expectErr) {
+				checkErr = errors.Errorf("sql: %s, expect err: %v, got err: %v", sqlWithErr.sql, sqlWithErr.expectErr, err1)
+				break
+			}
+		}
+	}
+	if isOnJobUpdated {
+		callback.OnJobUpdatedExported.Store(&cbFunc1)
+	} else {
+		callback.OnJobRunBeforeExported = cbFunc1
+	}
+	d.SetHook(callback)
+	tk.MustExec("alter table t_ctc drop column cct_1")
 	require.NoError(t, checkErr)
 	d.SetHook(originalCallback)
 
@@ -1658,19 +1678,20 @@ func TestXxxWriteReorgForColumnTypeChange(t *testing.T) {
   PRIMARY KEY(a,b)
 ) ENGINE=InnoDB DEFAULT CHARSET=latin1 COLLATE=latin1_bin COMMENT='…comment';
 `)
+	// tk.MustExec("insert into t_ctc values(0, 'a0', 10, 'w')")
 	tk.MustExec("insert into t_ctc values(1, 'a', 11, 'x'), (2, 'b', 22, 'y')")
 	tk.MustExec("alter table t_ctc add column cct_1 int default 10")
 	tk.MustExec("alter table t_ctc modify cct_1 json")
 	// tk.MustExec("alter table t_ctc add column adc_1 smallint")
 	defer tk.MustExec("drop table t_ctc")
 
-	sqls := make([]sqlWithErr, 3)
+	sqls := make([]sqlWithErr, 6)
 	sqls[0] = sqlWithErr{"begin", nil}
-	sqls[0] = sqlWithErr{"select a, c, d from t_ctc where (a, b) IN (1, 'a'),(2, 'b') FOR UPDATE", nil}
-	sqls[0] = sqlWithErr{"UPDATE t_ctc SET c = 11 WHERE a= 1 AND b = 'a'", nil}
-	sqls[1] = sqlWithErr{"UPDATE t_ctc SET c = 12, d = 'z' WHERE a= 2 AND b = 'b'", nil}
-	sqls[2] = sqlWithErr{"select * FROM t_ctc;", nil}
-	sqls[0] = sqlWithErr{"commit", nil}
+	sqls[1] = sqlWithErr{"select a, c, d from t_ctc where (a, b) IN ((1, 'a'),(2, 'b')) FOR UPDATE", nil}
+	sqls[2] = sqlWithErr{"UPDATE t_ctc SET c = 11 WHERE a= 1 AND b = 'a'", nil}
+	sqls[3] = sqlWithErr{"UPDATE t_ctc SET c = 12, d = 'z' WHERE a= 2 AND b = 'b'", nil}
+	sqls[4] = sqlWithErr{"select * FROM t_ctc;", nil}
+	sqls[5] = sqlWithErr{"commit", nil}
 	// dropColumnsSQL := "alter table t_ctc drop column cct_1"
 	dropColumnsSQL := "alter table t_ctc add column adc_1 smallint"
 	query := &expectQuery{sql: "admin check table t_ctc;", rows: nil}

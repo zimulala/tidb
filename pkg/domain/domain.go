@@ -235,6 +235,9 @@ func (do *Domain) loadInfoSchema(startTS uint64) (infoschema.InfoSchema, bool, i
 	snapshot.SetOption(kv.TiKVClientReadTimeout, uint64(3000)) // 3000ms.
 	m := meta.NewSnapshotMeta(snapshot)
 	neededSchemaVersion, err := m.GetSchemaVersionWithNonEmptyDiff()
+	if neededSchemaVersion == 66 || neededSchemaVersion == 67 {
+		logutil.BgLogger().Warn("load infoschema", zap.Int64("need ver", neededSchemaVersion))
+	}
 	if err != nil {
 		return nil, false, 0, nil, err
 	}

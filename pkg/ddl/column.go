@@ -243,11 +243,7 @@ func checkDropColumnForStatePublic(colInfo *model.ColumnInfo) (err error) {
 	return nil
 }
 
-var WaitChan chan struct{}
-var WaitChan1 chan struct{}
-
 func onDropColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
-	logutil.BgLogger().Info("yyy--------------------------------- 1")
 	tblInfo, colInfo, idxInfos, ifExists, err := checkDropColumn(d, t, job)
 	if err != nil {
 		if ifExists && dbterror.ErrCantDropFieldOrKey.Equal(err) {
@@ -257,6 +253,9 @@ func onDropColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) 
 			return ver, nil
 		}
 		return ver, errors.Trace(err)
+	}
+	if tblInfo.Name.L == "t_ctc" {
+		logutil.BgLogger().Info("xxx")
 	}
 	if job.MultiSchemaInfo != nil && !job.IsRollingback() && job.MultiSchemaInfo.Revertible {
 		job.MarkNonRevertible()
@@ -284,13 +283,11 @@ func onDropColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) 
 			return ver, errors.Trace(err)
 		}
 	case model.StateWriteOnly:
-		WaitChan <- struct{}{}
 		// logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep start")
 		// time.Sleep(time.Second * 5)
 		// logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep mid")
 		// time.Sleep(time.Second * 5)
 		// logutil.BgLogger().Warn("xxx--------------------------------------------------------- sleep end")
-		<-WaitChan1
 		colInfo.State = model.StateDeleteOnly
 		tblInfo.MoveColumnInfo(colInfo.Offset, len(tblInfo.Columns)-1)
 		if len(idxInfos) > 0 {
@@ -1324,6 +1321,7 @@ func (w *updateColumnWorker) fetchRowColVals(txn kv.Transaction, taskRange reorg
 			}
 
 			if err1 := w.getRowRecord(handle, recordKey, rawRow); err1 != nil {
+				logutil.BgLogger().Info("xxx----------------------------", zap.String("category", "ddl"), zap.Stringer("worker", w), zap.Error(err1))
 				return false, errors.Trace(err1)
 			}
 			lastAccessedHandle = recordKey
@@ -1374,6 +1372,7 @@ func (w *updateColumnWorker) getRowRecord(handle kv.Handle, recordKey []byte, ra
 	}
 	newColVal, err := table.CastValue(w.sessCtx, w.rowMap[w.oldColInfo.ID], w.newColInfo, false, false)
 	if err != nil {
+		logutil.BgLogger().Info("xxx----------------------------", zap.String("category", "ddl"), zap.Stringer("worker", w), zap.Error(err))
 		return w.reformatErrors(err)
 	}
 	warn := w.sessCtx.GetSessionVars().StmtCtx.GetWarnings()
@@ -1459,7 +1458,7 @@ func (w *updateColumnWorker) reformatErrors(err error) error {
 		dStr := datumToStringNoErr(w.rowMap[w.oldColInfo.ID])
 		err = types.ErrWarnDataOutOfRange.GenWithStack("Out of range value for column '%s', the value is '%s'", w.oldColInfo.Name, dStr)
 	}
-	return err
+	return errors.Trace(err)
 }
 
 func datumToStringNoErr(d types.Datum) string {

@@ -454,7 +454,7 @@ func (s *resultConsumer) run(scheduler backfillScheduler, start kv.Key, totalAdd
 			logutil.BgLogger().Warn("backfill worker handle tasks failed", zap.String("category", "ddl"),
 				zap.Int64("total added count", *totalAddedCount),
 				zap.String("start key", hex.EncodeToString(start)),
-				zap.String("task failed error", err.Error()))
+				zap.Error(err))
 			s.err = err
 		} else {
 			logutil.BgLogger().Info("backfill workers successfully processed", zap.String("category", "ddl"),
