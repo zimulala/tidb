@@ -79,6 +79,7 @@ import (
 	"github.com/pingcap/tidb/pkg/util/systimemon"
 	"github.com/pingcap/tidb/pkg/util/tiflashcompute"
 	"github.com/pingcap/tidb/pkg/util/topsql"
+	"github.com/pingcap/tidb/pkg/util/tracing"
 	"github.com/pingcap/tidb/pkg/util/versioninfo"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/push"
@@ -311,6 +312,13 @@ func main() {
 	setCPUAffinity()
 	cgmon.StartCgroupMonitor()
 	setupTracing() // Should before createServer and after setup config.
+	// Set up OpenTelemetry.
+	otelShutdown, err := tracing.SetupOTelSDK(context.Background())
+	terror.MustNil(err)
+	// Handle shutdown properly so nothing leaks.
+	defer func() {
+		terror.MustNil(otelShutdown(context.Background()))
+	}()
 	printInfo()
 	setupMetrics()
 

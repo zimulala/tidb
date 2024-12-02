@@ -57,10 +57,12 @@ import (
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/memory"
 	"github.com/pingcap/tidb/pkg/util/printer"
+	"github.com/pingcap/tidb/pkg/util/tracing"
 	"github.com/pingcap/tidb/pkg/util/versioninfo"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/soheilhy/cmux"
 	"github.com/tiancaiamao/appdash/traceapp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/channelz/service"
 	static "sourcegraph.com/sourcegraph/appdash-data"
@@ -467,9 +469,21 @@ func (s *Server) startHTTPServer() {
 			logutil.BgLogger().Error("write HTTP index page failed", zap.Error(err))
 		}
 	})
+	// handleFunc is a replacement for mux.HandleFunc
+	// which enriches the handler's HTTP instrumentation with the pattern as the http.route.
+	handleFunc := func(pattern string, handlerFunc func(http.ResponseWriter, *http.Request)) {
+		// Configure the "http.route" for the HTTP instrumentation.
+		handler := otelhttp.WithRouteTag(pattern, http.HandlerFunc(handlerFunc))
+		router.Handle(pattern, handler)
+	}
 
+	handleFunc("/trace", tracing.Rolldice)
+	handleFunc("/trace/{player}", tracing.Rolldice)
+
+	handler := otelhttp.NewHandler(router, "/")
 	serverMux := http.NewServeMux()
-	serverMux.Handle("/", router)
+	serverMux.Handle("/", handler)
+	// Add HTTP instrumentation for the whole server.
 	s.startStatusServerAndRPCServer(serverMux)
 }
 
