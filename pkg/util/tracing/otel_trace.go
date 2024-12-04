@@ -14,10 +14,12 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutlog"
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	ometric "go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/metric"
@@ -26,6 +28,8 @@ import (
 	otrace "go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
+
+var requestHelloCounter ometric.Int64Counter
 
 // SetupOTelSDK bootstraps the OpenTelemetry pipeline.
 // If it does not return an error, make sure to call shutdown for proper cleanup.
@@ -54,25 +58,34 @@ func SetupOTelSDK(ctx context.Context) (shutdown func(context.Context) error, er
 	otel.SetTextMapPropagator(prop)
 
 	// Set up trace provider.
-	//tracerProvider, err := newTraceProvider()
-	tracerProvider, err := newJaegerTraceProvider(ctx)
+	// tracerProvider, err := newTraceProvider()
+	// tracerProvider, err := newJaegerTraceProvider(ctx)
+	// if err != nil {
+	// 	handleErr(err)
+	// 	return
+	// }
+	// shutdownFuncs = append(shutdownFuncs, tracerProvider.Shutdown)
+	// otel.SetTracerProvider(tracerProvider)
+
+	// Set up meter provider.
+	// meterProvider, err := newMeterProvider()
+	meterProvider, err := newPrometheusMeterProvider()
 	if err != nil {
 		handleErr(err)
 		return
 	}
-	shutdownFuncs = append(shutdownFuncs, tracerProvider.Shutdown)
-	otel.SetTracerProvider(tracerProvider)
+	shutdownFuncs = append(shutdownFuncs, meterProvider.Shutdown)
+	otel.SetMeterProvider(meterProvider)
+
+	meterName := "prometheus_testing"
+	meter := otel.Meter(meterName)
+	requestHelloCounter, err = meter.Int64Counter("requests_hello_total")
+	if err != nil {
+		handleErr(err)
+		return
+	}
 
 	/*
-		// Set up meter provider.
-		meterProvider, err := newMeterProvider()
-		if err != nil {
-			handleErr(err)
-			return
-		}
-		shutdownFuncs = append(shutdownFuncs, meterProvider.Shutdown)
-		otel.SetMeterProvider(meterProvider)
-
 		// Set up logger provider.
 		loggerProvider, err := newLoggerProvider()
 		if err != nil {
@@ -93,6 +106,53 @@ func newPropagator() propagation.TextMapPropagator {
 	)
 }
 
+func newMeterProvider() (*metric.MeterProvider, error) {
+	metricExporter, err := stdoutmetric.New()
+	if err != nil {
+		return nil, err
+	}
+
+	meterProvider := metric.NewMeterProvider(
+		metric.WithReader(metric.NewPeriodicReader(metricExporter,
+			// Default is 1m. Set to 3s for demonstrative purposes.
+			metric.WithInterval(3*time.Second))),
+	)
+	return meterProvider, nil
+}
+
+func newPrometheusMeterProvider() (*metric.MeterProvider, error) {
+	metricExporter, err := otlpmetricgrpc.New(
+		context.Background(),
+		otlpmetricgrpc.WithInsecure(),
+		otlpmetricgrpc.WithEndpoint("0.0.0.0:4317"))
+	// metricExporter, err := prometheus.New()
+	if err != nil {
+		return nil, err
+	}
+
+	// return metric.NewMeterProvider(metric.WithReader(metricExporter)), nil
+
+	return metric.NewMeterProvider(
+		metric.WithReader(
+			metric.NewPeriodicReader(
+				metricExporter,
+				// Default is 1m. Set to 3s for demonstrative purposes.
+				metric.WithInterval(3*time.Second))),
+	), nil
+}
+
+func newLoggerProvider() (*log.LoggerProvider, error) {
+	logExporter, err := stdoutlog.New()
+	if err != nil {
+		return nil, err
+	}
+
+	loggerProvider := log.NewLoggerProvider(
+		log.WithProcessor(log.NewBatchProcessor(logExporter)),
+	)
+	return loggerProvider, nil
+}
+
 func newTraceProvider() (*trace.TracerProvider, error) {
 	traceExporter, err := stdouttrace.New(
 		stdouttrace.WithPrettyPrint())
@@ -108,34 +168,8 @@ func newTraceProvider() (*trace.TracerProvider, error) {
 	return traceProvider, nil
 }
 
-func newMeterProvider() (*metric.MeterProvider, error) {
-	metricExporter, err := stdoutmetric.New()
-	if err != nil {
-		return nil, err
-	}
-
-	meterProvider := metric.NewMeterProvider(
-		metric.WithReader(metric.NewPeriodicReader(metricExporter,
-			// Default is 1m. Set to 3s for demonstrative purposes.
-			metric.WithInterval(3*time.Second))),
-	)
-	return meterProvider, nil
-}
-
-func newLoggerProvider() (*log.LoggerProvider, error) {
-	logExporter, err := stdoutlog.New()
-	if err != nil {
-		return nil, err
-	}
-
-	loggerProvider := log.NewLoggerProvider(
-		log.WithProcessor(log.NewBatchProcessor(logExporter)),
-	)
-	return loggerProvider, nil
-}
-
 func newJaegerTraceProvider(ctx context.Context) (*trace.TracerProvider, error) {
-	// 创建一个使用 HTTP 协议连接本机Jaeger的 Exporter
+	// Create an Exporter that connects to the local Jaeger using the HTTP protocol
 	traceExporter, err := otlptracehttp.New(ctx,
 		otlptracehttp.WithEndpoint("127.0.0.1:4318"),
 		otlptracehttp.WithInsecure())
@@ -170,6 +204,9 @@ func newJaegerTraceProvider(ctx context.Context) (*trace.TracerProvider, error) 
 func Rolldice(w http.ResponseWriter, r *http.Request) {
 	name := "go.opentelemetry.io/otel/example/dice"
 	tracer := otel.Tracer(name)
+
+	// metric
+	requestHelloCounter.Add(context.Background(), 1)
 
 	method, _ := baggage.NewMember("method", "repl")
 	client, _ := baggage.NewMember("client", "cli")
