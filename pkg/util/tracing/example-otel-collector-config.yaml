@@ -1,0 +1,33 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4320
+
+exporters:
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    const_labels:
+      label1: value1
+  debug:
+    verbosity: detailed
+
+processors:
+  batch:
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
+      processors: [batch]
+    metrics:
+      receivers: [otlp]
+      exporters: [debug, prometheus]
+      processors: [batch]
+    logs:
+      receivers: [otlp]
+      exporters: [debug]
+      processors: [batch]
