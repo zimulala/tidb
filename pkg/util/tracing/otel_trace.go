@@ -60,30 +60,32 @@ func SetupOTelSDK(ctx context.Context) (shutdown func(context.Context) error, er
 	// Set up trace provider.
 	// tracerProvider, err := newTraceProvider()
 	// tracerProvider, err := newJaegerTraceProvider(ctx)
-	// if err != nil {
-	// 	handleErr(err)
-	// 	return
-	// }
-	// shutdownFuncs = append(shutdownFuncs, tracerProvider.Shutdown)
-	// otel.SetTracerProvider(tracerProvider)
-
-	// Set up meter provider.
-	// meterProvider, err := newMeterProvider()
-	meterProvider, err := newPrometheusMeterProvider()
+	tracerProvider, err := newTraceToMetricsProvider(ctx)
 	if err != nil {
 		handleErr(err)
 		return
 	}
-	shutdownFuncs = append(shutdownFuncs, meterProvider.Shutdown)
-	otel.SetMeterProvider(meterProvider)
+	shutdownFuncs = append(shutdownFuncs, tracerProvider.Shutdown)
+	otel.SetTracerProvider(tracerProvider)
 
-	meterName := "prometheus_testing"
-	meter := otel.Meter(meterName)
-	requestHelloCounter, err = meter.Int64Counter("requests_hello_total")
-	if err != nil {
-		handleErr(err)
-		return
-	}
+	/*
+		// Set up meter provider.
+		// meterProvider, err := newMeterProvider()
+		meterProvider, err := newPrometheusMeterProvider()
+		if err != nil {
+			handleErr(err)
+			return
+		}
+		shutdownFuncs = append(shutdownFuncs, meterProvider.Shutdown)
+		otel.SetMeterProvider(meterProvider)
+		meterName := "prometheus_testing"
+		meter := otel.Meter(meterName)
+		requestHelloCounter, err = meter.Int64Counter("requests_hello_total")
+		if err != nil {
+			handleErr(err)
+			return
+		}
+	*/
 
 	/*
 		// Set up logger provider.
@@ -141,16 +143,30 @@ func newPrometheusMeterProvider() (*metric.MeterProvider, error) {
 	), nil
 }
 
-func newLoggerProvider() (*log.LoggerProvider, error) {
-	logExporter, err := stdoutlog.New()
+func newTraceToMetricsProvider(ctx context.Context) (*trace.TracerProvider, error) {
+	metricExporter, err := otlpmetricgrpc.New(
+		context.Background(),
+		otlpmetricgrpc.WithInsecure(),
+		otlpmetricgrpc.WithEndpoint("0.0.0.0:4317"))
 	if err != nil {
 		return nil, err
 	}
 
-	loggerProvider := log.NewLoggerProvider(
-		log.WithProcessor(log.NewBatchProcessor(logExporter)),
+	meterProvider := metric.NewMeterProvider(
+		metric.WithReader(
+			metric.NewPeriodicReader(
+				metricExporter,
+				// Default is 1m. Set to 3s for demonstrative purposes.
+				metric.WithInterval(3*time.Second))),
 	)
-	return loggerProvider, nil
+	otel.SetMeterProvider(meterProvider)
+
+	// create a custom processor
+	meter := meterProvider.Meter("meter provider example")
+	traceToMetricsProcessor := NewTraceToMetricsProcessor(meter)
+
+	// Trace Provider
+	return trace.NewTracerProvider(trace.WithSpanProcessor(traceToMetricsProcessor)), nil
 }
 
 func newTraceProvider() (*trace.TracerProvider, error) {
@@ -201,12 +217,24 @@ func newJaegerTraceProvider(ctx context.Context) (*trace.TracerProvider, error) 
 	return traceProvider, nil
 }
 
+func newLoggerProvider() (*log.LoggerProvider, error) {
+	logExporter, err := stdoutlog.New()
+	if err != nil {
+		return nil, err
+	}
+
+	loggerProvider := log.NewLoggerProvider(
+		log.WithProcessor(log.NewBatchProcessor(logExporter)),
+	)
+	return loggerProvider, nil
+}
+
 func Rolldice(w http.ResponseWriter, r *http.Request) {
 	name := "go.opentelemetry.io/otel/example/dice"
 	tracer := otel.Tracer(name)
 
 	// metric
-	requestHelloCounter.Add(context.Background(), 1)
+	// requestHelloCounter.Add(context.Background(), 1)
 
 	method, _ := baggage.NewMember("method", "repl")
 	client, _ := baggage.NewMember("client", "cli")
