@@ -58,9 +58,9 @@ func SetupOTelSDK(ctx context.Context) (shutdown func(context.Context) error, er
 	otel.SetTextMapPropagator(prop)
 
 	// Set up trace provider.
-	// tracerProvider, err := newTraceProvider()
+	tracerProvider, err := newTraceProvider()
 	// tracerProvider, err := newJaegerTraceProvider(ctx)
-	tracerProvider, err := newTraceToMetricsProvider(ctx)
+	// tracerProvider, err := newTraceToMetricsProvider(ctx)
 	if err != nil {
 		handleErr(err)
 		return
@@ -133,7 +133,6 @@ func newPrometheusMeterProvider() (*metric.MeterProvider, error) {
 	}
 
 	// return metric.NewMeterProvider(metric.WithReader(metricExporter)), nil
-
 	return metric.NewMeterProvider(
 		metric.WithReader(
 			metric.NewPeriodicReader(
@@ -170,6 +169,7 @@ func newTraceToMetricsProvider(ctx context.Context) (*trace.TracerProvider, erro
 }
 
 func newTraceProvider() (*trace.TracerProvider, error) {
+	logutil.BgLogger().Info("yyy------------------------ new trace provider")
 	traceExporter, err := stdouttrace.New(
 		stdouttrace.WithPrettyPrint())
 	if err != nil {
@@ -241,7 +241,11 @@ func Rolldice(w http.ResponseWriter, r *http.Request) {
 	bag, _ := baggage.New(method, client)
 	defaultCtx := baggage.ContextWithBaggage(r.Context(), bag)
 	_, span := tracer.Start(defaultCtx, "roll")
-	defer span.End()
+	defer func() {
+		logutil.BgLogger().Warn("xxx----------------------------- 02")
+		span.End()
+		logutil.BgLogger().Warn("xxx----------------------------- 03")
+	}()
 
 	roll := 1 + rand.Intn(6)
 
@@ -251,7 +255,8 @@ func Rolldice(w http.ResponseWriter, r *http.Request) {
 	} else {
 		msg = "Anonymous player is rolling the dice"
 	}
-	logutil.BgLogger().Warn("xxx ", zap.String("msg", msg))
+	logutil.BgLogger().Warn("xxx----------------------------- 00",
+		zap.String("msg", msg), zap.Bool("is recording", span.IsRecording()))
 
 	// logs info
 	span.AddEvent("event msg",

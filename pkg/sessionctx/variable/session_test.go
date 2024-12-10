@@ -15,6 +15,7 @@
 package variable_test
 
 import (
+	"bytes"
 	"context"
 	"math/rand"
 	"strconv"
@@ -314,6 +315,159 @@ func TestSlowLogFormat(t *testing.T) {
 	logString = seVar.SlowLogFormat(logItems)
 	require.Equal(t, resultFields+"\n"+"use test;\n"+sql, logString)
 	require.False(t, seVar.CurrentDBChanged)
+}
+
+func BenchmarkSlowLog(b *testing.B) {
+	b.StopTimer()
+	b.ReportAllocs()
+
+	ctx := mock.NewContext()
+	seVar := ctx.GetSessionVars()
+	require.NotNil(b, seVar)
+
+	seVar.User = &auth.UserIdentity{Username: "root", Hostname: "192.168.0.1"}
+	seVar.ConnectionInfo = &variable.ConnectionInfo{ClientIP: "192.168.0.1"}
+	seVar.ConnectionID = 1
+	seVar.SessionAlias = "aliasabc"
+	// the output of the logged CurrentDB should be 'test', should be to lower cased.
+	seVar.CurrentDB = "TeST"
+	seVar.InRestrictedSQL = true
+	seVar.StmtCtx.WaitLockLeaseTime = 1
+	txnTS := uint64(406649736972468225)
+	costTime := time.Second
+	execDetail := execdetails.ExecDetails{
+		BackoffTime:  time.Millisecond,
+		RequestCount: 2,
+		ScanDetail: &util.ScanDetail{
+			ProcessedKeys: 20001,
+			TotalKeys:     10000,
+		},
+		DetailsNeedP90: execdetails.DetailsNeedP90{
+			TimeDetail: util.TimeDetail{
+				ProcessTime: time.Second * time.Duration(2),
+				WaitTime:    time.Minute,
+			},
+		},
+	}
+	usedStats1 := &stmtctx.UsedStatsInfoForTable{
+		Name:                  "t1",
+		TblInfo:               nil,
+		Version:               123,
+		RealtimeCount:         1000,
+		ModifyCount:           0,
+		ColumnStatsLoadStatus: map[int64]string{2: "allEvicted", 3: "onlyCmsEvicted"},
+		IndexStatsLoadStatus:  map[int64]string{1: "allLoaded", 2: "allLoaded"},
+	}
+	usedStats2 := &stmtctx.UsedStatsInfoForTable{
+		Name:                  "t2",
+		TblInfo:               nil,
+		Version:               0,
+		RealtimeCount:         10000,
+		ModifyCount:           0,
+		ColumnStatsLoadStatus: map[int64]string{2: "unInitialized"},
+	}
+
+	copTasks := &execdetails.CopTasksDetails{
+		NumCopTasks:       10,
+		AvgProcessTime:    time.Second,
+		P90ProcessTime:    time.Second * 2,
+		MaxProcessAddress: "10.6.131.78",
+		MaxProcessTime:    time.Second * 3,
+		AvgWaitTime:       time.Millisecond * 10,
+		P90WaitTime:       time.Millisecond * 20,
+		MaxWaitTime:       time.Millisecond * 30,
+		MaxWaitAddress:    "10.6.131.79",
+		MaxBackoffTime:    make(map[string]time.Duration),
+		AvgBackoffTime:    make(map[string]time.Duration),
+		P90BackoffTime:    make(map[string]time.Duration),
+		TotBackoffTime:    make(map[string]time.Duration),
+		TotBackoffTimes:   make(map[string]int),
+		MaxBackoffAddress: make(map[string]string),
+	}
+
+	backoffs := []string{"rpcTiKV", "rpcPD", "regionMiss"}
+	for _, backoff := range backoffs {
+		copTasks.MaxBackoffTime[backoff] = time.Millisecond * 200
+		copTasks.MaxBackoffAddress[backoff] = "127.0.0.1"
+		copTasks.AvgBackoffTime[backoff] = time.Millisecond * 200
+		copTasks.P90BackoffTime[backoff] = time.Millisecond * 200
+		copTasks.TotBackoffTime[backoff] = time.Millisecond * 200
+		copTasks.TotBackoffTimes[backoff] = 200
+	}
+
+	var memMax int64 = 2333
+	var diskMax int64 = 6666
+	sql := "select * from t;"
+	_, digest := parser.NormalizeDigest(sql)
+	logItems := &variable.SlowQueryLogItems{
+		TxnTS:             txnTS,
+		KeyspaceName:      "keyspace_a",
+		KeyspaceID:        1,
+		SQL:               sql,
+		Digest:            digest.String(),
+		TimeTotal:         costTime,
+		TimeParse:         time.Duration(10),
+		TimeCompile:       time.Duration(10),
+		TimeOptimize:      time.Duration(10),
+		TimeWaitTS:        time.Duration(3),
+		IndexNames:        "[t1:a,t2:b]",
+		CopTasks:          copTasks,
+		ExecDetail:        execDetail,
+		MemMax:            memMax,
+		DiskMax:           diskMax,
+		Prepared:          true,
+		PlanFromCache:     true,
+		PlanFromBinding:   true,
+		HasMoreResults:    true,
+		KVTotal:           10 * time.Second,
+		PDTotal:           11 * time.Second,
+		BackoffTotal:      12 * time.Second,
+		WriteSQLRespTotal: 1 * time.Second,
+		ResultRows:        12345,
+		Succ:              true,
+		RewriteInfo: variable.RewritePhaseInfo{
+			DurationRewrite:            3,
+			DurationPreprocessSubQuery: 2,
+			PreprocessSubQueries:       2,
+		},
+		ExecRetryCount:    3,
+		ExecRetryTime:     5*time.Second + time.Millisecond*100,
+		IsExplicitTxn:     true,
+		IsWriteCacheTable: true,
+		UsedStats:         &stmtctx.UsedStatsInfo{},
+		ResourceGroupName: "rg1",
+		RRU:               50.0,
+		WRU:               100.56,
+		WaitRUDuration:    134 * time.Millisecond,
+	}
+	logItems.UsedStats.RecordUsedInfo(1, usedStats1)
+	logItems.UsedStats.RecordUsedInfo(2, usedStats2)
+
+	b.StartTimer()
+	for i := 0; i < b.N; i++ {
+		// seVar.SlowLogFormatOTel(logItems)
+		seVar.SlowLogFormat(logItems)
+	}
+}
+
+func writeSlowLogItem(buf *bytes.Buffer, key, value string) {
+	buf.WriteString("#" + key + ":" + value + "\n")
+}
+
+func writeSlowLogItem2(buf *bytes.Buffer, key, value string) {
+	buf.WriteString(key + value + "\n")
+}
+
+func BenchmarkSlowLogItem(b *testing.B) {
+	b.StopTimer()
+	b.ReportAllocs()
+
+	var buf bytes.Buffer
+	b.StartTimer()
+	for i := 0; i < b.N; i++ {
+		writeSlowLogItem2(&buf, "#Preproc_subqueries_time:", "skaljwueirqu1783759 skaldkjeiqwuoreiru")
+		// writeSlowLogItem(&buf, "Preproc_subqueries_time", "skaljwueirqu1783759 skaldkjeiqwuoreiru")
+	}
 }
 
 func TestIsolationRead(t *testing.T) {

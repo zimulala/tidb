@@ -70,6 +70,10 @@ import (
 	tikvstore "github.com/tikv/client-go/v2/kv"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/twmb/murmur3"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
+	otrace "go.opentelemetry.io/otel/trace"
 	atomic2 "go.uber.org/atomic"
 )
 
@@ -3245,6 +3249,8 @@ const (
 	SlowLogStatsInfoStr = "Stats"
 	// SlowLogNumCopTasksStr is the number of cop-tasks.
 	SlowLogNumCopTasksStr = "Num_cop_tasks"
+	// SlowLogCopTasksDetailStr is the detail of cop-tasks.
+	SlowLogCopTasksDetailStr = "Cop_tasks_detail"
 	// SlowLogCopProcAvg is the average process time of all cop-tasks.
 	SlowLogCopProcAvg = "Cop_proc_avg"
 	// SlowLogCopProcP90 is the p90 process time of all cop-tasks.
@@ -3620,12 +3626,234 @@ func (s *SessionVars) SlowLogFormat(logItems *SlowQueryLogItems) string {
 		buf.WriteString(";")
 	}
 
+	// logutil.BgLogger().Warn("xxx---- 00", zap.String("str", buf.String()))
 	return buf.String()
 }
 
 // writeSlowLogItem writes a slow log item in the form of: "# ${key}:${value}"
 func writeSlowLogItem(buf *bytes.Buffer, key, value string) {
 	buf.WriteString(SlowLogRowPrefixStr + key + SlowLogSpaceMarkStr + value + "\n")
+}
+
+func (s *SessionVars) SlowLogFormatOTel(logItems *SlowQueryLogItems) string {
+	name := "go.opentelemetry.io/otel/example/slowlog"
+	tracer := otel.Tracer(name)
+
+	method, _ := baggage.NewMember("method", "repl")
+	client, _ := baggage.NewMember("client", "cli")
+	bag, _ := baggage.New(method, client)
+	defaultCtx := baggage.ContextWithBaggage(context.Background(), bag)
+	_, span := tracer.Start(defaultCtx, "roll")
+	defer span.End()
+	kvs := make([]attribute.KeyValue, 0, 50)
+
+	kvs = writeSlowLogAttribute(kvs, SlowLogTxnStartTSStr, strconv.FormatUint(logItems.TxnTS, 10))
+	if logItems.KeyspaceName != "" {
+		kvs = writeSlowLogAttribute(kvs, SlowLogKeyspaceName, logItems.KeyspaceName)
+		kvs = writeSlowLogAttribute(kvs, SlowLogKeyspaceID, fmt.Sprintf("%d", logItems.KeyspaceID))
+	}
+
+	if s.User != nil {
+		hostAddress := s.User.Hostname
+		if s.ConnectionInfo != nil {
+			hostAddress = s.ConnectionInfo.ClientIP
+		}
+		kvs = writeSlowLogAttribute(kvs, SlowLogUserAndHostStr, fmt.Sprintf("%s[%s] @ %s [%s]", s.User.Username, s.User.Username, s.User.Hostname, hostAddress))
+	}
+	if s.ConnectionID != 0 {
+		kvs = writeSlowLogAttribute(kvs, SlowLogConnIDStr, strconv.FormatUint(s.ConnectionID, 10))
+	}
+	if s.SessionAlias != "" {
+		kvs = writeSlowLogAttribute(kvs, SlowLogSessAliasStr, s.SessionAlias)
+	}
+	execRetryTimeInfo := fmt.Sprintf("%s %v%s%v", strconv.FormatFloat(logItems.ExecRetryTime.Seconds(), 'f', -1, 64),
+		SlowLogExecRetryCount, SlowLogSpaceMarkStr, strconv.Itoa(int(logItems.ExecRetryCount)))
+	kvs = writeSlowLogAttribute(kvs, fmt.Sprintf("%v%v%v", SlowLogRowPrefixStr, SlowLogExecRetryTime, SlowLogSpaceMarkStr), execRetryTimeInfo)
+
+	kvs = writeSlowLogAttribute(kvs, SlowLogQueryTimeStr, strconv.FormatFloat(logItems.TimeTotal.Seconds(), 'f', -1, 64))
+	kvs = writeSlowLogAttribute(kvs, SlowLogParseTimeStr, strconv.FormatFloat(logItems.TimeParse.Seconds(), 'f', -1, 64))
+	kvs = writeSlowLogAttribute(kvs, SlowLogCompileTimeStr, strconv.FormatFloat(logItems.TimeCompile.Seconds(), 'f', -1, 64))
+
+	rewriteTimeInfo := strconv.FormatFloat(logItems.RewriteInfo.DurationRewrite.Seconds(), 'f', -1, 64)
+	if logItems.RewriteInfo.PreprocessSubQueries > 0 {
+		rewriteTimeInfo = fmt.Sprintf("%s %v%v%v %v%v%v", rewriteTimeInfo, SlowLogPreprocSubQueriesStr, SlowLogSpaceMarkStr, logItems.RewriteInfo.PreprocessSubQueries,
+			SlowLogPreProcSubQueryTimeStr, SlowLogSpaceMarkStr, strconv.FormatFloat(logItems.RewriteInfo.DurationPreprocessSubQuery.Seconds(), 'f', -1, 64))
+	}
+	kvs = writeSlowLogAttribute(kvs, fmt.Sprintf("%v%v%v", SlowLogRowPrefixStr, SlowLogRewriteTimeStr, SlowLogSpaceMarkStr), rewriteTimeInfo)
+
+	kvs = writeSlowLogAttribute(kvs, SlowLogOptimizeTimeStr, strconv.FormatFloat(logItems.TimeOptimize.Seconds(), 'f', -1, 64))
+	kvs = writeSlowLogAttribute(kvs, SlowLogWaitTSTimeStr, strconv.FormatFloat(logItems.TimeWaitTS.Seconds(), 'f', -1, 64))
+
+	if execDetailStr := logItems.ExecDetail.String(); len(execDetailStr) > 0 {
+		// buf.WriteString(SlowLogRowPrefixStr + execDetailStr + "\n")
+		kvs = writeSlowLogAttribute(kvs, SlowLogRowPrefixStr, execDetailStr)
+	}
+
+	if len(s.CurrentDB) > 0 {
+		kvs = writeSlowLogAttribute(kvs, SlowLogDBStr, strings.ToLower(s.CurrentDB))
+	}
+	if len(logItems.IndexNames) > 0 {
+		kvs = writeSlowLogAttribute(kvs, SlowLogIndexNamesStr, logItems.IndexNames)
+	}
+
+	kvs = writeSlowLogAttribute(kvs, SlowLogIsInternalStr, strconv.FormatBool(s.InRestrictedSQL))
+	if len(logItems.Digest) > 0 {
+		kvs = writeSlowLogAttribute(kvs, SlowLogDigestStr, logItems.Digest)
+	}
+
+	keys := logItems.UsedStats.Keys()
+	if len(keys) > 0 {
+		firstComma := false
+		slices.Sort(keys)
+		var buf bytes.Buffer
+		for _, id := range keys {
+			usedStatsForTbl := logItems.UsedStats.GetUsedInfo(id)
+			if usedStatsForTbl == nil {
+				continue
+			}
+			if firstComma {
+				buf.WriteString(",")
+			}
+			usedStatsForTbl.WriteToSlowLog(&buf)
+			firstComma = true
+		}
+		kvs = writeSlowLogAttribute(kvs, SlowLogRowPrefixStr+SlowLogStatsInfoStr+SlowLogSpaceMarkStr, buf.String())
+	}
+	if logItems.CopTasks != nil {
+		kvs = writeSlowLogAttribute(kvs, SlowLogNumCopTasksStr, strconv.FormatInt(int64(logItems.CopTasks.NumCopTasks), 10))
+		if logItems.CopTasks.NumCopTasks > 0 {
+			// make the result stable
+			backoffs := make([]string, 0, 3)
+			for backoff := range logItems.CopTasks.TotBackoffTimes {
+				backoffs = append(backoffs, backoff)
+			}
+			slices.Sort(backoffs)
+
+			var buf bytes.Buffer
+			if logItems.CopTasks.NumCopTasks == 1 {
+				buf.WriteString(SlowLogRowPrefixStr + fmt.Sprintf("%v%v%v %v%v%v",
+					SlowLogCopProcAvg, SlowLogSpaceMarkStr, logItems.CopTasks.AvgProcessTime.Seconds(),
+					SlowLogCopProcAddr, SlowLogSpaceMarkStr, logItems.CopTasks.MaxProcessAddress) + "\n")
+				buf.WriteString(SlowLogRowPrefixStr + fmt.Sprintf("%v%v%v %v%v%v",
+					SlowLogCopWaitAvg, SlowLogSpaceMarkStr, logItems.CopTasks.AvgWaitTime.Seconds(),
+					SlowLogCopWaitAddr, SlowLogSpaceMarkStr, logItems.CopTasks.MaxWaitAddress) + "\n")
+				for _, backoff := range backoffs {
+					backoffPrefix := SlowLogCopBackoffPrefix + backoff + "_"
+					buf.WriteString(SlowLogRowPrefixStr + fmt.Sprintf("%v%v%v %v%v%v\n",
+						backoffPrefix+"total_times", SlowLogSpaceMarkStr, logItems.CopTasks.TotBackoffTimes[backoff],
+						backoffPrefix+"total_time", SlowLogSpaceMarkStr, logItems.CopTasks.TotBackoffTime[backoff].Seconds(),
+					))
+				}
+			} else {
+				buf.WriteString(SlowLogRowPrefixStr + fmt.Sprintf("%v%v%v %v%v%v %v%v%v %v%v%v",
+					SlowLogCopProcAvg, SlowLogSpaceMarkStr, logItems.CopTasks.AvgProcessTime.Seconds(),
+					SlowLogCopProcP90, SlowLogSpaceMarkStr, logItems.CopTasks.P90ProcessTime.Seconds(),
+					SlowLogCopProcMax, SlowLogSpaceMarkStr, logItems.CopTasks.MaxProcessTime.Seconds(),
+					SlowLogCopProcAddr, SlowLogSpaceMarkStr, logItems.CopTasks.MaxProcessAddress) + "\n")
+				buf.WriteString(SlowLogRowPrefixStr + fmt.Sprintf("%v%v%v %v%v%v %v%v%v %v%v%v",
+					SlowLogCopWaitAvg, SlowLogSpaceMarkStr, logItems.CopTasks.AvgWaitTime.Seconds(),
+					SlowLogCopWaitP90, SlowLogSpaceMarkStr, logItems.CopTasks.P90WaitTime.Seconds(),
+					SlowLogCopWaitMax, SlowLogSpaceMarkStr, logItems.CopTasks.MaxWaitTime.Seconds(),
+					SlowLogCopWaitAddr, SlowLogSpaceMarkStr, logItems.CopTasks.MaxWaitAddress) + "\n")
+				for _, backoff := range backoffs {
+					backoffPrefix := SlowLogCopBackoffPrefix + backoff + "_"
+					buf.WriteString(SlowLogRowPrefixStr + fmt.Sprintf("%v%v%v %v%v%v %v%v%v %v%v%v %v%v%v %v%v%v\n",
+						backoffPrefix+"total_times", SlowLogSpaceMarkStr, logItems.CopTasks.TotBackoffTimes[backoff],
+						backoffPrefix+"total_time", SlowLogSpaceMarkStr, logItems.CopTasks.TotBackoffTime[backoff].Seconds(),
+						backoffPrefix+"max_time", SlowLogSpaceMarkStr, logItems.CopTasks.MaxBackoffTime[backoff].Seconds(),
+						backoffPrefix+"max_addr", SlowLogSpaceMarkStr, logItems.CopTasks.MaxBackoffAddress[backoff],
+						backoffPrefix+"avg_time", SlowLogSpaceMarkStr, logItems.CopTasks.AvgBackoffTime[backoff].Seconds(),
+						backoffPrefix+"p90_time", SlowLogSpaceMarkStr, logItems.CopTasks.P90BackoffTime[backoff].Seconds(),
+					))
+				}
+			}
+			kvs = writeSlowLogAttribute(kvs, SlowLogCopTasksDetailStr, buf.String())
+		}
+	}
+	if logItems.MemMax > 0 {
+		kvs = writeSlowLogAttribute(kvs, SlowLogMemMax, strconv.FormatInt(logItems.MemMax, 10))
+	}
+	if logItems.DiskMax > 0 {
+		kvs = writeSlowLogAttribute(kvs, SlowLogDiskMax, strconv.FormatInt(logItems.DiskMax, 10))
+	}
+
+	kvs = writeSlowLogAttribute(kvs, SlowLogPrepared, strconv.FormatBool(logItems.Prepared))
+	kvs = writeSlowLogAttribute(kvs, SlowLogPlanFromCache, strconv.FormatBool(logItems.PlanFromCache))
+	kvs = writeSlowLogAttribute(kvs, SlowLogPlanFromBinding, strconv.FormatBool(logItems.PlanFromBinding))
+	kvs = writeSlowLogAttribute(kvs, SlowLogHasMoreResults, strconv.FormatBool(logItems.HasMoreResults))
+	kvs = writeSlowLogAttribute(kvs, SlowLogKVTotal, strconv.FormatFloat(logItems.KVTotal.Seconds(), 'f', -1, 64))
+	kvs = writeSlowLogAttribute(kvs, SlowLogPDTotal, strconv.FormatFloat(logItems.PDTotal.Seconds(), 'f', -1, 64))
+	kvs = writeSlowLogAttribute(kvs, SlowLogBackoffTotal, strconv.FormatFloat(logItems.BackoffTotal.Seconds(), 'f', -1, 64))
+	kvs = writeSlowLogAttribute(kvs, SlowLogWriteSQLRespTotal, strconv.FormatFloat(logItems.WriteSQLRespTotal.Seconds(), 'f', -1, 64))
+	kvs = writeSlowLogAttribute(kvs, SlowLogResultRows, strconv.FormatInt(logItems.ResultRows, 10))
+	if len(logItems.Warnings) > 0 {
+		var buf bytes.Buffer
+		jsonEncoder := json.NewEncoder(&buf)
+		jsonEncoder.SetEscapeHTML(false)
+		// Note that the Encode() will append a '\n' so we don't need to add another.
+		err := jsonEncoder.Encode(logItems.Warnings)
+		if err != nil {
+			buf.WriteString(err.Error())
+		}
+		kvs = writeSlowLogAttribute(kvs, SlowLogRowPrefixStr+SlowLogWarnings+SlowLogSpaceMarkStr, buf.String())
+	}
+	kvs = writeSlowLogAttribute(kvs, SlowLogSucc, strconv.FormatBool(logItems.Succ))
+	kvs = writeSlowLogAttribute(kvs, SlowLogIsExplicitTxn, strconv.FormatBool(logItems.IsExplicitTxn))
+	kvs = writeSlowLogAttribute(kvs, SlowLogIsSyncStatsFailed, strconv.FormatBool(logItems.IsSyncStatsFailed))
+	if s.StmtCtx.WaitLockLeaseTime > 0 {
+		kvs = writeSlowLogAttribute(kvs, SlowLogIsWriteCacheTable, strconv.FormatBool(logItems.IsWriteCacheTable))
+	}
+	if len(logItems.Plan) != 0 {
+		kvs = writeSlowLogAttribute(kvs, SlowLogPlan, logItems.Plan)
+	}
+	if len(logItems.PlanDigest) != 0 {
+		kvs = writeSlowLogAttribute(kvs, SlowLogPlanDigest, logItems.PlanDigest)
+	}
+	if len(logItems.BinaryPlan) != 0 {
+		kvs = writeSlowLogAttribute(kvs, SlowLogBinaryPlan, logItems.BinaryPlan)
+	}
+
+	if logItems.ResourceGroupName != "" {
+		kvs = writeSlowLogAttribute(kvs, SlowLogResourceGroup, logItems.ResourceGroupName)
+	}
+	if logItems.RRU > 0.0 {
+		kvs = writeSlowLogAttribute(kvs, SlowLogRRU, strconv.FormatFloat(logItems.RRU, 'f', -1, 64))
+	}
+	if logItems.WRU > 0.0 {
+		kvs = writeSlowLogAttribute(kvs, SlowLogWRU, strconv.FormatFloat(logItems.WRU, 'f', -1, 64))
+	}
+	if logItems.WaitRUDuration > time.Duration(0) {
+		kvs = writeSlowLogAttribute(kvs, SlowLogWaitRUDuration, strconv.FormatFloat(logItems.WaitRUDuration.Seconds(), 'f', -1, 64))
+	}
+	if logItems.CPUUsages.TidbCPUTime > time.Duration(0) {
+		kvs = writeSlowLogAttribute(kvs, SlowLogTidbCPUUsageDuration, strconv.FormatFloat(logItems.CPUUsages.TidbCPUTime.Seconds(), 'f', -1, 64))
+	}
+	if logItems.CPUUsages.TikvCPUTime > time.Duration(0) {
+		kvs = writeSlowLogAttribute(kvs, SlowLogTikvCPUUsageDuration, strconv.FormatFloat(logItems.CPUUsages.TikvCPUTime.Seconds(), 'f', -1, 64))
+	}
+	if logItems.PrevStmt != "" {
+		kvs = writeSlowLogAttribute(kvs, SlowLogPrevStmt, logItems.PrevStmt)
+	}
+
+	sql := logItems.SQL
+	if s.CurrentDBChanged {
+		sql = fmt.Sprintf("use %s;\n%s", strings.ToLower(s.CurrentDB), sql)
+		s.CurrentDBChanged = false
+	}
+	if len(logItems.SQL) == 0 || logItems.SQL[len(logItems.SQL)-1] != ';' {
+		sql += ";"
+	}
+	kvs = writeSlowLogAttribute(kvs, "SQL", sql)
+
+	// logutil.BgLogger().Info(fmt.Sprintf("xxx---------- 11 :%v", kvs))
+	span.AddEvent("slow log",
+		otrace.WithAttributes(kvs...))
+
+	return ""
+}
+
+func writeSlowLogAttribute(kvs []attribute.KeyValue, key, value string) []attribute.KeyValue {
+	return append(kvs, attribute.String(key, value))
 }
 
 // TxnReadTS indicates the value and used situation for tx_read_ts
