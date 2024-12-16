@@ -1720,6 +1720,7 @@ func (a *ExecStmt) LogSlowQuery(txnTS uint64, succ bool, hasMoreResults bool) {
 	if _, ok := a.StmtNode.(*ast.CommitStmt); ok && sessVars.PrevStmt != nil {
 		slowItems.PrevStmt = sessVars.PrevStmt.String()
 	}
+	// slowLog := sessVars.SlowLogFormat(slowItems)
 	slowLog := sessVars.SlowLogFormatOTel(slowItems)
 	if trace.IsEnabled() {
 		trace.Log(a.GoCtx, "details", slowLog)

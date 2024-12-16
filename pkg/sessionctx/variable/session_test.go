@@ -451,11 +451,27 @@ func BenchmarkSlowLog(b *testing.B) {
 }
 
 func writeSlowLogItem(buf *bytes.Buffer, key, value string) {
-	buf.WriteString("#" + key + ":" + value + "\n")
+	buf.WriteString("# " + key + ":" + value + "\n")
 }
 
 func writeSlowLogItem2(buf *bytes.Buffer, key, value string) {
 	buf.WriteString(key + value + "\n")
+}
+
+func writeSlowLogItem3(buf *bytes.Buffer, key, value string) {
+	buf.WriteString("# ")
+	buf.WriteString(key)
+	buf.WriteString(":")
+	buf.WriteString(value)
+	buf.WriteString("\n")
+}
+
+func writeSlowLogItem4(buf *bytes.Buffer, key, value string) {
+	buf.WriteString("# ")
+	buf.WriteString(key)
+	buf.WriteRune(':')
+	buf.WriteString(value)
+	buf.WriteRune('\n')
 }
 
 func BenchmarkSlowLogItem(b *testing.B) {
@@ -465,8 +481,9 @@ func BenchmarkSlowLogItem(b *testing.B) {
 	var buf bytes.Buffer
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		writeSlowLogItem2(&buf, "#Preproc_subqueries_time:", "skaljwueirqu1783759 skaldkjeiqwuoreiru")
+		// writeSlowLogItem2(&buf, "# Preproc_subqueries_time:", "skaljwueirqu1783759 skaldkjeiqwuoreiru")
 		// writeSlowLogItem(&buf, "Preproc_subqueries_time", "skaljwueirqu1783759 skaldkjeiqwuoreiru")
+		writeSlowLogItem4(&buf, "Preproc_subqueries_time", "skaljwueirqu1783759 skaldkjeiqwuoreiru")
 	}
 }
 
