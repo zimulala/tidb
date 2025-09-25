@@ -19,13 +19,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/grafana/regexp"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/terror"
@@ -852,7 +852,7 @@ var SlowLogRuleFieldAccessors = map[string]SlowLogFieldAccessor{
 }
 
 // slowLogFieldRe is uses to compile field:value
-var slowLogFieldRe = regexp.MustCompile(`\s*([^:,]+)\s*:\s*("[^"]*"|'[^']*'|[^,]+)\s*`)
+var slowLogFieldRe = regexp.MustCompile(`\s*(\w+)\s*:\s*([^,]+)\s*`)
 
 const UnsetConnID = int64(-1)
 

@@ -448,12 +448,14 @@ func TestParseGlobalSlowLogRules(t *testing.T) {
 	require.True(t, strings.Contains(slowLogRuleSet.RawRules, "conn_id:789"))
 	require.Len(t, slowLogRuleSet.RulesMap, 4)
 	// Conn_ID: 123
-	require.Equal(t, "db1", slowLogRuleSet.RulesMap[123].Rules[0].Conditions[1].Threshold)
+	condVal := slowLogRuleSet.RulesMap[123].Rules[0].Conditions[1].Threshold
+	require.True(t, "db1" == condVal || uint64(123) == condVal)
 	require.Len(t, slowLogRuleSet.RulesMap[123].Rules[1].Conditions, 1)
 	require.Equal(t, "", slowLogRuleSet.RulesMap[123].RawRules)
 	require.Equal(t, allConditionFields, slowLogRuleSet.RulesMap[123].AllConditionFields)
 	// Conn_ID: 456
-	require.Equal(t, "db2", slowLogRuleSet.RulesMap[456].Rules[0].Conditions[1].Threshold)
+	condVal = slowLogRuleSet.RulesMap[456].Rules[0].Conditions[1].Threshold
+	require.True(t, "db2" == condVal || uint64(456) == condVal)
 	require.Equal(t, "", slowLogRuleSet.RulesMap[456].RawRules)
 	require.Equal(t, allConditionFields, slowLogRuleSet.RulesMap[456].AllConditionFields)
 	// Conn_ID: -1

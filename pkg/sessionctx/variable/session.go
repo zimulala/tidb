@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/tidb/pkg/config"
 	"github.com/pingcap/tidb/pkg/executor/join/joinversion"
@@ -1034,6 +1035,17 @@ type SessionVars struct {
 	// When > 0: blends conservative and exponential backoff estimates (0.1=mostly conservative, 1.0=full exponential)
 	RiskGroupNDVSkewRatio float64
 
+	// AlwaysKeepJoinKey indicates the optimizer to always keep join keys during optimization.
+	// Join keys are crucial for join optimization like Join Order and Join Algorithm selection, removing
+	// join keys might lead to suboptimal plans in some cases.
+	AlwaysKeepJoinKey bool
+
+	// CartesianJoinOrderThreshold controls whether to allow do Cartesian Join first in Join Reorder.
+	// This variable is used as a penalty to trade off the risk and join order quality.
+	// When 0: never do Cartesian Join first.
+	// When > 0: allow Cartesian Join if cost(cartesian join) * threshold < cost(non cartesian join).
+	CartesianJoinOrderThreshold float64
+
 	// cpuFactor is the CPU cost of processing one expression for one row.
 	cpuFactor float64
 	// copCPUFactor is the CPU cost of processing one expression for one row in coprocessor.
@@ -1141,6 +1153,9 @@ type SessionVars struct {
 
 	// EnableNoDecorrelateInSelect enables the NO_DECORRELATE hint for subqueries in the select list.
 	EnableNoDecorrelateInSelect bool
+
+	// EnableSemiJoinRewrite enables the SEMI_JOIN_REWRITE hint for subqueries in the where clause.
+	EnableSemiJoinRewrite bool
 
 	// AllowProjectionPushDown enables pushdown projection on TiKV.
 	AllowProjectionPushDown bool
@@ -2211,8 +2226,11 @@ func NewSessionVars(hctx HookContext) *SessionVars {
 		OptimizerSelectivityLevel:     vardef.DefTiDBOptimizerSelectivityLevel,
 		RiskScaleNDVSkewRatio:         vardef.DefOptRiskScaleNDVSkewRatio,
 		RiskGroupNDVSkewRatio:         vardef.DefOptRiskGroupNDVSkewRatio,
+		AlwaysKeepJoinKey:             vardef.DefOptAlwaysKeepJoinKey,
+		CartesianJoinOrderThreshold:   vardef.DefOptCartesianJoinOrderThreshold,
 		EnableOuterJoinReorder:        vardef.DefTiDBEnableOuterJoinReorder,
 		EnableNoDecorrelateInSelect:   vardef.DefOptEnableNoDecorrelateInSelect,
+		EnableSemiJoinRewrite:         vardef.DefOptEnableSemiJoinRewrite,
 		RetryLimit:                    vardef.DefTiDBRetryLimit,
 		DisableTxnAutoRetry:           vardef.DefTiDBDisableTxnAutoRetry,
 		DDLReorgPriority:              kv.PriorityLow,
@@ -2456,8 +2474,33 @@ func (s *SessionVars) SetEnablePseudoForOutdatedStats(val bool) {
 	s.EnablePseudoForOutdatedStats = val
 }
 
-// GetReplicaRead get ReplicaRead from sql hints and SessionVars.replicaRead.
+// GetReplicaRead get ReplicaRead from sql hints and SessionVars.replicaRead with adjusted.
 func (s *SessionVars) GetReplicaRead() kv.ReplicaReadType {
+	// For test purpose, you can enable this failpoint to get the unadjusted replica read.
+	failpoint.Inject("GetReplicaReadUnadjusted", func(_ failpoint.Value) {
+		failpoint.Return(s.replicaRead)
+	})
+	// Replica read only works for read-only statements.
+	if !s.StmtCtx.IsReadOnly {
+		if s.StmtCtx.HasReplicaReadHint {
+			const warnMsg = "Ignore replica read hint for non-read-only statement"
+			existWarnings := s.StmtCtx.GetWarnings()
+			hasWarning := false
+			for _, warn := range existWarnings {
+				if warn.Err.Error() == warnMsg {
+					hasWarning = true
+					break
+				}
+			}
+			if !hasWarning {
+				s.StmtCtx.AppendWarning(errors.New(warnMsg))
+			}
+		}
+		return kv.ReplicaReadLeader
+	}
+	if s.StmtCtx.RCCheckTS || s.RcWriteCheckTS {
+		return kv.ReplicaReadLeader
+	}
 	if s.StmtCtx.HasReplicaReadHint {
 		return kv.ReplicaReadType(s.StmtCtx.ReplicaRead)
 	}

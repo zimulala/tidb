@@ -155,6 +155,7 @@ func CompleteSlowLogItemsForRules(ctx context.Context, seVars *variable.SessionV
 
 	for field, sg := range variable.SlowLogRuleFieldAccessors {
 		if seVars.SlowLogRules != nil {
+			// TODO: update with all scope AllConditionFields
 			if _, ok := seVars.SlowLogRules.AllConditionFields[field]; ok {
 				continue
 			}
@@ -168,8 +169,6 @@ func CompleteSlowLogItemsForRules(ctx context.Context, seVars *variable.SessionV
 
 // SetSlowLogItems fills the remaining fields of SlowQueryLogItems after SQL execution.
 func SetSlowLogItems(a *ExecStmt, txnTS uint64, hasMoreResults bool, items *variable.SlowQueryLogItems) {
-	logutil.BgLogger().Warn(fmt.Sprintf("xxx------------------------------------------------------------ SetSlowLogItems, connID:%d",
-		a.Ctx.GetSessionVars().ConnectionID))
 	CompleteSlowLogItemsForRules(a.GoCtx, a.Ctx.GetSessionVars(), items)
 
 	sessVars := a.Ctx.GetSessionVars()

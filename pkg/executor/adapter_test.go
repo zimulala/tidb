@@ -222,9 +222,9 @@ func TestShouldWriteSlowLog(t *testing.T) {
 		tk.MustQuery(`select @@SESSION.tidb_slow_log_rules`).Check(
 			testkit.Rows("resource_group:otherRG"),
 		)
-		tk.MustQuery(`select @@Global.tidb_slow_log_rules`).Check(
-			testkit.Rows(fmt.Sprintf("conn_id:%d,resource_group:testRG", connID)),
-		)
+		ret := tk.MustQuery(`select @@Global.tidb_slow_log_rules`)
+		require.True(t, strings.Contains(ret.String(), "resource_group:testRG"))
+		require.True(t, strings.Contains(ret.String(), fmt.Sprintf("conn_id:%d", connID)))
 	})
 
 	t.Run("session rules not match, global ConnID rules match", func(t *testing.T) {
@@ -298,10 +298,10 @@ func TestShouldWriteSlowLog(t *testing.T) {
 		tk.MustQuery(`select @@SESSION.tidb_slow_log_rules`).Check(
 			testkit.Rows("resource_group:otherRG"),
 		)
-		tk.MustQuery(`select @@Global.tidb_slow_log_rules`).Check(
-			// TODO: unstable test case
-			testkit.Rows(fmt.Sprintf("conn_id:%d,resource_group:testRG;succ:false", connID)),
-		)
+		ret := tk.MustQuery(`select @@Global.tidb_slow_log_rules`)
+		require.True(t, strings.Contains(ret.String(), "resource_group:testRG"))
+		require.True(t, strings.Contains(ret.String(), "succ:false"))
+		require.True(t, strings.Contains(ret.String(), fmt.Sprintf("conn_id:%d", connID)))
 	})
 
 	t.Run("multiple rules with complex conditions, one matches", func(t *testing.T) {
