@@ -22,14 +22,19 @@ import (
 	"time"
 
 	"github.com/pingcap/tidb/pkg/executor"
+	"github.com/pingcap/tidb/pkg/parser/auth"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/slowlogrule"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/vardef"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
+	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
+	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/util"
+	"go.uber.org/zap"
 )
 
 func newMockCtx() sessionctx.Context {
@@ -552,4 +557,178 @@ func TestParseGlobalSlowLogRules(t *testing.T) {
 	require.Equal(t, allConditionFields, slowLogRuleSet.RulesMap[variable.UnsetConnID].Fields)
 	// Conn_ID: 789
 	require.Equal(t, uint64(789), slowLogRuleSet.RulesMap[789].Rules[0].Conditions[0].Threshold)
+}
+
+// prepareSlowLogItems creates a comprehensive SlowQueryLogItems for benchmarking.
+func prepareSlowLogItems() *variable.SlowQueryLogItems {
+	execDetail := &execdetails.ExecDetails{
+		RequestCount: 2,
+		CopExecDetails: execdetails.CopExecDetails{
+			BackoffTime: time.Millisecond,
+			ScanDetail: &util.ScanDetail{
+				ProcessedKeys: 20001,
+				TotalKeys:     10000,
+			},
+			TimeDetail: util.TimeDetail{
+				ProcessTime: time.Second * 2,
+				WaitTime:    time.Minute,
+			},
+		},
+	}
+
+	copTasks := &execdetails.CopTasksDetails{
+		NumCopTasks:         10,
+		ProcessTimeStats:    execdetails.TaskTimeStats{AvgTime: time.Second, P90Time: time.Second * 2, MaxTime: time.Second * 3, MaxAddress: "10.6.131.78"},
+		WaitTimeStats:       execdetails.TaskTimeStats{AvgTime: 10 * time.Millisecond, P90Time: 20 * time.Millisecond, MaxTime: 30 * time.Millisecond, MaxAddress: "10.6.131.79"},
+		BackoffTimeStatsMap: make(map[string]execdetails.TaskTimeStats),
+		TotBackoffTimes:     make(map[string]int),
+	}
+
+	backoffs := []string{"rpcTiKV", "rpcPD", "regionMiss"}
+	for _, backoff := range backoffs {
+		copTasks.BackoffTimeStatsMap[backoff] = execdetails.TaskTimeStats{
+			MaxTime:    200 * time.Millisecond,
+			MaxAddress: "127.0.0.1",
+			AvgTime:    200 * time.Millisecond,
+			P90Time:    200 * time.Millisecond,
+			TotTime:    200 * time.Millisecond,
+		}
+		copTasks.TotBackoffTimes[backoff] = 200
+	}
+
+	tikvExecDetail := util.ExecDetails{
+		WaitKVRespDuration: (10 * time.Second).Nanoseconds(),
+		WaitPDRespDuration: (11 * time.Second).Nanoseconds(),
+		BackoffDuration:    (12 * time.Second).Nanoseconds(),
+	}
+
+	ruDetails := util.NewRUDetailsWith(50.0, 100.56, 134*time.Millisecond)
+
+	return &variable.SlowQueryLogItems{
+		TxnTS:             406649736972468225,
+		KeyspaceName:      "keyspace_a",
+		KeyspaceID:        1,
+		SQL:               "select * from t where id = 1 and name = 'test' and value > 100;",
+		Digest:            "e5796985ccafe2f71126ed6c0ac939ffa015a8c0744a24b7aee6d587103fd2f7",
+		TimeTotal:         time.Second,
+		IndexNames:        "[t1:a,t2:b]",
+		CopTasks:          copTasks,
+		ExecDetail:        execDetail,
+		MemMax:            2333,
+		DiskMax:           6666,
+		Prepared:          true,
+		PlanFromCache:     true,
+		PlanFromBinding:   true,
+		HasMoreResults:    true,
+		KVExecDetail:      &tikvExecDetail,
+		WriteSQLRespTotal: 1 * time.Second,
+		ResultRows:        12345,
+		Succ:              true,
+		RewriteInfo: variable.RewritePhaseInfo{
+			DurationRewrite:            3 * time.Nanosecond,
+			DurationPreprocessSubQuery: 2 * time.Nanosecond,
+			PreprocessSubQueries:       2,
+		},
+		ExecRetryCount:    3,
+		ExecRetryTime:     5*time.Second + 100*time.Millisecond,
+		IsExplicitTxn:     true,
+		IsWriteCacheTable: true,
+		UsedStats:         &stmtctx.UsedStatsInfo{},
+		ResourceGroupName: "rg1",
+		RUDetails:         ruDetails,
+		StorageKV:         true,
+		StorageMPP:        false,
+		MemArbitration:    time.Duration(54321).Seconds(),
+	}
+}
+
+func prepareSessionVars() *variable.SessionVars {
+	seVar := variable.NewSessionVars(nil)
+	seVar.User = &auth.UserIdentity{Username: "root", Hostname: "192.168.0.1"}
+	seVar.ConnectionInfo = &variable.ConnectionInfo{ClientIP: "192.168.0.1"}
+	seVar.ConnectionID = 1
+	seVar.SessionAlias = "aliasabc"
+	seVar.CurrentDB = "test"
+	seVar.InRestrictedSQL = true
+	seVar.DurationParse = 10 * time.Nanosecond
+	seVar.DurationCompile = 10 * time.Nanosecond
+	seVar.DurationOptimization = 10 * time.Nanosecond
+	seVar.DurationWaitTS = 3 * time.Nanosecond
+	seVar.StmtCtx = stmtctx.NewStmtCtx()
+	seVar.StmtCtx.WaitLockLeaseTime = 1
+	return seVar
+}
+
+// BenchmarkSlowLogFormatOriginal benchmarks the original SlowLogFormat.
+func BenchmarkSlowLogFormatOriginal(b *testing.B) {
+	seVar := prepareSessionVars()
+	logItems := prepareSlowLogItems()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		_ = seVar.SlowLogFormat(logItems)
+	}
+}
+
+// BenchmarkSlowLogFormatOptimized benchmarks the optimized SlowLogFormat.
+func BenchmarkSlowLogFormatOptimized(b *testing.B) {
+	seVar := prepareSessionVars()
+	logItems := prepareSlowLogItems()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		_ = variable.SlowLogFormatOptimized(seVar, logItems)
+	}
+}
+
+// BenchmarkSlowLogWithSQLExecutionOriginal benchmarks the complete SQL execution flow
+// with slow log printing using the original SlowLogFormat.
+// This test executes real SQL statements and measures the performance impact of slow log formatting.
+// To compare with optimized version, you need to modify SessionVars.SlowLogFormat to use
+// SlowLogFormatOptimized (e.g., via build tag or feature flag) and run BenchmarkSlowLogWithSQLExecutionOptimized.
+func BenchmarkSlowLogWithSQLExecutionOriginal(b *testing.B) {
+	b.StopTimer()
+	b.ReportAllocs()
+
+	// Setup test environment
+	store := testkit.CreateMockStore(b)
+	tk := testkit.NewTestKit(b, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (id int primary key, v int, name varchar(100))")
+	tk.MustExec("insert into t values (1, 10, 'a'), (2, 20, 'b'), (3, 30, 'c'), (4, 40, 'd'), (5, 50, 'e')")
+
+	// Enable slow log for all queries (threshold = 0)
+	tk.MustExec("set tidb_slow_log_threshold=0")
+	tk.MustExec("set global tidb_slow_log_max_per_sec=1000000") // Disable rate limiting
+
+	// Disable slow log rules to use threshold-based matching
+	se := tk.Session()
+	se.GetSessionVars().SlowLogRules = slowlogrule.NewSessionSlowLogRules(&slowlogrule.SlowLogRules{})
+	vardef.GlobalSlowLogRules.Store(&slowlogrule.GlobalSlowLogRules{RulesMap: make(map[int64]*slowlogrule.SlowLogRules)})
+
+	// Use a no-op logger to avoid I/O overhead in benchmark
+	prevLogger := logutil.SlowQueryLogger
+	logutil.SlowQueryLogger = zap.NewNop()
+	defer func() { logutil.SlowQueryLogger = prevLogger }()
+
+	// Prepare SQL statements that will trigger slow log
+	sqls := []string{
+		"select * from t where id = 1",
+		"select * from t where v > 20",
+		"select * from t where name = 'a'",
+		"select count(*) from t",
+		"select id, v, name from t order by id",
+	}
+
+	b.StartTimer()
+	for i := 0; i < b.N; i++ {
+		// Execute SQL - this will trigger slow log printing with original SlowLogFormat
+		sql := sqls[i%len(sqls)]
+		_ = tk.MustQuery(sql)
+	}
+	b.StopTimer()
 }

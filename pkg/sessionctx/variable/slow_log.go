@@ -321,6 +321,46 @@ func kvExecDetailFormat(buf *bytes.Buffer, kvExecDetail *util.ExecDetails) {
 	writeSlowLogItem(buf, SlowLogUnpackedBytesReceivedTiFlashCrossZone, strconv.FormatInt(kvExecDetail.UnpackedBytesReceivedMPPCrossZone, 10))
 }
 
+// kvExecDetailFormatOptimized is an optimized version of kvExecDetailFormat.
+// It uses strings.Builder and efficient formatting functions that write directly to the buffer.
+func (f *slowLogFormatter) kvExecDetailFormatOptimized(kvExecDetail *util.ExecDetails) {
+	writeItem := func(key, value string) {
+		f.buf.WriteString(SlowLogRowPrefixStr)
+		f.buf.WriteString(key)
+		f.buf.WriteString(SlowLogSpaceMarkStr)
+		f.buf.WriteString(value)
+		f.buf.WriteByte('\n')
+	}
+
+	if kvExecDetail == nil {
+		writeItem(SlowLogKVTotal, zeroStr)
+		writeItem(SlowLogPDTotal, zeroStr)
+		writeItem(SlowLogBackoffTotal, zeroStr)
+		writeItem(SlowLogUnpackedBytesSentTiKVTotal, zeroStr)
+		writeItem(SlowLogUnpackedBytesReceivedTiKVTotal, zeroStr)
+		writeItem(SlowLogUnpackedBytesSentTiKVCrossZone, zeroStr)
+		writeItem(SlowLogUnpackedBytesReceivedTiKVCrossZone, zeroStr)
+		writeItem(SlowLogUnpackedBytesSentTiFlashTotal, zeroStr)
+		writeItem(SlowLogUnpackedBytesReceivedTiFlashTotal, zeroStr)
+		writeItem(SlowLogUnpackedBytesSentTiFlashCrossZone, zeroStr)
+		writeItem(SlowLogUnpackedBytesReceivedTiFlashCrossZone, zeroStr)
+		return
+	}
+
+	f.writeItemFloat(SlowLogKVTotal, time.Duration(kvExecDetail.WaitKVRespDuration).Seconds())
+	f.writeItemFloat(SlowLogPDTotal, time.Duration(kvExecDetail.WaitPDRespDuration).Seconds())
+	f.writeItemFloat(SlowLogBackoffTotal, time.Duration(kvExecDetail.BackoffDuration).Seconds())
+
+	f.writeItemInt64(SlowLogUnpackedBytesSentTiKVTotal, kvExecDetail.UnpackedBytesSentKVTotal)
+	f.writeItemInt64(SlowLogUnpackedBytesReceivedTiKVTotal, kvExecDetail.UnpackedBytesReceivedKVTotal)
+	f.writeItemInt64(SlowLogUnpackedBytesSentTiKVCrossZone, kvExecDetail.UnpackedBytesSentKVCrossZone)
+	f.writeItemInt64(SlowLogUnpackedBytesReceivedTiKVCrossZone, kvExecDetail.UnpackedBytesReceivedKVCrossZone)
+	f.writeItemInt64(SlowLogUnpackedBytesSentTiFlashTotal, kvExecDetail.UnpackedBytesSentMPPTotal)
+	f.writeItemInt64(SlowLogUnpackedBytesReceivedTiFlashTotal, kvExecDetail.UnpackedBytesReceivedMPPTotal)
+	f.writeItemInt64(SlowLogUnpackedBytesSentTiFlashCrossZone, kvExecDetail.UnpackedBytesSentMPPCrossZone)
+	f.writeItemInt64(SlowLogUnpackedBytesReceivedTiFlashCrossZone, kvExecDetail.UnpackedBytesReceivedMPPCrossZone)
+}
+
 // SlowLogFormat uses for formatting slow log.
 // The slow log output is like below:
 // # Time: 2019-04-28T15:24:04.309074+08:00
@@ -549,6 +589,440 @@ func (s *SessionVars) SlowLogFormat(logItems *SlowQueryLogItems) string {
 // writeSlowLogItem writes a slow log item in the form of: "# ${key}:${value}"
 func writeSlowLogItem(buf *bytes.Buffer, key, value string) {
 	buf.WriteString(SlowLogRowPrefixStr + key + SlowLogSpaceMarkStr + value + "\n")
+}
+
+// slowLogFormatter is a helper struct for optimized slow log formatting.
+type slowLogFormatter struct {
+	buf     *strings.Builder
+	scratch []byte
+}
+
+const (
+	// slowLogBufferInitialSize is the initial buffer size for slow log formatting.
+	// Based on analysis of real slow logs:
+	//   - Average size: ~4.5 KB (including Plan and Binary_plan fields)
+	//   - Maximum size: ~4.9 KB
+	//   - Plan field: ~1.0-1.5 KB
+	//   - Binary_plan field: ~1.0-1.5 KB
+	// Using 6 KB provides sufficient capacity for most slow logs while avoiding
+	// frequent reallocations. This value balances memory usage and performance.
+	slowLogBufferInitialSize = 6 * 1024 // 6 KB
+)
+
+// newSlowLogFormatter creates a new slowLogFormatter with pre-allocated buffer.
+func newSlowLogFormatter() *slowLogFormatter {
+	buf := &strings.Builder{}
+	buf.Grow(slowLogBufferInitialSize)
+	return &slowLogFormatter{
+		buf:     buf,
+		scratch: make([]byte, 0, 64),
+	}
+}
+
+// writeItem writes a slow log item in the form of: "# ${key}:${value}"
+func (f *slowLogFormatter) writeItem(key, value string) {
+	f.buf.WriteString(SlowLogRowPrefixStr)
+	f.buf.WriteString(key)
+	f.buf.WriteString(SlowLogSpaceMarkStr)
+	f.buf.WriteString(value)
+	f.buf.WriteByte('\n')
+}
+
+// writeItemFloat writes a slow log item with a float64 value directly, avoiding intermediate string allocation.
+func (f *slowLogFormatter) writeItemFloat(key string, v float64) {
+	f.buf.WriteString(SlowLogRowPrefixStr)
+	f.buf.WriteString(key)
+	f.buf.WriteString(SlowLogSpaceMarkStr)
+	f.writeFloat(v)
+	f.buf.WriteByte('\n')
+}
+
+// writeItemInt64 writes a slow log item with an int64 value directly, avoiding intermediate string allocation.
+func (f *slowLogFormatter) writeItemInt64(key string, v int64) {
+	f.buf.WriteString(SlowLogRowPrefixStr)
+	f.buf.WriteString(key)
+	f.buf.WriteString(SlowLogSpaceMarkStr)
+	f.writeInt64(v)
+	f.buf.WriteByte('\n')
+}
+
+// writeFloat writes a float64 value directly to the buffer without creating an intermediate string.
+// This is more efficient than formatFloat when the value is only used once.
+func (f *slowLogFormatter) writeFloat(v float64) {
+	f.scratch = strconv.AppendFloat(f.scratch[:0], v, 'f', -1, 64)
+	f.buf.Write(f.scratch)
+}
+
+// writeFloatG writes a float64 value using 'g' format directly to the buffer without creating an intermediate string.
+// This matches the format used by TaskTimeStats.String() to maintain output consistency.
+func (f *slowLogFormatter) writeFloatG(v float64) {
+	f.scratch = strconv.AppendFloat(f.scratch[:0], v, 'g', -1, 64)
+	f.buf.Write(f.scratch)
+}
+
+// writeTaskTimeStats writes TaskTimeStats directly to the buffer without creating intermediate strings.
+// This is an optimized version of TaskTimeStats.String() that writes directly to f.buf.
+func (f *slowLogFormatter) writeTaskTimeStats(stats execdetails.TaskTimeStats, numCopTasks int, spaceMarkStr, avgStr, p90Str, maxStr, addrStr string) {
+	f.buf.WriteString(avgStr)
+	f.buf.WriteString(spaceMarkStr)
+	f.writeFloatG(stats.AvgTime.Seconds())
+	f.buf.WriteString(" ")
+	if numCopTasks == 1 {
+		f.buf.WriteString(addrStr)
+		f.buf.WriteString(spaceMarkStr)
+		f.buf.WriteString(stats.MaxAddress)
+	} else {
+		f.buf.WriteString(p90Str)
+		f.buf.WriteString(spaceMarkStr)
+		f.writeFloatG(stats.P90Time.Seconds())
+		f.buf.WriteString(" ")
+		f.buf.WriteString(maxStr)
+		f.buf.WriteString(spaceMarkStr)
+		f.writeFloatG(stats.MaxTime.Seconds())
+		f.buf.WriteString(" ")
+		f.buf.WriteString(addrStr)
+		f.buf.WriteString(spaceMarkStr)
+		f.buf.WriteString(stats.MaxAddress)
+	}
+}
+
+// writeInt64 writes an int64 value directly to the buffer without creating an intermediate string.
+// This is more efficient than formatInt64 when the value is only used once.
+func (f *slowLogFormatter) writeInt64(v int64) {
+	f.scratch = strconv.AppendInt(f.scratch[:0], v, 10)
+	f.buf.Write(f.scratch)
+}
+
+// formatUint64 formats a uint64 value efficiently.
+func (f *slowLogFormatter) formatUint64(v uint64) string {
+	f.scratch = strconv.AppendUint(f.scratch[:0], v, 10)
+	return string(f.scratch)
+}
+
+// writeBasicInfo writes basic information like TxnTS, Keyspace, User, ConnID, etc.
+func (f *slowLogFormatter) writeBasicInfo(s *SessionVars, logItems *SlowQueryLogItems) {
+	f.writeItem(SlowLogTxnStartTSStr, f.formatUint64(logItems.TxnTS))
+	if logItems.KeyspaceName != "" {
+		f.writeItem(SlowLogKeyspaceName, logItems.KeyspaceName)
+		f.writeItem(SlowLogKeyspaceID, f.formatUint64(uint64(logItems.KeyspaceID)))
+	}
+
+	if s.User != nil {
+		hostAddress := s.User.Hostname
+		if s.ConnectionInfo != nil {
+			hostAddress = s.ConnectionInfo.ClientIP
+		}
+		// Write user and host directly to f.buf, avoiding intermediate string allocation
+		f.buf.WriteString(SlowLogRowPrefixStr)
+		f.buf.WriteString(SlowLogUserAndHostStr)
+		f.buf.WriteString(SlowLogSpaceMarkStr)
+		f.buf.WriteString(s.User.Username)
+		f.buf.WriteByte('[')
+		f.buf.WriteString(s.User.Username)
+		f.buf.WriteString("] @ ")
+		f.buf.WriteString(s.User.Hostname)
+		f.buf.WriteString(" [")
+		f.buf.WriteString(hostAddress)
+		f.buf.WriteByte(']')
+		f.buf.WriteByte('\n')
+	}
+	if s.ConnectionID != 0 {
+		f.writeItem(SlowLogConnIDStr, f.formatUint64(s.ConnectionID))
+	}
+	if s.SessionAlias != "" {
+		f.writeItem(SlowLogSessAliasStr, s.SessionAlias)
+	}
+}
+
+func (f *slowLogFormatter) writeExecRetryInfo(logItems *SlowQueryLogItems) {
+	if logItems.ExecRetryCount > 0 {
+		f.buf.WriteString(SlowLogRowPrefixStr)
+		f.buf.WriteString(SlowLogExecRetryTime)
+		f.buf.WriteString(SlowLogSpaceMarkStr)
+		f.writeFloat(logItems.ExecRetryTime.Seconds())
+		f.buf.WriteString(" ")
+		f.buf.WriteString(SlowLogExecRetryCount)
+		f.buf.WriteString(SlowLogSpaceMarkStr)
+		f.writeInt64(int64(logItems.ExecRetryCount))
+		f.buf.WriteByte('\n')
+	}
+}
+
+// writeExecutionTimeInfo writes execution-stage timing information of the query, including parse, compile, rewrite,
+// optimize, wait TS, and total query time.
+func (f *slowLogFormatter) writeExecutionTimeInfo(s *SessionVars, logItems *SlowQueryLogItems) {
+	f.writeItemFloat(SlowLogQueryTimeStr, logItems.TimeTotal.Seconds())
+	f.writeItemFloat(SlowLogParseTimeStr, s.DurationParse.Seconds())
+	f.writeItemFloat(SlowLogCompileTimeStr, s.DurationCompile.Seconds())
+
+	// Rewrite time
+	f.buf.WriteString(SlowLogRowPrefixStr)
+	f.buf.WriteString(SlowLogRewriteTimeStr)
+	f.buf.WriteString(SlowLogSpaceMarkStr)
+	f.writeFloat(logItems.RewriteInfo.DurationRewrite.Seconds())
+	if logItems.RewriteInfo.PreprocessSubQueries > 0 {
+		f.buf.WriteString(" ")
+		f.buf.WriteString(SlowLogPreprocSubQueriesStr)
+		f.buf.WriteString(SlowLogSpaceMarkStr)
+		f.writeInt64(int64(logItems.RewriteInfo.PreprocessSubQueries))
+		f.buf.WriteString(" ")
+		f.buf.WriteString(SlowLogPreProcSubQueryTimeStr)
+		f.buf.WriteString(SlowLogSpaceMarkStr)
+		f.writeFloat(logItems.RewriteInfo.DurationPreprocessSubQuery.Seconds())
+	}
+	f.buf.WriteByte('\n')
+
+	f.writeItemFloat(SlowLogOptimizeTimeStr, s.DurationOptimization.Seconds())
+	f.writeItemFloat(SlowLogWaitTSTimeStr, s.DurationWaitTS.Seconds())
+}
+
+// writeUsedStats writes used statistics information.
+func (f *slowLogFormatter) writeUsedStats(logItems *SlowQueryLogItems) {
+	keys := logItems.UsedStats.Keys()
+	if len(keys) > 0 {
+		f.buf.WriteString(SlowLogRowPrefixStr)
+		f.buf.WriteString(SlowLogStatsInfoStr)
+		f.buf.WriteString(SlowLogSpaceMarkStr)
+		firstComma := false
+		for _, id := range keys {
+			usedStatsForTbl := logItems.UsedStats.GetUsedInfo(id)
+			if usedStatsForTbl == nil {
+				continue
+			}
+			if firstComma {
+				f.buf.WriteByte(',')
+			}
+			var statsBuf bytes.Buffer
+			usedStatsForTbl.WriteToSlowLog(&statsBuf)
+			f.buf.WriteString(statsBuf.String())
+			firstComma = true
+		}
+		f.buf.WriteByte('\n')
+	}
+}
+
+// writeCopTasks writes cop tasks information.
+func (f *slowLogFormatter) writeCopTasks(logItems *SlowQueryLogItems) {
+	if logItems.CopTasks == nil {
+		return
+	}
+	f.writeItemInt64(SlowLogNumCopTasksStr, int64(logItems.CopTasks.NumCopTasks))
+	if logItems.CopTasks.NumCopTasks > 0 {
+		// Write ProcessTimeStats directly to f.buf, avoiding intermediate strings
+		f.buf.WriteString(SlowLogRowPrefixStr)
+		f.writeTaskTimeStats(logItems.CopTasks.ProcessTimeStats, logItems.CopTasks.NumCopTasks, SlowLogSpaceMarkStr, SlowLogCopProcAvg, SlowLogCopProcP90, SlowLogCopProcMax, SlowLogCopProcAddr)
+		f.buf.WriteByte('\n')
+		// Write WaitTimeStats directly to f.buf, avoiding intermediate strings
+		f.buf.WriteString(SlowLogRowPrefixStr)
+		f.writeTaskTimeStats(logItems.CopTasks.WaitTimeStats, logItems.CopTasks.NumCopTasks, SlowLogSpaceMarkStr, SlowLogCopWaitAvg, SlowLogCopWaitP90, SlowLogCopWaitMax, SlowLogCopWaitAddr)
+		f.buf.WriteByte('\n')
+
+		// Write backoff information
+		backoffs := make([]string, 0, len(logItems.CopTasks.TotBackoffTimes))
+		for backoff := range logItems.CopTasks.TotBackoffTimes {
+			backoffs = append(backoffs, backoff)
+		}
+		slices.Sort(backoffs)
+
+		taskNum := logItems.CopTasks.NumCopTasks
+		if taskNum == 1 {
+			for _, backoff := range backoffs {
+				backoffPrefix := SlowLogCopBackoffPrefix + backoff + "_"
+				f.buf.WriteString(SlowLogRowPrefixStr)
+				f.buf.WriteString(backoffPrefix)
+				f.buf.WriteString("total_times")
+				f.buf.WriteString(SlowLogSpaceMarkStr)
+				f.writeInt64(int64(logItems.CopTasks.TotBackoffTimes[backoff]))
+				f.buf.WriteString(" ")
+				f.buf.WriteString(backoffPrefix)
+				f.buf.WriteString("total_time")
+				f.buf.WriteString(SlowLogSpaceMarkStr)
+				f.writeFloat(logItems.CopTasks.BackoffTimeStatsMap[backoff].TotTime.Seconds())
+				f.buf.WriteByte('\n')
+			}
+		} else {
+			for _, backoff := range backoffs {
+				backoffPrefix := SlowLogCopBackoffPrefix + backoff + "_"
+				backoffTimeStats := logItems.CopTasks.BackoffTimeStatsMap[backoff]
+				f.buf.WriteString(SlowLogRowPrefixStr)
+				f.buf.WriteString(backoffPrefix)
+				f.buf.WriteString("total_times")
+				f.buf.WriteString(SlowLogSpaceMarkStr)
+				f.writeInt64(int64(logItems.CopTasks.TotBackoffTimes[backoff]))
+				f.buf.WriteString(" ")
+				f.buf.WriteString(backoffPrefix)
+				f.buf.WriteString("total_time")
+				f.buf.WriteString(SlowLogSpaceMarkStr)
+				f.writeFloat(backoffTimeStats.TotTime.Seconds())
+				f.buf.WriteString(" ")
+				f.buf.WriteString(backoffPrefix)
+				f.buf.WriteString("max_time")
+				f.buf.WriteString(SlowLogSpaceMarkStr)
+				f.writeFloat(backoffTimeStats.MaxTime.Seconds())
+				f.buf.WriteString(" ")
+				f.buf.WriteString(backoffPrefix)
+				f.buf.WriteString("max_addr")
+				f.buf.WriteString(SlowLogSpaceMarkStr)
+				f.buf.WriteString(backoffTimeStats.MaxAddress)
+				f.buf.WriteString(" ")
+				f.buf.WriteString(backoffPrefix)
+				f.buf.WriteString("avg_time")
+				f.buf.WriteString(SlowLogSpaceMarkStr)
+				f.writeFloat(backoffTimeStats.AvgTime.Seconds())
+				f.buf.WriteString(" ")
+				f.buf.WriteString(backoffPrefix)
+				f.buf.WriteString("p90_time")
+				f.buf.WriteString(SlowLogSpaceMarkStr)
+				f.writeFloat(backoffTimeStats.P90Time.Seconds())
+				f.buf.WriteByte('\n')
+			}
+		}
+	}
+}
+
+// writeMemoryAndDiskInfo writes memory and disk usage information.
+func (f *slowLogFormatter) writeMemoryAndDiskInfo(logItems *SlowQueryLogItems) {
+	if logItems.MemMax > 0 {
+		f.writeItemInt64(SlowLogMemMax, logItems.MemMax)
+	}
+	if logItems.MemArbitration > 0 {
+		f.writeItemFloat(SlowLogMemArbitration, logItems.MemArbitration)
+	}
+	if logItems.DiskMax > 0 {
+		f.writeItemInt64(SlowLogDiskMax, logItems.DiskMax)
+	}
+}
+
+// writePlanFlags writes plan-related flags (Prepared, PlanFromCache, PlanFromBinding, HasMoreResults).
+func (f *slowLogFormatter) writePlanFlags(logItems *SlowQueryLogItems) {
+	f.writeItem(SlowLogPrepared, strconv.FormatBool(logItems.Prepared))
+	f.writeItem(SlowLogPlanFromCache, strconv.FormatBool(logItems.PlanFromCache))
+	f.writeItem(SlowLogPlanFromBinding, strconv.FormatBool(logItems.PlanFromBinding))
+	f.writeItem(SlowLogHasMoreResults, strconv.FormatBool(logItems.HasMoreResults))
+}
+
+// writePlanContent writes plan content (Plan, PlanDigest, BinaryPlan).
+func (f *slowLogFormatter) writePlanContent(logItems *SlowQueryLogItems) {
+	if len(logItems.Plan) != 0 {
+		f.writeItem(SlowLogPlan, logItems.Plan)
+	}
+	if len(logItems.PlanDigest) != 0 {
+		f.writeItem(SlowLogPlanDigest, logItems.PlanDigest)
+	}
+	if len(logItems.BinaryPlan) != 0 {
+		f.writeItem(SlowLogBinaryPlan, logItems.BinaryPlan)
+	}
+}
+
+// writeRUAndCPUInfo writes RU and CPU usage information.
+func (f *slowLogFormatter) writeRUAndCPUInfo(logItems *SlowQueryLogItems) {
+	if logItems.ResourceGroupName != "" {
+		f.writeItem(SlowLogResourceGroup, logItems.ResourceGroupName)
+	}
+	if rru := logItems.RUDetails.RRU(); rru > 0.0 {
+		f.writeItemFloat(SlowLogRRU, rru)
+	}
+	if wru := logItems.RUDetails.WRU(); wru > 0.0 {
+		f.writeItemFloat(SlowLogWRU, wru)
+	}
+	if waitRUDuration := logItems.RUDetails.RUWaitDuration(); waitRUDuration > time.Duration(0) {
+		f.writeItemFloat(SlowLogWaitRUDuration, waitRUDuration.Seconds())
+	}
+	if logItems.CPUUsages.TidbCPUTime > time.Duration(0) {
+		f.writeItemFloat(SlowLogTidbCPUUsageDuration, logItems.CPUUsages.TidbCPUTime.Seconds())
+	}
+	if logItems.CPUUsages.TikvCPUTime > time.Duration(0) {
+		f.writeItemFloat(SlowLogTikvCPUUsageDuration, logItems.CPUUsages.TikvCPUTime.Seconds())
+	}
+}
+
+// writeResultInfo writes other miscellaneous information.
+func (f *slowLogFormatter) writeResultInfo(logItems *SlowQueryLogItems) {
+	f.writeItemInt64(SlowLogResultRows, logItems.ResultRows)
+
+	// Warnings
+	if len(logItems.Warnings) > 0 {
+		f.buf.WriteString(SlowLogRowPrefixStr)
+		f.buf.WriteString(SlowLogWarnings)
+		f.buf.WriteString(SlowLogSpaceMarkStr)
+		var warnBuf bytes.Buffer
+		jsonEncoder := json.NewEncoder(&warnBuf)
+		jsonEncoder.SetEscapeHTML(false)
+		err := jsonEncoder.Encode(logItems.Warnings)
+		if err != nil {
+			f.buf.WriteString(err.Error())
+		} else {
+			f.buf.WriteString(warnBuf.String())
+		}
+	}
+
+	f.writeItem(SlowLogSucc, strconv.FormatBool(logItems.Succ))
+}
+
+// writeSQL writes the SQL statement.
+func (f *slowLogFormatter) writeSQL(s *SessionVars, logItems *SlowQueryLogItems) {
+	if s.CurrentDBChanged {
+		f.buf.WriteString("use ")
+		f.buf.WriteString(strings.ToLower(s.CurrentDB))
+		f.buf.WriteString(";\n")
+		s.CurrentDBChanged = false
+	}
+
+	f.buf.WriteString(logItems.SQL)
+	if len(logItems.SQL) == 0 || logItems.SQL[len(logItems.SQL)-1] != ';' {
+		f.buf.WriteByte(';')
+	}
+}
+
+// SlowLogFormatOptimized is an optimized version of SlowLogFormat.
+// Optimization strategies:
+// 1. Use strings.Builder instead of bytes.Buffer for string-only operations
+// 2. Pre-allocate buffer capacity to reduce reallocations
+// 3. Reduce fmt.Sprintf calls, use strconv directly
+// 4. Reuse scratch buffers for number formatting
+func SlowLogFormatOptimized(s *SessionVars, logItems *SlowQueryLogItems) string {
+	f := newSlowLogFormatter()
+
+	f.writeBasicInfo(s, logItems)
+	f.writeExecRetryInfo(logItems)
+	f.writeExecutionTimeInfo(s, logItems)
+	if execDetailStr := logItems.ExecDetail.String(); len(execDetailStr) > 0 {
+		f.buf.WriteString(SlowLogRowPrefixStr)
+		f.buf.WriteString(execDetailStr)
+		f.buf.WriteByte('\n')
+	}
+	if len(s.CurrentDB) > 0 {
+		f.writeItem(SlowLogDBStr, strings.ToLower(s.CurrentDB))
+	}
+	if len(logItems.IndexNames) > 0 {
+		f.writeItem(SlowLogIndexNamesStr, logItems.IndexNames)
+	}
+	f.writeItem(SlowLogIsInternalStr, strconv.FormatBool(s.InRestrictedSQL))
+	if len(logItems.Digest) > 0 {
+		f.writeItem(SlowLogDigestStr, logItems.Digest)
+	}
+	f.writeUsedStats(logItems)
+	f.writeCopTasks(logItems)
+	f.writeMemoryAndDiskInfo(logItems)
+	f.writePlanFlags(logItems)
+	f.kvExecDetailFormatOptimized(logItems.KVExecDetail)
+	f.writeItemFloat(SlowLogWriteSQLRespTotal, logItems.WriteSQLRespTotal.Seconds())
+	f.writeResultInfo(logItems)
+	f.writeItem(SlowLogIsExplicitTxn, strconv.FormatBool(logItems.IsExplicitTxn))
+	f.writeItem(SlowLogIsSyncStatsFailed, strconv.FormatBool(logItems.IsSyncStatsFailed))
+	if s.StmtCtx.WaitLockLeaseTime > 0 {
+		f.writeItem(SlowLogIsWriteCacheTable, strconv.FormatBool(logItems.IsWriteCacheTable))
+	}
+	f.writePlanContent(logItems)
+	f.writeRUAndCPUInfo(logItems)
+	f.writeItem(SlowLogStorageFromKV, strconv.FormatBool(logItems.StorageKV))
+	f.writeItem(SlowLogStorageFromMPP, strconv.FormatBool(logItems.StorageMPP))
+	if logItems.PrevStmt != "" {
+		f.writeItem(SlowLogPrevStmt, logItems.PrevStmt)
+	}
+	f.writeSQL(s, logItems)
+
+	return f.buf.String()
 }
 
 // SlowLogFieldAccessor defines how to get or set a specific field in SlowQueryLogItems.

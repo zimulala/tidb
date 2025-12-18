@@ -552,17 +552,42 @@ type TaskTimeStats struct {
 
 // String returns the TaskTimeStats fields as a string.
 func (s TaskTimeStats) String(numCopTasks int, spaceMarkStr, avgStr, p90Str, maxStr, addrStr string) string {
-	if numCopTasks == 1 {
-		return fmt.Sprintf("%v%v%v %v%v%v",
-			avgStr, spaceMarkStr, s.AvgTime.Seconds(),
-			addrStr, spaceMarkStr, s.MaxAddress)
+	var buf strings.Builder
+	// Pre-allocate capacity for typical output size
+	buf.Grow(128)
+
+	formatFloat := func(f float64) string {
+		// Use 'g' format to match fmt.Sprintf("%v", float64) behavior
+		return strconv.FormatFloat(f, 'g', -1, 64)
 	}
 
-	return fmt.Sprintf("%v%v%v %v%v%v %v%v%v %v%v%v",
-		avgStr, spaceMarkStr, s.AvgTime.Seconds(),
-		p90Str, spaceMarkStr, s.P90Time.Seconds(),
-		maxStr, spaceMarkStr, s.MaxTime.Seconds(),
-		addrStr, spaceMarkStr, s.MaxAddress)
+	if numCopTasks == 1 {
+		buf.WriteString(avgStr)
+		buf.WriteString(spaceMarkStr)
+		buf.WriteString(formatFloat(s.AvgTime.Seconds()))
+		buf.WriteString(" ")
+		buf.WriteString(addrStr)
+		buf.WriteString(spaceMarkStr)
+		buf.WriteString(s.MaxAddress)
+		return buf.String()
+	}
+
+	buf.WriteString(avgStr)
+	buf.WriteString(spaceMarkStr)
+	buf.WriteString(formatFloat(s.AvgTime.Seconds()))
+	buf.WriteString(" ")
+	buf.WriteString(p90Str)
+	buf.WriteString(spaceMarkStr)
+	buf.WriteString(formatFloat(s.P90Time.Seconds()))
+	buf.WriteString(" ")
+	buf.WriteString(maxStr)
+	buf.WriteString(spaceMarkStr)
+	buf.WriteString(formatFloat(s.MaxTime.Seconds()))
+	buf.WriteString(" ")
+	buf.WriteString(addrStr)
+	buf.WriteString(spaceMarkStr)
+	buf.WriteString(s.MaxAddress)
+	return buf.String()
 }
 
 // FormatFloatFields returns the AvgTime, P90Time and MaxTime in float format.
