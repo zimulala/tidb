@@ -1,4 +1,4 @@
-# TiDB TopSQL RU 扩展设计
+# TiDB TopRU 设计
 
 - Author(s): [Your Name](http://github.com/your-github-id)
 - Discussion PR: https://github.com/pingcap/tidb/pull/XXX
@@ -36,39 +36,45 @@ TiDB X（Next-gen TiDB Cloud）主要面向客户销售并按 **RU（Request Uni
 
 **核心场景**：当集群存在 **MAXRU 限制**且持续达到上限时（通常会触发告警通知用户），用户登录后需要能快速看到**是哪条/哪些 SQL 在该时间窗口内消耗 RU 最高**，从而人工判断是否需要对该 SQL 执行 **Terminate**，以尽快解除 RU 压力并恢复服务。
 
-当前 TiDB 已具备慢日志、TopSQL、Statement Summary 等能力，但在“按 RU 实时定位高消耗 SQL（尤其是执行中 SQL）”方面仍存在不足，因此本设计将 TopRU 作为 TopSQL 的扩展来补齐该能力。
+当前 TiDB 已具备慢日志、Statement Summary 等能力，但在"按 RU 实时定位高消耗 SQL（尤其是执行中 SQL）"方面仍存在不足，因此本设计引入 **TopRU** 功能来补齐该能力。
+
+**现有方案的局限**：
 
 1. **慢日志 (Slow Log)**: 记录执行时间超过阈值的 SQL,包含完整的 RU 信息,但仅针对已完成的慢查询,无法实时反映正在执行中的 SQL RU 消耗情况。
 
-2. **TopSQL**: 主要聚焦 CPU 时间消耗,按 SQL Digest + Plan Digest 维度聚合,提供了完善的采集、聚合和上报机制,但未提供按 RU 消耗排序的能力,且缺少用户维度的聚合。
+2. **Statement Summary**: 提供 SQL 级别的聚合统计，但存在以下局限：
+   - **持久化周期长**：默认 30 分钟持久化一次到系统表，O11y 系统和前端通过查询持久化数据展示
+   - **无法直接访问实时数据**：无法访问 TiDB 内存中的实时数据，无法满足"分钟级实时定位高 RU SQL"的需求
+   - **无法反映执行中 SQL**：仅统计已完成的 SQL，无法实时反映正在执行中的 SQL RU 消耗
 
-3. **Statement Summary**: 提供 SQL 级别的聚合统计,但更新频率较低(默认 30 秒),且同样仅统计已完成的 SQL。
+**TopRU 设计要点**：
 
-**设计决策:**
+为了实现高效的 RU 可观测性，TopRU 在设计上：
 
-考虑到 TiDB 可观测性模块的统一性、实现的复杂性和后续的扩展性,我们决定**将 TopRU 功能作为 TopSQL 的扩展**来实现,而不是创建一个新的独立模块。这样做的好处是:
+1. **复用可观测性基础设施**: 利用现有的采集、聚合和上报机制，保持系统架构的统一性
+2. **最小化实现复杂度**: 通过扩展现有数据结构来支持 RU 统计，避免重复建设
+3. **良好的扩展性**: 为后续添加其他维度的资源指标预留空间
 
-1. **统一性**: 复用 TopSQL 现有的采集、聚合和上报基础设施,保持可观测性模块的统一
-2. **实现简单**: 只需要在 TopSQL 现有数据结构中添加 RU 和 user 字段,无需重新设计数据模型
-3. **扩展性好**: 在 TopSQL 基础上扩展更自然,后续可以继续添加其他维度的指标
-
-因此,我们在 TopSQL 中扩展以下功能:
-- 添加 RU 相关字段(TotalRU)到 TopSQL 数据模型
-- 添加 user 字段到聚合键,支持按 `(user, sql_digest, plan_digest)` 维度聚合
-- 实现定期采样机制（**本地 1 秒采集 + 用户侧默认 60 秒刷新**，可配置为 15s/30s/60s）,支持执行中 SQL 的实时 RU 统计
-- 扩展查询接口,支持按 RU 消耗排序
+**TopRU 核心能力**：
+- 支持按 RU 消耗排序和查询
+- 支持按用户维度聚合：`(user, sql_digest, plan_digest)` 三元组
+- 实时采样机制：本地 1 秒采集 + 用户侧可配置刷新间隔（默认 60 秒，可配置为 15s/30s/60s）
+- 支持执行中 SQL 的 RU 统计
 
 ### 1.2 Goals
 
-TopSQL RU 扩展的核心目标是:
+TopRU 的核心目标是:
 
-1. **按累计 RU 消耗排序**: 在 TopSQL 中支持按累计 RU 消耗进行排序,而不仅仅是 CPU 时间排序,能够识别出即使执行时间短但 RU 消耗大的 SQL。
+1. **按累计 RU 消耗排序**: 支持按累计 RU 消耗进行排序和查询,能够识别出即使执行时间短但 RU 消耗大的 SQL。
 
-2. **支持用户维度聚合**: 在 TopSQL 现有 `(sql_digest, plan_digest)` 聚合基础上,扩展为 `(user, sql_digest, plan_digest)` 维度聚合,便于按用户维度进行资源治理和配额管理。
+2. **支持用户维度聚合**: 按 `(user, sql_digest, plan_digest)` 三元组维度聚合,便于按用户维度进行资源治理和配额管理。
 
-3. **实时 RU 统计**: 通过 **1 秒本地采样** 读取执行中 SQL 的 RU 增量并写入时间桶；用户侧由 vector-extensions **按刷新间隔**拉取 TopSQL 查询结果（默认 60 秒，可配置 15s/30s/60s），从而在用户视角实现“分钟级可见、可按需调优到更实时”的 TopRU。
+3. **实时 RU 统计与历史查询**: 
+   - 通过 **1 秒本地采样** 读取执行中 SQL 的 RU 增量并写入时间桶
+   - 支持查询最近一段时间（如 1 小时、24 小时）的 RU 消耗历史数据和趋势
+   - 用户侧由 vector-extensions **按刷新间隔**拉取 TopRU 查询结果（默认 60 秒，可配置 15s/30s/60s），实现"分钟级可见、可按需调优到更实时"的效果
 
-4. **保持 TopSQL 现有能力**: 扩展不影响 TopSQL 现有的 CPU 时间统计、执行次数统计等功能,两者可以并存。
+4. **兼容现有可观测性能力**: TopRU 与现有的 CPU 时间统计、执行次数统计等功能互不影响,可以并存。
 
 ### 1.3 Non-Goals
 
@@ -79,15 +85,12 @@ TopSQL RU 扩展的核心目标是:
    - Billing 侧 RU 可能包含计费口径的聚合/取整/折扣/多维度归因等逻辑
    - 因此 **TopRU 的 RU 与 Billing RU 不保证一致**,本期不做“对齐计费口径”的工作
 
-2. **执行中 TopRU 一定可展示完整 SQL query / SQL statement 文本**:
-   - 对于 TopRU 列表中的执行中 SQL,即使已消耗大量 RU,也可能因为 SQL 文本/元信息尚未注册或无法获取而只能展示 digest 维度信息
-   - 本期目标聚焦于“定位高 RU 的 SQL（digest/plan/user）与趋势/增量”,不保证对每条执行中 SQL 都能展示可读的 SQL 文本
+2. **执行中 TopRU 一定可展示完整 slow query / SQL statement 相关信息**:
+   - 对于 TopRU 列表中的执行中 SQL,即使已消耗大量 RU,也可能因为对应 SQL 尚未完成时，无法获取到对应 slow query 或者 statement summary 相关详细信息。
 
-3. **RU Baseline 与历史对比**: 基于历史数据提供 RU 消耗 baseline 对比功能,作为后续扩展方向。
+3. **RU Baseline 智能对比**: 基于长期历史数据自动计算 RU 消耗 baseline（如 P95、平均值等），并自动标识当前 RU 消耗相对 baseline 的偏差程度、提供异常评分等高级分析功能。本期提供基础的历史数据查询能力（见 Goal 3），智能 baseline 对比作为后续扩展方向。
 
-4. **异常检测与趋势分析**: 自动检测 RU 消耗异常并生成告警的功能,作为后续扩展方向。
-
-5. **跨集群/多租户视图**: 本次仅设计单集群内的 RU 统计能力。
+4. **异常检测与自动告警**: 自动检测 RU 消耗异常并生成告警的功能,作为后续扩展方向。
 
 ## 2. Project Management
 
@@ -103,8 +106,8 @@ TopSQL RU 扩展的核心目标是:
   - 实现 RU 数据的聚合逻辑
   - 更新 protobuf 消息定义
   
-- **Phase 3**: 查询接口扩展(2 周)
-  - 扩展 TopSQL 查询接口支持按 RU 排序
+- **Phase 3**: 查询接口实现(2 周)
+  - 实现 TopRU 查询接口，支持按 RU 排序
   - 支持按 user 维度查询
   - 实现 RU Share Percent 计算
   
@@ -114,9 +117,9 @@ TopSQL RU 扩展的核心目标是:
 
 ### 2.2 交付物
 
-1. 实现代码: 在 `pkg/util/topsql/` 目录下扩展现有实现
-2. 查询接口: 扩展 TopSQL 的查询接口支持 RU 排序
-3. 配置参数: 相关系统变量与控制参数(复用 TopSQL 现有配置)
+1. 实现代码: 在 `pkg/util/topsql/` 目录下实现（复用现有可观测性基础设施）
+2. 查询接口: 提供 TopRU 查询接口，支持按 RU 排序
+3. 配置参数: 相关系统变量与控制参数（复用现有可观测性配置）
 4. 测试用例: 单元测试与集成测试
 5. 设计文档: 本文档
 
@@ -124,37 +127,38 @@ TopSQL RU 扩展的核心目标是:
 
 ### 3.1 功能与语义定义
 
-#### 3.1.1 TopSQL RU 扩展的精确定义
+#### 3.1.1 TopRU 的精确定义
 
-**TopSQL RU 扩展**是指在 TopSQL 现有功能基础上,添加 RU (Request Unit) 字段和 user 字段,支持按 RU 消耗排序和按用户维度聚合。
+**TopRU** 是 TiDB 提供的按 RU 消耗排序和查询 SQL 的可观测性功能，支持按用户维度聚合，帮助用户快速定位高 RU 消耗的 SQL。
 
 **RU 定义**: RU (Request Unit) 表示 SQL 执行过程中累计的资源消耗。RU 包括读请求和写请求消耗的总和,通过 `util.RUDetails` 的 `RRU()` 和 `WRU()` 方法获取,最终计算为 `TotalRU = RRU + WRU`。
 
 **RU 采集时机**（详细见 `3.2.1`）:
-- 三层定期采样: **1s 本地采集 → 60s 上报/持久化 → 用户刷新(默认 60s，可配 15/30/60)**，均写入 TopSQL 时间桶(`PrecisionSeconds`)
+- 三层定期采样: **1s 本地采集 → 60s 上报/持久化 → 用户刷新(默认 60s，可配 15/30/60)**，均写入时间桶（基于 `PrecisionSeconds` 配置）
 - 执行完成时补采一次,保证最终值准确
 
 **聚合维度**:
-- 扩展后的聚合键为 `(user, sql_digest, plan_digest)` 三元组
+- TopRU 的聚合键为 `(user, sql_digest, plan_digest)` 三元组
 - `user`: 执行 SQL 的用户名,从 `SessionVars.User.Username` 获取
 - `sql_digest`: SQL Digest,用于标识 SQL 语句模式
 - `plan_digest`: Plan Digest,用于标识执行计划
 
-#### 3.1.2 与现有 TopSQL 功能的关系
+#### 3.1.2 TopRU 的关键特性
 
-| 维度 | TopSQL (现有) | TopSQL RU 扩展 |
-|------|--------------|----------------|
-| **排序依据** | CPU 时间 | CPU 时间 或 RU 消耗(可选) |
-| **统计对象** | 已完成的 SQL | 已完成的 SQL(不变) |
-| **更新频率** | 实时(基于 PrecisionSeconds) | 实时(复用现有机制) |
-| **聚合维度** | SQL Digest + Plan Digest | User + SQL Digest + Plan Digest |
-| **时间窗口** | 基于 ReportIntervalSeconds | 复用现有时间窗口机制 |
-| **数据保留** | 内存中短期保留 | 复用现有保留机制 |
+| 特性 | TopRU |
+|------|-------|
+| **排序依据** | RU 消耗（累计 RRU + WRU） |
+| **统计对象** | 已完成的 SQL + 执行中的 SQL（通过定期采样） |
+| **更新频率** | 本地 1 秒采集，用户侧默认 60 秒刷新（可配置 15/30/60s） |
+| **聚合维度** | User + SQL Digest + Plan Digest（三元组） |
+| **时间窗口** | 基于时间桶机制（PrecisionSeconds），支持历史数据查询 |
+| **数据保留** | 内存中短期保留，支持查询最近时间段的数据 |
 
-**扩展的核心价值**:
-1. **资源视角**: 在现有 CPU 时间排序基础上,增加按 RU 排序的能力,更符合资源治理需求
-2. **用户维度**: 增加用户维度聚合,支持按用户进行资源配额管理和审计
-3. **统一实现**: 复用 TopSQL 现有的采集、聚合和上报机制,降低实现复杂度
+**TopRU 的核心价值**:
+1. **RU 视角**: 提供按 RU 消耗排序的能力，直接对应计费维度，更符合资源治理需求
+2. **用户维度**: 支持按用户维度聚合，便于按用户进行资源配额管理和审计
+3. **实时性**: 1 秒本地采样 + 可配置刷新间隔，满足实时排障需求
+4. **执行中 SQL**: 支持观测正在执行的 SQL 的 RU 消耗，弥补慢日志和 Statement Summary 的不足
 
 ### 3.2 聚合与排序模型
 
@@ -169,8 +173,8 @@ TopSQL RU 扩展的核心目标是:
 1. **本地定期采样** (执行中 SQL):
    - 在 SQL 执行过程中,每 1 秒定期采集一次 RU 数据
    - 通过后台 goroutine 定期检查正在执行的 SQL,读取其 `util.RUDetails` 中的当前 RU 值
-   - 采集点: 在 TopSQL reporter 内新增独立的 RU 采集 worker(1s ticker),定期扫描所有活跃的 SQL 执行
-   - 采集到的 RU 数据立即更新到本地时间桶中
+   - 采集点: 下沉到 `stmtstats.aggregator` 的 1s ticker，在 `m.aggregate()` 后追加 `m.ruAggregate()`（同一 tick 内完成 stmtstats 聚合与 RU 采样）
+   - 采集到的 RU 增量先累加到 ruIncrementBuffer；每 10s 过滤 TopK/user 后再落桶到 `collecting.ruRecords`
 
 2. **上报/持久化采样**:
    - 每 60 秒将本地时间桶的 RU 数据上报给其他组件用于持久化和管理
@@ -180,7 +184,7 @@ TopSQL RU 扩展的核心目标是:
 
 3. **用户查询刷新** (默认 60 秒，可配置 15s/30s/60s):
    - **说明**: 用户侧刷新在 vector-extensions 组件中处理
-   - TopSQL 提供查询接口,返回本地时间桶的 RU 数据
+   - TopRU 提供查询接口,返回本地时间桶的 RU 数据
    - vector-extensions 组件按刷新间隔拉取并刷新用户可见的数据（默认 60 秒，可配置 15s/30s/60s）
    - 本文档仅在此处提及,详细实现见 vector-extensions 组件文档
 
@@ -191,91 +195,88 @@ TopSQL RU 扩展的核心目标是:
 
 **实现方案**:
 
-#### 3.2.1.1 活跃 SQL 获取机制
+#### 3.2.1.1 活跃 SQL 的执行上下文管理
 
-**复用 stmtstats aggregator**:
+**三层缓冲架构**：
 
-TopSQL 已经通过 `stmtstats.aggregator` 管理所有活跃的 `StatementStats` 实例。我们可以复用这个机制来获取活跃的 SQL 执行,无需新建独立的管理结构。
+为了解决内存控制问题，TopRU 采用三层缓冲设计：
 
-**aggregator 机制回顾**:
-
-```go
-// aggregator 已经管理了所有 StatementStats
-type aggregator struct {
-    statsSet   sync.Map // map[*StatementStats]struct{} - 所有注册的 StatementStats
-    collectors sync.Map // map[Collector]struct{}
-}
-
-// StatementStats 在创建时自动注册到 globalAggregator
-func CreateStatementStats() *StatementStats {
-    stats := &StatementStats{...}
-    globalAggregator.register(stats)  // 自动注册
-    return stats
-}
-
-// aggregator 定期(1秒)遍历所有 StatementStats,收集数据
-func (m *aggregator) aggregate() {
-    m.statsSet.Range(func(statsR, _ any) bool {
-        stats := statsR.(*StatementStats)
-        if stats.Finished() {
-            m.unregister(stats)  // 自动清理已完成的
-        }
-        total.Merge(stats.Take())  // 收集数据
-        return true
-    })
-}
+```
+层级          频率    数据结构                     对象类型       内存控制
+─────────────────────────────────────────────────────────────────
+1. executionContext  实时   StatementStats中           上下文      每 session 1 个
+                            └─ ExecutionContext
+                            
+2. ruIncrementBuffer 1s    map[UserSQLPlan]           轻量级      上限保护
+                            └─ RUIncrement (24字节)
+                            
+3. ruRecords        10s    map[UserSQLPlan]           重对象      100 users × 200 条
+                            └─ record (100+字节)
+                               └─ tsItem
 ```
 
-**扩展 StatementStats 支持 RU 采集**:
+**为什么不能直接写 ruRecords？**
 
-为了支持 RU 定期采集,需要在 `StatementStats` 中扩展,存储当前执行的上下文信息。
+1. **内存膨胀风险**：
+   - 60s 上报周期内可能有数千个 `(user, sql, plan)` 组合
+   - 直接创建 record/tsItem：60s × 1000 = **6 MB+**
+   - 先 buffer 再过滤：100 × 200 = **2 MB**
 
-**为什么需要 activeExecution（而不是直接扩展 data 字段）？**
+2. **对象复杂度差异**：
+   - `RUIncrement`：24 字节（轻量级）
+   - `record + tsItem`：100+ 字节（重对象，包含 map、slice）
 
-有三个主要原因：**数据生命周期和处理频率不同**、**数据结构限制**和**Key 维度不同**。
+3. **TopN 过滤时机**：
+   - 每 1s 采集：可能采集到低 RU 的 SQL
+   - 每 10s 过滤：只保留每个 user 的 Top 200
 
-1. **数据生命周期和处理频率不同**:
-   ```go
-   // aggregator 每1秒调用一次 Take(),取走数据并清空
-   func (s *StatementStats) Take() StatementStatsMap {
-       s.mu.Lock()
-       defer s.mu.Unlock()
-       data := s.data
-       s.data = StatementStatsMap{}  // 清空！
-       return data
-   }
-   ```
+**关键概念区分**：
 
-   **数据流对比**:
-   - **CPU 时间数据流**: `StatementStats.data` → `Take()` → `stmtStatsBuffer` → `processStmtStatsData()` → `collecting.records`
-   - **RU 数据期望流**: 需要在执行过程中持续访问,但如果通过 `data` 字段,会进入上述 CPU 时间数据流
+在 RU 采集中，需要区分以下概念：
 
-   **问题分析**:
-   - 如果 RU 数据也通过 `data` 字段流转,会与 CPU 时间数据混在一起
-   - `processStmtStatsData()` 按 `(sql_digest, plan_digest)` 处理,不支持 `(user, sql_digest, plan_digest)`
-   - RU 采样周期调整为 1 秒,与 CPU 时间收集周期对齐
-   - RU 数据会被 `Take()` 取走,导致采样过程中间状态丢失
+1. **`aggregator.statsSet`**（活跃 Session 集合）：
+   - 包含所有**活跃 session** 的 `StatementStats`（`Finished() == false`）
+   - 每个 session 创建时注册到 `globalAggregator.statsSet`
+   - Session 活跃 ≠ 正在执行 SQL
+   - Session 可能在两个 SQL 之间的空闲状态、等待用户输入、或在事务中但未执行 SQL
 
-2. **data 存储的是聚合后的统计数据,不能包含执行上下文**:
-   - `data` 存储的是 `StatementStatsItem`(聚合后的统计数据)
-   - `StatementStatsItem` 会被序列化并通过 protobuf 传输到 DataSink
-   - 不能包含 `context.Context`(无法序列化)
-   - 不能包含中间状态(`LastRUSample`)用于计算 RU 差值(原子操作状态)
-   - RU 采样需要访问 `util.RUDetails` 上下文,计算增量值
+2. **`StatementStats.executionContext`**（当前执行上下文）：
+   - 标记该 session **当前是否正在执行 SQL**
+   - `executionContext != nil` → 正在执行 SQL
+   - `executionContext == nil` → 空闲（session 活跃但没有执行 SQL）
+   - 存储执行上下文（`context.Context`）和 RU 采样状态
+
+3. **`ruIncrementBuffer`**（轻量级中间缓冲）：
+   - 1s 采样的 RU 增量先累加到这里（不创建 record/tsItem）
+   - 每 10s 清空一次，按 user TopK 过滤后写入 `ruRecords`
+   - 作用：避免直接创建大量重对象导致内存膨胀
+
+4. **`collecting.ruRecords`**（最终时间桶存储）：
+   - 存储经过 TopK 过滤的 RU 数据（创建 record/tsItem 重对象）
+   - 每 60s 上报一次
+   - 内存可控：100 users × 200 条 = 20,000 条上限
+
+**为什么需要 executionContext（而不是直接扩展 data 字段）？**
+
+有三个主要原因：
+
+1. **数据生命周期不同**:
+   - `data` 字段会被 `Take()` 每秒取走并清空
+   - 执行上下文需要在 SQL 执行期间持续存在
+   - RU 采样的中间状态（`LastRUSample`）不能被清空
+
+2. **data 不能包含执行上下文**:
+   - `data` 存储的是聚合后的统计数据（`StatementStatsItem`）
+   - `StatementStatsItem` 需要序列化并通过 protobuf 传输
+   - `context.Context` 无法序列化
+   - RU 采样需要访问 `util.RUDetails` 上下文
 
 3. **Key 维度不同**:
-   - `data` 的 key 是 `SQLPlanDigest` = `(sql_digest, plan_digest)`,不包含 `user`
-   - RU 统计需要按 `(user, sql_digest, plan_digest)` 维度聚合,以支持按用户进行资源治理
-   - 即使扩展 `data` 的 key,也无法区分 CPU 时间和 RU 数据流
-   - RU 数据需要独立的 `collecting.ruRecords` 来存储和管理(数据会被 Take() 取走、不能存储执行上下文)
+   - `data` 的 key 是 `(sql_digest, plan_digest)`
+   - RU 统计需要 `(user, sql_digest, plan_digest)` 三元组
+   - RU 数据需要独立的存储结构
 
-**因此,需要新建 `activeExecution` 来存储**:
-   - 执行上下文(`context.Context`)用于定期采样时读取 `util.RUDetails`
-   - 中间状态(`LastRUSample`)用于计算 RU 差值
-   - 这些数据需要在执行过程中持续存在,不能被 `Take()` 取走
-   - 不会被序列化,只在内存中使用
-
-**设计方案**:
+**ExecutionContext 结构设计**：
 
 ```go
 // 扩展 StatementStats 结构
@@ -284,64 +285,66 @@ type StatementStats struct {
     finished *atomic.Bool
     mu       sync.Mutex
     
-    // 新增: 当前活跃执行的上下文信息(用于 RU 采样,不会被 Take() 取走)
-    //
-    // 说明: `StatementStats` 是“每个 session 一个”(见 pkg/util/topsql/stmtstats/stmtstats.go 注释),
-    // MySQL 协议下同一 session 同时只会有一条语句在执行,因此这里用 **单个** activeExecution 即可。
-    // 若未来出现“同一 session 并发执行多条 SQL”(例如协议/执行模型变化),可平滑演进为 map[execID]*ActiveExecution。
-    activeExecution *ActiveExecution
+    // 当前正在执行的 SQL 上下文
+    // nil = session 空闲（没有正在执行的 SQL）
+    // 说明: MySQL 协议下同一 session 同时只会有一条语句在执行
+    executionContext *ExecutionContext
 }
 
-type ActiveExecution struct {
-    SQLDigest   []byte
+// ExecutionContext 存储当前执行的 SQL 上下文信息
+type ExecutionContext struct {
+    Ctx          context.Context   // 核心：用于读取 util.RUDetails
+    LastRUSample *atomic.Float64   // 核心：上次采样值，用于计算增量
+    
+    // SQL 标识信息（用于关联到 ruRecords）
+    SQLDigest  []byte
     PlanDigest []byte
-    User        string
-    Ctx         context.Context     // 用于获取 util.RUDetails
-    StartTime   time.Time
-    LastRUSample *atomic.Float64    // 上次采样的 RU 值,用于计算差值
-    LastSampleTime *atomic.Int64    // 上次采样时间(Unix 时间戳)
+    User       string
 }
+```
 
-// 新增方法: 注册活跃执行
-func (s *StatementStats) RegisterActiveExecution(sqlDigest, planDigest []byte, user string, ctx context.Context) {
+**优势**：
+1. ✅ 名称准确：`executionContext` 明确表达"执行上下文"的语义
+2. ✅ 结构精简：只保留核心字段和必要的标识信息
+3. ✅ 避免混淆：明确区分 "活跃 session" 和 "正在执行的 SQL"
+4. ✅ 无需比较：通过 `executionContext != nil` 判断是否正在执行
+
+**执行上下文的生命周期管理**：
+
+```go
+// 方法 1: 注册执行上下文（SQL 开始执行时）
+func (s *StatementStats) StartExecution(sqlDigest, planDigest []byte, user string, ctx context.Context) {
     s.mu.Lock()
     defer s.mu.Unlock()
-
-    s.activeExecution = &ActiveExecution{
-        SQLDigest:   sqlDigest,
-        PlanDigest: planDigest,
-        User:        user,
-        Ctx:         ctx,
-        StartTime:   time.Now(),
+    
+    s.executionContext = &ExecutionContext{
+        Ctx:          ctx,
         LastRUSample: atomic.NewFloat64(0.0),
-        LastSampleTime: atomic.NewInt64(time.Now().Unix()),
+        SQLDigest:    sqlDigest,
+        PlanDigest:   planDigest,
+        User:         user,
     }
 }
 
-// 新增方法: 注销活跃执行
-func (s *StatementStats) UnregisterActiveExecution(sqlDigest, planDigest []byte, user string) {
+// 方法 2: 注销执行上下文（SQL 执行完成时）
+func (s *StatementStats) FinishExecution() {
     s.mu.Lock()
     defer s.mu.Unlock()
-
-    // 保护性校验: 仅当当前 activeExecution 与本次结束的语句匹配时才清理
-    if s.activeExecution == nil {
-        return
-    }
-    if string(s.activeExecution.SQLDigest) == string(sqlDigest) &&
-        string(s.activeExecution.PlanDigest) == string(planDigest) &&
-        s.activeExecution.User == user {
-        s.activeExecution = nil
-    }
+    s.executionContext = nil
 }
 
-// 新增方法: 获取当前活跃执行(用于 RU 采样)
-func (s *StatementStats) GetActiveExecution() *ActiveExecution {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    return s.activeExecution
+// 方法 3: 获取执行上下文（RU 采样时）
+func (s *StatementStats) GetExecutionContext() *ExecutionContext {
+    s.mu.RLock()
+    defer s.mu.RUnlock()
+    return s.executionContext
 }
+```
 
-// 在 adapter.go 的 observeStmtBeginForTopSQL 中注册
+**在 adapter.go 中的使用**：
+
+```go
+// 在 observeStmtBeginForTopSQL 中注册
 func (a *ExecStmt) observeStmtBeginForTopSQL(ctx context.Context) context.Context {
     // ... 现有代码 ...
     
@@ -352,230 +355,15 @@ func (a *ExecStmt) observeStmtBeginForTopSQL(ctx context.Context) context.Contex
             user = a.Ctx.GetSessionVars().User.Username
         }
         
-        // 注册活跃执行到 StatementStats
-        stats.RegisterActiveExecution(sqlDigest, planDigest, user, ctx)
+        // 注册执行上下文
+        stats.StartExecution(sqlDigest, planDigest, user, ctx)
     }
     
     return ctx
 }
 
-// 在 adapter.go 的 observeStmtFinishedForTopSQL 中注销
-func (a *ExecStmt) observeStmtFinishedForTopSQL() {
-    // ... 现有代码 ...
-    
-    if stats := a.Ctx.GetStmtStats(); stats != nil {
-        sqlDigest, planDigest := a.getSQLPlanDigest()
-        user := ""
-        if a.Ctx.GetSessionVars().User != nil {
-            user = a.Ctx.GetSessionVars().User.Username
-        }
-        
-        // 从 StatementStats 中注销活跃执行
-        stats.UnregisterActiveExecution(sqlDigest, planDigest, user)
-    }
-    
-    // ... 执行完成时的 RU 采集 ...
-}
-```
-
-**优势**:
-
-1. **复用现有机制**: 无需新建 ActiveSQLContextManager,直接复用 aggregator 的 `statsSet`
-2. **自动管理**: aggregator 会自动清理已完成的 StatementStats(`Finished() == true`)
-3. **减少复杂度**: 活跃 SQL 的管理与 StatementStats 的生命周期绑定
-4. **线程安全**: 复用 StatementStats 现有的 mutex 保护
-
-#### 3.2.1.2 本地采集流程(1秒)
-
-**数据存储位置**:
-
-本地采集的 RU 数据存储在 TopSQL 现有的时间桶结构中,每个时间桶包含该时间段内的 RU 增量数据:
-
-```go
-// 在 TopSQL 的 record 结构中扩展
-type record struct {
-    tsIndex        map[uint64]int
-    sqlDigest      []byte
-    planDigest     []byte
-    user           string
-    tsItems        tsItems
-    totalCPUTimeMs uint64
-    totalRU        float64  // 累计总 RU
-}
-
-// tsItem 通过 stmtStats 访问 TotalRU
-type tsItem struct {
-    stmtStats stmtstats.StatementStatsItem  // 包含 TotalRU 字段
-    timestamp uint64
-    cpuTimeMs uint32
-}
-```
-
-**本地采集实现(复用 aggregator)**:
-
-RU 数据采集采用与 CPU 时间相同的 1 秒周期,可以更好地复用现有 aggregator 机制:
-
-```go
-// 在 TopSQL reporter 中添加定期 RU 采集(本地采集层,1秒)
-func (tsr *RemoteTopSQLReporter) collectRUPeriodically() {
-    ticker := time.NewTicker(1 * time.Second) // 1 秒本地采集间隔(与 aggregator 的 1 秒对齐)
-    defer ticker.Stop()
-    
-    for {
-        select {
-        case <-ticker.C:
-            // 扫描所有活跃的 SQL 执行,更新本地时间桶
-            tsr.collectActiveSQLRU()
-        case <-tsr.ctx.Done():
-            return
-        }
-    }
-}
-
-func (tsr *RemoteTopSQLReporter) collectActiveSQLRU() {
-    now := time.Now()
-    timestamp := uint64(now.Unix())
-    
-    // 第一步: 复用 aggregator 获取所有活跃的 StatementStats
-    // 通过 aggregator.statsSet 遍历所有未 Finished 的 StatementStats
-    stmtstats.GetGlobalAggregator().RangeActiveStats(func(stats *stmtstats.StatementStats) bool {
-        // 获取该 StatementStats 中当前活跃执行(每个 session 同时最多一条语句执行)
-        exec := stats.GetActiveExecution()
-        if exec == nil {
-            return true
-        }
-
-            // 1. 从上下文中读取当前 RU 值
-            var currentRU float64
-            if ruDetailsVal := exec.Ctx.Value(util.RUDetailsCtxKey); ruDetailsVal != nil {
-                ruDetails := ruDetailsVal.(*util.RUDetails)
-                currentRU = ruDetails.RRU() + ruDetails.WRU()
-            } else {
-                // 如果没有 RUDetails,跳过本次采样
-                return true
-            }
-            
-            // 2. 计算 RU 差值(增量)
-            // 第一次采样时,LastRUSample = 0,差值 = currentRU
-            // 后续采样时,差值 = currentRU - LastRUSample
-            // 使用原子操作读取 LastRUSample,避免加锁
-            lastRUSample := exec.LastRUSample.Load()
-            ruDelta := currentRU - lastRUSample
-            
-            // 3. 如果差值 <= 0,说明 RU 没有增长,跳过本次采样
-            // (理论上不应该发生,因为 RU 是累计值,但需要防护边界情况)
-            if ruDelta <= 0 {
-                return true
-            }
-            
-        // 4. 更新到对应时间桶的 RU 数据
-        // 获取或创建对应的 RU record (按 user + sqlDigest + planDigest)
-        record := tsr.collecting.getOrCreateRURecord(exec.User, exec.SQLDigest, exec.PlanDigest)
-            
-            // 获取或创建对应时间戳的 tsItem
-            tsItem := record.getOrCreateTsItem(timestamp)
-            
-            // 累加 RU 增量到该 tsItem 的 StatementStatsItem
-            tsItem.stmtStats.TotalRU += ruDelta
-            
-            // 5. 更新活跃执行的上次采样值和时间
-            // 使用原子操作更新,避免加锁
-            exec.LastRUSample.Store(currentRU)
-            exec.LastSampleTime.Store(now.Unix())
-        
-        return true  // 继续遍历下一个 StatementStats
-    })
-}
-
-// 需要在 stmtstats 包中添加辅助方法
-// 在 aggregator.go 中添加:
-func (m *aggregator) RangeActiveStats(fn func(*StatementStats) bool) {
-    m.statsSet.Range(func(statsR, _ any) bool {
-        stats := statsR.(*StatementStats)
-        if stats.Finished() {
-            return true  // 跳过已完成的,继续下一个
-        }
-        return fn(stats)  // 调用回调函数处理未完成的 StatementStats
-    })
-}
-
-// 在 aggregator.go 中暴露 globalAggregator (或通过包级函数)
-func GetGlobalAggregator() *aggregator {
-    return globalAggregator
-}
-```
-
-**与 aggregator 常规收集流程的区别**:
-
-1. **采集频率不同**:
-   - aggregator 常规收集: 1 秒一次,调用 `CollectStmtStatsMap` 收集 CPU 时间等数据
-   - RU 采集: 1 秒一次,与 CPU 时间采集对齐
-
-2. **数据处理方式不同**:
-   - aggregator 常规收集: 调用 `stats.Take()`,会清空 `StatementStats.data`,数据被取走
-   - RU 采集: 不调用 `Take()`,直接更新时间桶,不清空 StatementStats 的数据
-
-3. **数据流向不同**:
-   - aggregator 常规收集: StatementStats → aggregator → Collector(如 RemoteTopSQLReporter)
-   - RU 采集: StatementStats.activeExecution → 直接更新 TopSQL reporter 的时间桶
-
-**RU 差值处理逻辑**:
-
-1. **首次采样**:
-   - `LastRUSample = 0`
-   - `currentRU = 100` (假设)
-   - `ruDelta = 100 - 0 = 100`
-   - 将 100 RU 累加到对应时间桶
-
-2. **后续采样(1秒后)**:
-   - `LastRUSample = 100`
-   - `currentRU = 250` (假设 RU 继续增长)
-   - `ruDelta = 250 - 100 = 150`
-   - 将 150 RU 累加到对应时间桶
-
-3. **处理边界情况**:
-   - 如果 `ruDelta <= 0`: 跳过本次采样(理论上不应该发生,但需要防护)
-   - 如果 `util.RUDetails` 为空: 跳过本次采样
-   - 如果 SQL 执行完成: 从活跃列表中移除,不再采样
-
-**两个数据来源的处理**:
-
-1. **定期采样(1秒)**:
-   - **数据来源**: 
-     - 通过 aggregator 获取所有活跃的 `StatementStats`
-     - 从每个 `StatementStats.activeExecution` 中读取活跃执行的上下文
-     - 从执行上下文中读取 `util.RUDetails` 的当前值
-   - **处理方式**: 
-     - 计算 RU 差值(增量): `ruDelta = currentRU - LastRUSample`
-     - 将差值累加到对应时间桶的 `tsItem.stmtStats.TotalRU`
-     - 更新活跃执行的 `LastRUSample = currentRU`(使用原子操作)
-     - **关键**: 使用 `collecting.getOrCreateRURecord(user, sqlDigest, planDigest)` 获取或创建 RU record
-     - RU record 的 key 为 `(user, sql_digest, plan_digest)`,与 CPU 时间统计的 record 分离
-   - **存储位置**: TopSQL 的 `collecting.ruRecords[userSQLPlanDigest].tsItems[timestamp].stmtStats.TotalRU`
-   - **特点**: 
-     - 每次采样只记录增量,避免重复计算
-     - 复用 aggregator 机制,无需维护独立的活跃 SQL 列表
-     - 与 aggregator 的常规收集对齐(1秒),可以更好地复用现有机制
-     - RU 数据按 user 维度存储,支持每个 user 的 Top 100
-
-2. **执行完成时采集**:
-   - **数据来源**: SQL 执行完成时,从 `util.RUDetails` 读取最终值
-   - **处理方式**: 
-     - 从当前 `StatementStats` 中查找对应的活跃执行
-     - **如果找到活跃执行**: 
-       - 计算最终 RU 与上次采样的差值: `ruDelta = finalRU - LastRUSample`
-       - 将差值累加到时间桶(与定期采样相同)
-       - 从 `StatementStats.activeExecution` 中移除
-       - 使用 `collecting.getOrCreateRURecord(user, sqlDigest, planDigest)` 获取或创建 RU record
-     - **如果未找到活跃执行**: 
-       - 直接使用最终 RU 值(这种情况较少见,可能是 SQL 执行很快 < 1秒,或者活跃执行已被清理)
-       - 将最终 RU 值累加到时间桶
-       - 同样使用 `collecting.getOrCreateRURecord(user, sqlDigest, planDigest)` 获取或创建 RU record
-   - **存储位置**: 与定期采样相同,累加到 `collecting.ruRecords[userSQLPlanDigest].tsItems[timestamp].stmtStats.TotalRU`
-   - **作用**: 确保最终数据准确,补充定期采样可能遗漏的数据(特别是执行时间 < 1秒的 SQL)
-
-```go
-// 执行完成时的 RU 采集
+// 在 observeStmtFinishedForTopSQL 中注销（简化版）
+// 说明：RU 增量计算逻辑已收敛到 OnExecutionFinished 内部
 func (a *ExecStmt) observeStmtFinishedForTopSQL() {
     vars := a.Ctx.GetSessionVars()
     if vars == nil {
@@ -597,63 +385,362 @@ func (a *ExecStmt) observeStmtFinishedForTopSQL() {
         if vars.User != nil {
             user = vars.User.Username
         }
-        
-        // 获取该 session 当前活跃执行(若存在)
-        activeExec := stats.GetActiveExecution()
-        
-        if activeExec != nil &&
-            string(activeExec.SQLDigest) == string(sqlDigest) &&
-            string(activeExec.PlanDigest) == string(planDigest) &&
-            activeExec.User == user {
-            // 如果找到活跃执行,计算最终 RU 与上次采样的差值
-            lastRUSample := activeExec.LastRUSample.Load()
-            ruDelta := finalRU - lastRUSample
-            if ruDelta > 0 {
-                // 累加差值到时间桶(通过 OnRUSample 方法)
-                timestamp := uint64(time.Now().Unix())
-                stats.OnRUSample(sqlDigest, planDigest, user, ruDelta, timestamp)
-            }
-            // 从 StatementStats 中移除活跃执行
-            stats.UnregisterActiveExecution(sqlDigest, planDigest, user)
-        } else {
-            // 如果未找到活跃执行,直接使用最终 RU 值
-            // (这种情况较少见,可能是 SQL 执行很快 < 1秒,或者活跃执行已被清理)
-            timestamp := uint64(time.Now().Unix())
-            stats.OnRUSample(sqlDigest, planDigest, user, finalRU, timestamp)
-        }
-        
-        // 调用扩展后的 OnExecutionFinished
-        stats.OnExecutionFinished(sqlDigest, planDigest, execDuration, 
-            vars.OutPacketBytes.Load(), user, finalRU)
+
+        // 统一调用：OnExecutionFinished 内部完成 RU delta 计算 + buffer 写入 + executionContext 清理
+        stats.OnExecutionFinished(sqlDigest, planDigest, execDuration, vars.OutPacketBytes.Load(), user, finalRU)
+    }
+}
+```
+
+**RU 采集的统一实现**：
+
+为了提高可读性和维护性，将"执行中采样"和"执行完成采集"的 RU 增量计算逻辑统一收敛到 `StatementStats` 内部：
+
+```go
+// collectRUDelta：统一的 RU 增量计算逻辑
+// 参数 currentRU: 当前 RU 值（执行中采样时从 RUDetails 读取，执行完成时为 finalRU）
+// 返回 (key, delta)：用于后续聚合
+func (s *StatementStats) collectRUDelta(currentRU float64) (key UserSQLPlanDigest, delta float64, ok bool) {
+    execCtx := s.GetExecutionContext()
+    if execCtx == nil {
+        return UserSQLPlanDigest{}, 0, false
+    }
+    
+    // 计算增量
+    lastRU := execCtx.LastRUSample.Load()
+    delta = currentRU - lastRU
+    if delta <= 0 {
+        return UserSQLPlanDigest{}, 0, false
+    }
+    
+    // 更新 LastRUSample（原子操作）
+    execCtx.LastRUSample.Store(currentRU)
+    
+    // 构建 key
+    key = UserSQLPlanDigest{
+        User:       execCtx.User,
+        SQLDigest:  BinaryDigest(execCtx.SQLDigest),
+        PlanDigest: BinaryDigest(execCtx.PlanDigest),
+    }
+    return key, delta, true
+}
+
+// collectActiveRUInto：执行中采样时调用（由 ruAggregate 调度）
+// 从 executionContext.Ctx 读取当前 RU，计算增量并聚合到 total
+func (s *StatementStats) collectActiveRUInto(total RUIncrementsMap) {
+    execCtx := s.GetExecutionContext()
+    if execCtx == nil {
+        return
+    }
+    
+    // 从 context 中读取当前 RU
+    ruDetailsVal := execCtx.Ctx.Value(util.RUDetailsCtxKey)
+    if ruDetailsVal == nil {
+        return
+    }
+    ruDetails := ruDetailsVal.(*util.RUDetails)
+    currentRU := ruDetails.RRU() + ruDetails.WRU()
+    
+    // 复用统一的增量计算逻辑
+    if key, delta, ok := s.collectRUDelta(currentRU); ok {
+        total[key] += delta
     }
 }
 
-// OnRUSample 方法用于更新 RU 数据到时间桶
-func (s *StatementStats) OnRUSample(sqlDigest, planDigest []byte, user string, ruDelta float64, timestamp uint64) {
-    // 这个方法需要与 TopSQL reporter 交互,将 RU 数据更新到时间桶
-    // 具体实现见 TopSQL reporter 部分
+// 10s 过滤阶段：按 user TopK 后才写入 collecting.ruRecords
+func (tsr *RemoteTopSQLReporter) processRUIncrementBuffer() {
+    tsr.ruBufferMu.Lock()
+    buffer := tsr.ruIncrementBuffer
+    tsr.ruIncrementBuffer = make(map[UserSQLPlanDigest]*RUIncrement)
+    tsr.ruBufferMu.Unlock()
+    
+    // 按 user 分组
+    userDataMap := make(map[string]map[UserSQLPlanDigest]float64)
+    for key, inc := range buffer {
+        if _, ok := userDataMap[key.User]; !ok {
+            userDataMap[key.User] = make(map[UserSQLPlanDigest]float64)
+        }
+        userDataMap[key.User][key] = inc.totalRU
+    }
+    
+    // 每个 user 取 Top 200，并限制 user 总数 100
+    topUsers := selectTopUsers(userDataMap, 100)
+    for user, data := range topUsers {
+        topN := getTopNRU(data, 200)
+        timestamp := uint64(time.Now().Unix())
+        
+        // 现在才创建 record/tsItem（重对象）
+        for key, ru := range topN {
+            record := tsr.collecting.getOrCreateRURecord(
+                user,
+                []byte(key.SQLDigest),
+                []byte(key.PlanDigest),
+            )
+            tsItem := record.getOrCreateTsItem(timestamp)
+            tsItem.stmtStats.TotalRU += ru
+        }
+    }
+}
+```
+
+**设计要点总结**：
+
+1. **简化判断**：通过 `GetExecutionContext() != nil` 判断是否正在执行，不需要额外的比较逻辑
+2. **直接访问**：ExecutionContext 中保存了所有必要信息（Ctx、SQLDigest、PlanDigest、User），无需从其他地方获取
+3. **线程安全**：使用 mutex 保护 executionContext 的读写
+4. **生命周期清晰**：
+   - SQL 开始：`StartExecution()` 创建 executionContext
+   - RU 采样：`GetExecutionContext()` 读取并更新 LastRUSample
+   - SQL 完成：`FinishExecution()` 清空 executionContext
+
+**优势**：
+1. ✅ 复用 aggregator 机制，无需新建 ActiveSQLContextManager
+2. ✅ 自动管理：aggregator 会自动清理已完成的 StatementStats（`Finished() == true`）
+3. ✅ 减少复杂度：执行上下文的生命周期与 StatementStats 绑定
+4. ✅ 线程安全：复用 StatementStats 现有的 mutex 保护
+
+**本地采集实现(复用 aggregator)**:
+
+RU 采集采用与 CPU 时间相同的 1 秒周期读取 `util.RUDetails`，并将“执行中采样”下沉到 `stmtstats.aggregator` 的 1s tick 中（`m.aggregate()` 后追加 `m.ruAggregate()`）；写入时间桶仍采用“10 秒过滤后落桶”的方式以控制内存。
+
+**侵入性评估（为什么认为可控）**:
+- **对现有 Collector 接口零破坏**：不修改 `Collector`（`CollectStmtStatsMap`）签名；RU 通过一个**可选接口** `RUCollector` 透出，TopSQL reporter 额外实现即可。
+- **调度点复用**：复用 aggregator 已存在的 1s ticker，不需要在 reporter 侧再启动一个“扫描 statsSet”的 goroutine。
+- **逻辑归位**：执行中 RU 采样属于“全局扫描活跃 session”，与 aggregator 的职责更贴近；而 10s TopK/user 过滤属于 TopRU 产品策略，留在 reporter 更合理。
+
+```go
+type RUIncrement struct {
+    totalRU float64
+}
+
+// RemoteTopSQLReporter 增加轻量级 buffer(仅示意)
+type RemoteTopSQLReporter struct {
+    // ... existing fields ...
+    ruIncrementBuffer map[stmtstats.UserSQLPlanDigest]*RUIncrement
+    ruBufferMu        sync.Mutex
+
+    // 可配置项（默认值示意）
+    ruBufferFlushInterval time.Duration // 10s
+    ruTopKPerUser         int           // 200
+    ruMaxUsers            int           // 100
+    ruMaxBufferEntries    int           // 保护阈值：防止极端场景 buffer 无界增长
+}
+
+// RemoteTopSQLReporter 实现 stmtstats.RUCollector：接收 aggregator 每 1s 投递的 RU 增量
+// 说明：这里保持"采集快、处理慢"的风格：采集只做累加到轻量级 map，复杂 TopK/user 放在 10s 的 processRUIncrementBuffer 里做。
+func (tsr *RemoteTopSQLReporter) CollectRUIncrements(incr stmtstats.RUIncrementsMap) {
+    tsr.ruBufferMu.Lock()
+    defer tsr.ruBufferMu.Unlock()
+    for key, delta := range incr {
+        if delta <= 0 {
+            continue
+        }
+        if tsr.ruMaxBufferEntries > 0 && len(tsr.ruIncrementBuffer) >= tsr.ruMaxBufferEntries {
+            // 可按策略淘汰/汇总到 others
+            break
+        }
+        inc := tsr.ruIncrementBuffer[key]
+        if inc == nil {
+            inc = &RUIncrement{}
+            tsr.ruIncrementBuffer[key] = inc
+        }
+        inc.totalRU += delta
+    }
+}
+
+// RU 采样下沉到 stmtstats.aggregator：
+// - aggregator.run() 的 tick 里，在 m.aggregate() 后追加 m.ruAggregate()
+// - m.ruAggregate() 遍历 statsSet，对每个 StatementStats 做一次 RU 采样，并把增量投递给 RUCollector（TopSQL reporter）
+//
+// 这样可以保证“执行中采样”与 stmtstats 聚合共享同一个 1s tick，避免在 reporter 侧重复扫描 statsSet。
+func (m *aggregator) run() {
+    tick := time.NewTicker(time.Second)
+    defer tick.Stop()
+    for {
+        select {
+        case <-m.ctx.Done():
+            return
+        case <-tick.C:
+            m.aggregate()
+            m.ruAggregate()
+        }
+    }
+}
+
+// RUCollector 是可选扩展接口：不改变现有 Collector（CollectStmtStatsMap）即可接入 RU 采样数据。
+// 仅 TopSQL reporter 需要实现该接口。
+type RUCollector interface {
+    CollectRUIncrements(RUIncrementsMap)
+}
+
+// RUIncrementsMap：每 1s tick 聚合出来的 RU 增量（key 带 user 维度）
+type RUIncrementsMap map[UserSQLPlanDigest]float64
+
+// ruAggregate：遍历所有活跃 StatementStats，采样 executionContext 的 RUDetails，计算增量后聚合并发送给 RUCollector
+func (m *aggregator) ruAggregate() {
+    if !state.TopSQLEnabled() {
+        return
+    }
+
+    total := RUIncrementsMap{}
+    m.statsSet.Range(func(statsR, _ any) bool {
+        stats := statsR.(*StatementStats)
+        if stats.Finished() {
+            // aggregate() 已处理 unregister，这里防御性跳过即可
+            return true
+        }
+        // 在 StatementStats 内部完成 RUDetails 读取 + delta 计算 + executionContext 收尾
+        stats.collectActiveRUInto(total)
+        return true
+    })
+    if len(total) == 0 {
+        return
+    }
+    m.collectors.Range(func(c, _ any) bool {
+        if rc, ok := c.(RUCollector); ok {
+            rc.CollectRUIncrements(total)
+        }
+        return true
+    })
+}
+```
+
+`processRUIncrementBuffer()` 函数实现见上文 `collectActiveRUInto` 代码块后的定义。
+
+**与 aggregator 常规收集流程的区别**:
+
+1. **采集频率不同**:
+   - aggregator 常规收集: 1 秒一次,调用 `CollectStmtStatsMap` 收集 CPU 时间等数据
+   - RU 采集: 1 秒一次,与 CPU 时间采集对齐
+
+2. **数据处理方式不同**:
+   - aggregator 常规收集: 调用 `stats.Take()`,会清空 `StatementStats.data`,数据被取走
+   - RU 采集: 不调用 `Take()`，先写入轻量级 buffer，并在 10s 周期过滤后落桶
+
+3. **数据流向不同**:
+   - aggregator 常规收集: StatementStats → aggregator → Collector.CollectStmtStatsMap(...) → reporter.stmtStatsBuffer → collecting.records
+   - RU 采集(下沉到 aggregator): StatementStats.executionContext → aggregator.ruAggregate() → RUCollector.CollectRUIncrements(...) → reporter.ruIncrementBuffer(10s) → processRUIncrementBuffer() → collecting.ruRecords 时间桶
+
+**RU 差值处理逻辑**:
+
+1. **首次采样**:
+   - `LastRUSample = 0`
+   - `currentRU = 100` (假设)
+   - `ruDelta = 100 - 0 = 100`
+   - 将 100 RU 累加到 ruIncrementBuffer
+
+2. **后续采样(1秒后)**:
+   - `LastRUSample = 100`
+   - `currentRU = 250` (假设 RU 继续增长)
+   - `ruDelta = 250 - 100 = 150`
+   - 将 150 RU 累加到 ruIncrementBuffer
+   - 每 10 秒触发一次过滤，将 TopK/user 落入 collecting 时间桶
+
+3. **处理边界情况**:
+   - 如果 `ruDelta <= 0`: 跳过本次采样(理论上不应该发生,但需要防护)
+   - 如果 `util.RUDetails` 为空: 跳过本次采样
+   - 如果 SQL 执行完成: 从活跃列表中移除,不再采样
+
+**两个数据来源的处理**:
+
+1. **定期采样(1秒)**:
+   - **数据来源**: 
+     - 通过 aggregator 获取所有活跃的 `StatementStats`
+     - 从每个 `StatementStats.executionContext` 中读取活跃执行的上下文
+     - 从执行上下文中读取 `util.RUDetails` 的当前值
+   - **处理方式**: 
+     - 计算 RU 差值(增量): `ruDelta = currentRU - LastRUSample`
+     - 将差值累加到 ruIncrementBuffer（轻量级，仅增量）
+     - 更新活跃执行的 `LastRUSample = currentRU`(使用原子操作)
+     - 每 10s 调用 `processRUIncrementBuffer()`：按 user 分组取 TopK 并写入 `collecting.ruRecords`
+   - **存储位置**: 最终落桶到 `collecting.ruRecords[userSQLPlanDigest].tsItems[timestamp].stmtStats.TotalRU`
+   - **特点**: 
+     - 每次采样只记录增量,避免重复计算
+     - 复用 aggregator 机制,无需维护独立的活跃 SQL 列表
+     - 与 aggregator 的常规收集对齐(1秒),可以更好地复用现有机制
+     - RU 数据按 user 维度存储,支持每个 user 的 Top 100
+
+2. **执行完成时采集**:
+   - **数据来源**: SQL 执行完成时,从 `util.RUDetails` 读取最终值
+   - **处理方式**: 
+     - 将“finalRU 与 LastRUSample 的差值计算 + executionContext 清理”收敛到 `StatementStats.OnExecutionFinished` 内部
+     - `observeStmtFinishedForTopSQL()` 只负责读取 `finalRU/user/sqlDigest/planDigest` 并调用扩展后的 `OnExecutionFinished(..., user, finalRU)`
+     - `OnExecutionFinished` 内部：
+       - 读取并校验 `executionContext` 是否匹配当前语句
+       - 计算 `ruDelta = finalRU - LastRUSample`
+       - 将 `ruDelta` 作为一次“增量事件”写入 **本地 buffer**（由 reporter 负责 10s 过滤落桶）
+       - 清理 `executionContext`
+   - **存储位置**: 与定期采样一致,最终落桶到 `collecting.ruRecords[userSQLPlanDigest].tsItems[timestamp].stmtStats.TotalRU`
+   - **作用**: 确保最终数据准确,补充定期采样可能遗漏的数据(特别是执行时间 < 1秒的 SQL)
+
+执行完成时的 RU 采集代码见 `3.2.1.1` 中的 `observeStmtFinishedForTopSQL()` 函数。
+
+```go
+// 统一命名风格：类似 GetOrCreateStatementStatsItem，这里提供 GetOrCreateRUIncrementItem
+type RUIncrementItem struct {
+    TotalRU float64
+}
+
+// GetOrCreateRUIncrementItem：获取或创建 RU 增量条目
+// 说明：接收 UserSQLPlanDigest key，与 collectRUDelta 返回的 key 一致
+func (s *StatementStats) GetOrCreateRUIncrementItem(key UserSQLPlanDigest) *RUIncrementItem {
+    s.ruMu.Lock()
+    defer s.ruMu.Unlock()
+    if s.ruIncrements == nil {
+        s.ruIncrements = make(map[UserSQLPlanDigest]*RUIncrementItem)
+    }
+    item := s.ruIncrements[key]
+    if item == nil {
+        item = &RUIncrementItem{}
+        s.ruIncrements[key] = item
+    }
+    return item
+}
+
+// OnExecutionFinished（扩展）示意：在 StatementStats 内部完成 RU delta 计算与 executionContext 清理
+func (s *StatementStats) OnExecutionFinished(sqlDigest, planDigest []byte, execDuration time.Duration, outNetworkBytes uint64,
+    user string, finalRU float64) {
+    // 1) 复用原有逻辑：写入 stmtstats data（network/latency 等）
+    //    ...（省略，与现有实现一致）...
+
+    // 2) TopRU 收尾：复用统一的增量计算逻辑
+    //    说明：session 串行执行 SQL，executionContext 一定是当前 SQL 的，无需比较 digest
+    if key, delta, ok := s.collectRUDelta(finalRU); ok {
+        // 将增量写入本地 RU buffer（等待 aggregator.ruAggregate 汇总投递）
+        item := s.GetOrCreateRUIncrementItem(key)
+        item.TotalRU += delta
+    }
+    
+    // 3) 清理 executionContext（避免执行完成后仍被执行中采样扫描）
+    s.FinishExecution()
 }
 ```
 
 #### 3.2.1.3 上报/持久化流程(60秒)
 
-**复用现有的 collectWorker 函数**:
+**复用现有的 collectWorker 函数（10s 过滤落桶在这里做）**:
 
-RU 数据上报复用 TopSQL 现有的 `collectWorker` 函数,频率与 CPU/StmtStats 数据对齐(60秒):
+RU 的 1s 采样下沉到 `stmtstats.aggregator.ruAggregate()`，TopSQL reporter 侧保留：
+- **10s**：把 `ruIncrementBuffer` 做 TopK/user 过滤并落桶到 `collecting.ruRecords`
+- **60s**：复用 reportTicker 触发 `takeDataAndSendToReportChan()` 上报并清空 collecting
 
 ```go
-// 现有的 collectWorker 函数(复用,不需要修改)
+// collectWorker（复用 + 小幅扩展：增加 10s RU 过滤落桶）
 func (tsr *RemoteTopSQLReporter) collectWorker() {
+    ruProcessTicker := time.NewTicker(10 * time.Second)
+    defer ruProcessTicker.Stop()
+
     currentReportInterval := topsqlstate.GlobalState.ReportIntervalSeconds.Load() // 默认 60 秒
     reportTicker := time.NewTicker(time.Second * time.Duration(currentReportInterval))
     defer reportTicker.Stop()
     for {
         select {
-        // ... 其他 case ...
+        // ... 其他 case（CPU/stmtstats 的 channel）...
+        case <-ruProcessTicker.C:
+            tsr.processRUIncrementBuffer()
         case <-reportTicker.C:
-            tsr.processStmtStatsData()  // 处理 CPU/StmtStats 数据
-            tsr.takeDataAndSendToReportChan()  // 取数据并发送上报(包括 RU 数据)
-            // Update `reportTicker` if report interval changed.
+            tsr.processStmtStatsData()      // 处理 CPU/StmtStats 数据
+            tsr.takeDataAndSendToReportChan() // 取数据并发送上报(包括 RU 数据)
             if newInterval := topsqlstate.GlobalState.ReportIntervalSeconds.Load(); newInterval != currentReportInterval {
                 currentReportInterval = newInterval
                 reportTicker.Reset(time.Second * time.Duration(currentReportInterval))
@@ -701,106 +788,7 @@ func (ds *DataSink) TrySend(data *ReportData) {
     ds.sendTopSQLRecords(ctx, data.DataRecords)
     ds.sendRURecordsByUser(ctx, data.RURecordsByUser)  // 新增 RU 数据上报
 }
-```
 
-#### 3.2.1.4 用户查询刷新(默认 60 秒，可配置 15s/30s/60s)
-
-**说明**: 用户侧刷新功能在 vector-extensions 组件中处理,本文档仅在此处提及。TopSQL 提供查询接口,返回本地时间桶的 RU 数据；vector-extensions 组件按刷新间隔拉取并刷新用户可见的数据（默认 60 秒，可配置 15s/30s/60s）。
-
-// 在 adapter.go 中扩展 - 执行完成时的 RU 采集
-func (a *ExecStmt) observeStmtFinishedForTopSQL() {
-    vars := a.Ctx.GetSessionVars()
-    if vars == nil {
-        return
-    }
-    if stats := a.Ctx.GetStmtStats(); stats != nil && topsqlstate.TopSQLEnabled() {
-        sqlDigest, planDigest := a.getSQLPlanDigest()
-        execDuration := vars.GetTotalCostDuration()
-        
-        // 获取最终的 RU 数据
-        var finalRU float64
-        if ruDetailsVal := a.GoCtx.Value(util.RUDetailsCtxKey); ruDetailsVal != nil {
-            ruDetails := ruDetailsVal.(*util.RUDetails)
-            finalRU = ruDetails.RRU() + ruDetails.WRU()
-        }
-        
-        // 获取用户名
-        user := ""
-        if vars.User != nil {
-            user = vars.User.Username
-        }
-        
-        // 获取该 session 当前活跃执行(若存在)
-        activeExec := stats.GetActiveExecution()
-        
-        if activeExec != nil &&
-            string(activeExec.SQLDigest) == string(sqlDigest) &&
-            string(activeExec.PlanDigest) == string(planDigest) &&
-            activeExec.User == user {
-            // 如果找到活跃执行,计算最终 RU 与上次采样的差值
-            lastRUSample := activeExec.LastRUSample.Load()
-            ruDelta := finalRU - lastRUSample
-            if ruDelta > 0 {
-                // 累加差值到时间桶(通过 OnRUSample 方法)
-                timestamp := uint64(time.Now().Unix())
-                stats.OnRUSample(sqlDigest, planDigest, user, ruDelta, timestamp)
-            }
-            // 从 StatementStats 中移除活跃执行
-            stats.UnregisterActiveExecution(sqlDigest, planDigest, user)
-        } else {
-            // 如果未找到活跃执行,直接使用最终 RU 值
-            // (这种情况较少见,可能是 SQL 执行很快 < 1秒,或者活跃执行已被清理)
-            timestamp := uint64(time.Now().Unix())
-            stats.OnRUSample(sqlDigest, planDigest, user, finalRU, timestamp)
-        }
-        
-        // 调用扩展后的 OnExecutionFinished
-        stats.OnExecutionFinished(sqlDigest, planDigest, execDuration, 
-            vars.OutPacketBytes.Load(), user, finalRU)
-    }
-}
-```
-
-**RU 数据来源**:
-
-- RU 数据通过 `util.RUDetails` 结构从执行上下文中获取
-- `util.RUDetails` 在 SQL 执行过程中,通过 KV 请求响应实时累积 RU 消耗
-- 本地定期采样(1秒)时,读取 `util.RUDetails` 的当前值(可能还在增长)
-- 执行完成时,读取 `util.RUDetails` 的最终值,确保数据准确
-
-**时间桶分配**:
-
-- 每个采样点的 RU 数据会分配到对应的时间桶中
-- 时间桶的粒度与 TopSQL 的 `PrecisionSeconds` 配置一致(默认 1 秒)
-- 三层采样机制的时间桶分配:
-  - **本地采集层(1秒)**: 每 1 秒采集一次,立即更新到本地时间桶
-  - **上报/持久化层(60秒)**: 每 60 秒读取本地时间桶数据,批量上报
-   - **用户查询刷新层(默认 60 秒，可配置 15s/30s/60s)**: 由 vector-extensions 组件处理,从 TopSQL 查询接口获取本地时间桶数据
-   - **执行完成时采集**: 从 `StatementStats.activeExecution` 中获取活跃执行,计算最终 RU 差值
-- 如果 SQL 执行时间超过 1 秒,会有多个本地采样点
-- 如果 SQL 执行时间超过 60 秒,会有多个上报点
-- 如果 SQL 执行时间超过用户侧刷新间隔(默认 60 秒),vector-extensions 组件会看到多次刷新的数据
-
-#### 3.2.2 User + SQL 维度的实现语义
-
-**聚合键扩展**:
-
-TopSQL 现有的聚合键为 `(sql_digest, plan_digest)`,扩展后为 `(user, sql_digest, plan_digest)`:
-
-```go
-// 现有结构
-type SQLPlanDigest struct {
-    SQLDigest  BinaryDigest
-    PlanDigest BinaryDigest
-}
-
-// 扩展后结构
-type UserSQLPlanDigest struct {
-    User       string
-    SQLDigest  BinaryDigest
-    PlanDigest BinaryDigest
-}
-```
 
 **聚合语义**:
 
@@ -1145,7 +1133,7 @@ DataSink.TrySend(): 并行上报 CPU 数据和 RU 数据
   
 - **数据流独立**:
   - CPU 时间数据: StatementStats → aggregator → stmtStatsBuffer → collecting.records
-  - RU 数据: activeExecution → 定期采样/执行完成 → collecting.ruRecords
+  - RU 数据: executionContext → 定期采样/执行完成 → collecting.ruRecords
   
 - **查询分离**:
   - CPU 时间查询: 按 `(sql_digest, plan_digest)` 维度,全局 Top N
@@ -1169,7 +1157,7 @@ type ruRecordsMap map[string]*record  // string key = encodeRUKey(user, sqlDiges
 2. **清晰分离**: RU 数据有独立的数据流和存储结构
 3. **支持需求**: 直接支持"每个 user 存 top100,user 上限 100"的需求
 4. **查询简单**: 查询时直接按 user 查询对应的 Top 100 记录
-5. **内存可控**: user 上限 100,每个 user 最多 100 条记录,总记录数上限 10,000
+5. **内存可控**: user 上限 100,每个 user 在 `collecting.ruRecords` 中最多保留 TopK 条记录（默认 TopK=200，用于减少抖动；对外查询仍可返回 Top100），总记录数上限约 20,000
 
 #### 3.3.6 采集/上报融入方式评估（实现复杂度 / 侵入性 / 性能 / 维护成本）
 
@@ -1177,13 +1165,14 @@ type ruRecordsMap map[string]*record  // string key = encodeRUKey(user, sqlDiges
 
 | 维度 | 路径 1：独立 RU 采集 + 复用上报链路（推荐） | 路径 2：RU 也走 stmtstatsBuffer / processStmtStatsData（备选） |
 |------|-------------------------------------------|-------------------------------------------------------------|
-| **实现复杂度** | 低-中：新增 RU sampler worker + `collecting.ruRecords` | 高：需要重构 stmtstats 的 key、采集/过滤、buffer 结构 |
-| **对现有系统侵入性** | 低：不改 stmtstats/collector 的主干数据模型与 key | 高：stmtstats/aggregator/collector/reporter 多点联动修改 |
+| **实现复杂度** | 低-中：在 `stmtstats.aggregator` 增加 `ruAggregate()` + reporter 侧 `ruIncrementBuffer/collecting.ruRecords` | 高：需要重构 stmtstats 的 key、采集/过滤、buffer 结构 |
+| **对现有系统侵入性** | 低-中：不改 stmtstats 的主干 `StatementStatsMap` key；RU 通过可选 `RUCollector` 接口投递 | 高：stmtstats/aggregator/collector/reporter 多点联动修改 |
 | **性能影响** | 可控：1s 扫描活跃执行，60s 批量上报（复用现有） | 不确定：key 维度扩张为 `(user, sql, plan)`，buffer 体积与处理开销上升 |
 | **长期维护成本** | 低：RU 逻辑与 CPU/StmtStats 逻辑清晰分层，边界明确 | 高：RU 与原有 stmtstats 逻辑耦合，后续 stmtstats 变更更易相互影响 |
 
 **推荐路径 1（当前文档采用）**:
-- **采集**: 独立 RU sampler worker(1s ticker) 通过 `activeExecution` 读取 `util.RUDetails`，计算增量并直接写入 `collecting.ruRecords`
+- **采集**: 下沉到 `stmtstats.aggregator.ruAggregate()`（复用 1s tick）通过 `executionContext` 读取 `util.RUDetails`，计算增量并通过 `RUCollector.CollectRUIncrements(...)` 投递到 reporter
+- **过滤落桶**: reporter 在 `collectWorker` 内每 10s 处理 `ruIncrementBuffer`，按 TopK/user 过滤后写入 `collecting.ruRecords`
 - **上报/持久化**: 复用 TopSQL 现有 `collectWorker/reportWorker`，按 `ReportIntervalSeconds=60s` 批量取走并发送（见 `3.2.1.3`）
 
 **路径 2（备选，不作为默认）**:
@@ -1380,11 +1369,12 @@ Memory Storage (复用现有存储)
 **采集点设计**:
 
 1. **本地定期采样** (执行中 SQL,1秒):
-   - 在 TopSQL reporter 内新增独立的 RU 采集 worker(1s ticker)
-   - 每 1 秒扫描一次所有活跃的 SQL 执行上下文
+   - 下沉到 `stmtstats.aggregator`：在 `aggregator.run()` 的 1s tick 内，`m.aggregate()` 后追加 `m.ruAggregate()`
+   - 每 1 秒扫描一次所有活跃的 `StatementStats.executionContext`
    - 从每个上下文中读取 `util.RUDetails` 的当前 RU 值
-   - 立即更新到本地时间桶的 RU 数据
-   - 需要维护活跃 SQL 执行上下文的注册表
+   - 将 RU 增量聚合为 `RUIncrementsMap` 并投递给 `RUCollector`（TopSQL reporter）
+   - reporter 将 RU 增量累加到 `ruIncrementBuffer`；每 10 秒过滤 TopK/user 后再落桶到本地时间桶
+   - 活跃 SQL 执行上下文复用 `StatementStats.executionContext`（注册/注销由执行路径驱动）
 
 2. **上报/持久化采样** (60秒):
    - 复用 TopSQL 现有的上报链路(`collectWorker` 周期触发 + `reportWorker` 发送)
@@ -1407,8 +1397,8 @@ Memory Storage (复用现有存储)
    - 用于补充定期采样可能遗漏的最终数据,确保数据准确性
 
 5. **活跃执行上下文管理** (复用 StatementStats):
-   - 在 SQL 执行开始时,通过 `StatementStats.RegisterActiveExecution()` 注册到 `StatementStats.activeExecution`
-   - 在 SQL 执行完成时,通过 `StatementStats.UnregisterActiveExecution()` 从 `StatementStats.activeExecution` 移除
+   - 在 SQL 执行开始时,通过 `StatementStats.StartExecution()` 注册到 `StatementStats.executionContext`
+   - 在 SQL 执行完成时,通过 `StatementStats.FinishExecution()` 从 `StatementStats.executionContext` 移除
    - 本地定期采样时,通过 aggregator 遍历所有活跃的 StatementStats,读取其中的活跃执行
    - **优势**: 活跃执行的生命周期与 StatementStats 绑定,由 aggregator 自动管理 StatementStats 的生命周期
 
@@ -1428,9 +1418,6 @@ type StatementObserver interface {
     // 扩展 OnExecutionFinished,添加 user 和 TotalRU 参数
     OnExecutionFinished(sqlDigest, planDigest []byte, execDuration time.Duration, 
         outNetworkBytes uint64, user string, totalRU float64)
-    
-    // 新增: 定期采样 RU 数据的方法
-    OnRUSample(sqlDigest, planDigest []byte, user string, totalRU float64, timestamp uint64)
 }
 
 ```
@@ -1447,8 +1434,8 @@ type StatementObserver interface {
 
 2. **时间桶粒度**:
    - RU 数据的时间桶粒度复用 TopSQL 的 `PrecisionSeconds` 配置(默认 1 秒)
-   - 本地采集频率(1秒)与时间桶粒度(1秒)对齐,每个采集点直接落入对应时间桶
-   - 每次本地采样时,将 RU 值累加到对应的时间桶中
+   - RUDetails 的读取频率为 1 秒,但为控制基数与内存,采用“10 秒过滤后落桶”
+   - 因此时间桶的粒度仍为 1 秒,但 RU 写入点通常是每 10 秒一个点（可配置）
    - 上报和查询刷新从本地时间桶读取数据
 
 3. **异步处理**:
@@ -1456,21 +1443,21 @@ type StatementObserver interface {
    - 上报/持久化复用 TopSQL 现有的 `collectWorker/reportWorker`,无需新增独立 goroutine
    - 使用 TopSQL 现有的 channel 缓冲和后台 worker 机制
    - 活跃 SQL 上下文的注册和注销操作需要加锁保护
-   - 定期采样时使用读锁,注册/注销时使用写锁,减少锁竞争
+   - 定期采样时对 `executionContext` 使用读锁(`RWMutex.RLock`),注册/注销时使用写锁(`RWMutex.Lock`),减少锁竞争
 
 **性能优化**:
 
 1. **内存优化**:
    - RU 字段仅增加少量内存开销(每个 record 增加约 8 字节,TotalRU 字段)
    - user 字段使用 string,内存开销可控
-   - 活跃执行存储在 StatementStats 中,每个 StatementStats 的活跃执行数量有限(通常每个 session < 10)
+   - 活跃执行存储在 StatementStats 中,每个 session 同时最多 1 个 `executionContext`（MySQL 协议语义）
    - 本地时间桶数据在内存中,上报后可以清理或压缩
    - 复用 TopSQL 现有的内存管理和清理机制
 
 2. **CPU 优化**:
    - 本地定期 RU 采集(1秒)在独立 goroutine 中执行,不阻塞 SQL 执行
    - 上报/持久化(60秒)在现有的 collectWorker 中执行,不阻塞本地采集
-   - StatementStats 内部使用 mutex 保护 activeExecution,定期采样时通过 aggregator 的 sync.Map 并发访问多个 StatementStats
+   - StatementStats 内部使用独立 `RWMutex` 保护 executionContext(读多写少),定期采样时通过 aggregator 的 sync.Map 并发访问多个 StatementStats
    - 1 秒本地采样间隔在实时性和 CPU 开销之间取得平衡
    - 执行完成时的 RU 采集与 CPU 时间采集在同一个调用路径中
 
@@ -1487,7 +1474,11 @@ type StatementObserver interface {
 **性能目标**:
 - 本地采集开销: 每 1 秒扫描一次活跃 SQL,开销 ≈ 1-2ms
 - 上报开销: 每 60 秒批量上报一次,开销 < 5ms (与现有 TopSQL 上报开销相同)
-- 内存开销: 每个 record 增加约 8 字节 + user 字符串长度 + 活跃 SQL 上下文
+- 内存开销:
+  - `collecting.ruRecords` 通过 **10s 过滤 TopK/user** 进行约束（例如 user≤100、TopK/user=200），将 record 数量控制在 ~20k 量级
+  - 单个 record 在 60s 上报窗口内的 `tsItems` 写入频率为 10s（约 6 个点/分钟），明显少于 1s 直接落桶
+  - `ruIncrementBuffer` 为轻量级 map（仅 `float64 + time`），并可通过 `ruMaxBufferEntries` 做硬上限保护
+  - 活跃 SQL 上下文: 每个 session 一个 `executionContext`（读多写少，使用 `RWMutex`）
 - 查询延迟: 与 TopSQL 现有查询延迟相当；用户侧可见延迟由刷新间隔决定（默认 60 秒，可配置 15s/30s/60s）
 
 #### 3.4.3 TopN 计算的代价控制
@@ -1546,9 +1537,10 @@ func (tsr *RemoteTopSQLReporter) GetTopRecords(sortBy string, topN int) []*TopRe
 2. **内存使用**:
    - 每个 `StatementStatsItem` 增加约 8 字节(TotalRU 字段)
    - user 字段使用 string,平均长度约 20 字节
-   - 活跃 SQL 上下文列表: 每个上下文约 100 字节,假设最多 1000 个活跃 SQL
-   - 假设有 10,000 个不同的 `(user, sql_digest, plan_digest)` 组合
-   - 额外内存: 10,000 * (8 + 20) + 1000 * 100 ≈ 380KB (可接受)
+   - 活跃 SQL 上下文: `StatementStats` 为每个 session 一个,每个活跃 session 仅 1 个 `executionContext`（结构体较小,且读多写少）
+   - `collecting.ruRecords` 通过 **10s 过滤 TopK/user** 控制基数（例如 user≤100、TopK/user=200 ⇒ record 上限 ~20k）
+   - 每个 record 在 60s 上报窗口内的 `tsItems` 写入频率为 10s（约 6 点/分钟）,进一步降低常驻内存
+   - `ruIncrementBuffer` 为轻量级 map,并可通过 `ruMaxBufferEntries` 设置硬上限（超限丢弃/汇总到 others）,避免极端场景无界增长
    
    **优化措施**:
    - 复用 TopSQL 现有的内存管理和清理机制
@@ -1572,33 +1564,33 @@ func (tsr *RemoteTopSQLReporter) GetTopRecords(sortBy string, topN int) []*TopRe
    - RU 扩展仅增加少量内存开销,风险较低
    - 主要风险来自 user 字段的字符串存储
 
-2. **防护措施** (复用 TopSQL 现有机制):
-   - TopSQL 已经有最大记录数限制和清理机制
-   - 复用 TopSQL 的过期数据清理逻辑
+2. **防护措施** (复用可观测性基础设施机制):
+   - 利用现有的最大记录数限制和清理机制
+   - 复用过期数据清理逻辑
    - user 字符串可以共享以减少内存占用
 
 3. **降级策略**:
-   - 如果 TopSQL 功能被禁用,RU 扩展自然也被禁用
-   - 复用 TopSQL 现有的降级和限流机制
+   - TopRU 功能可通过配置开关控制
+   - 复用现有的降级和限流机制
 
 **CPU 风险** (风险较低):
 
 1. **风险场景**:
    - RU 数据采集开销很小,主要风险来自聚合和排序
-   - 复用 TopSQL 现有的锁机制,锁竞争风险与 TopSQL 相同
+   - 利用现有的锁机制,锁竞争风险可控
 
 2. **防护措施**:
-   - 复用 TopSQL 现有的查询限流和采样机制
+   - 复用现有的查询限流和采样机制
    - 按 RU 排序与按 CPU 排序使用相同的算法,性能相当
 
 #### 3.5.3 近似计算 / 限流 / 降级策略
 
-**复用 TopSQL 现有策略**:
+**TopRU 的控制策略**:
 
-1. **采样策略**: 复用 TopSQL 现有的采样和限流机制
-2. **精度权衡**: RU 值使用 `float64` 类型,精度与 TopSQL 的 CPU 时间精度相当
-3. **限流策略**: 复用 TopSQL 现有的查询限流机制
-4. **降级策略**: 与 TopSQL 功能绑定,TopSQL 降级时 RU 扩展也降级
+1. **采样策略**: 利用现有的采样和限流机制
+2. **精度权衡**: RU 值使用 `float64` 类型,精度足够
+3. **限流策略**: 复用现有的查询限流机制
+4. **降级策略**: TopRU 功能可通过配置开关控制,支持降级
 
 ### 3.6 可扩展性与后续演进
 
@@ -1607,19 +1599,19 @@ func (tsr *RemoteTopSQLReporter) GetTopRecords(sortBy string, topN int) []*TopRe
 **设计思路**:
 
 1. **基线计算**:
-   - 基于 TopSQL 历史数据,计算每个 `(user, sql_digest)` 的平均 RU 消耗
+   - 基于 TopRU 历史数据,计算每个 `(user, sql_digest)` 的平均 RU 消耗
    - 支持多种基线算法: 平均值、P95、P99 等
    - 基线数据可以存储在系统表中
 
 2. **对比展示**:
-   - 在 TopSQL 查询结果中,增加 `BaselineRU` 和 `DeviationPercent` 字段
+   - 在 TopRU 查询结果中,增加 `BaselineRU` 和 `DeviationPercent` 字段
    - `DeviationPercent = (CurrentRU - BaselineRU) / BaselineRU * 100%`
    - 支持按偏差百分比排序,快速发现异常 SQL
 
 **实现要点**:
 - 基线计算采用离线批处理方式,避免影响在线性能
 - 基线更新频率: 每天一次
-- 可以复用 TopSQL 现有的数据存储机制
+- 可以利用现有的数据存储机制
 
 #### 3.6.2 异常检测 / 趋势分析
 
@@ -1628,7 +1620,7 @@ func (tsr *RemoteTopSQLReporter) GetTopRecords(sortBy string, topN int) []*TopRe
 1. **检测算法**:
    - 基于统计方法: 3-sigma 规则,检测偏离均值超过 3 倍标准差的 SQL
    - 基于规则: 检测 RU 消耗突然增长、执行次数异常等模式
-   - 可以复用 TopSQL 现有的时间序列数据
+   - 利用 TopRU 的时间序列数据
 
 2. **告警机制**:
    - 检测到异常后,生成告警事件
@@ -1638,14 +1630,14 @@ func (tsr *RemoteTopSQLReporter) GetTopRecords(sortBy string, topN int) []*TopRe
 **趋势分析**:
 
 1. **趋势计算**:
-   - 利用 TopSQL 现有的时间桶数据,计算每个 SQL 的 RU 消耗趋势
+   - 利用 TopRU 的时间桶数据,计算每个 SQL 的 RU 消耗趋势
    - 使用线性回归或移动平均等算法
    - 支持多时间粒度: 小时、天、周等
 
 2. **可视化**:
    - 提供 RU 消耗趋势图表
    - 支持对比不同时间段的趋势
-   - 可以与 TopSQL 现有的可视化工具集成
+   - 可以与现有的可观测性工具集成
 
 #### 3.6.3 与其他可观测性模块的联动
 
@@ -1653,22 +1645,22 @@ func (tsr *RemoteTopSQLReporter) GetTopRecords(sortBy string, topN int) []*TopRe
 
 1. **关联键**:
    - 使用 `(sql_digest, plan_digest)` 作为关联键
-   - 在 TopSQL 查询结果中,可以提供跳转到慢日志的链接
+   - 在查询结果中可以提供跳转到慢日志的链接
 
 2. **统一视图**:
-   - 在 TopSQL 查询结果中同时展示 CPU 时间和 RU 数据
-   - 支持按 CPU 时间排序和按 RU 排序的切换
+   - 支持同时查看 CPU 时间和 RU 数据
+   - 支持按不同维度排序（CPU 时间、RU 消耗等）
    - 可以与慢日志数据关联,提供更全面的 SQL 性能分析
 
 **联动场景**:
 
-1. **TopSQL 内部联动**:
+1. **多维度分析**:
    - 用户可以同时查看 SQL 的 CPU 时间和 RU 消耗
-   - 发现 CPU 时间高但 RU 消耗低的 SQL(可能是有计算密集型操作)
+   - 发现 CPU 时间高但 RU 消耗低的 SQL(可能是计算密集型操作)
    - 发现 RU 消耗高但 CPU 时间低的 SQL(可能是 I/O 密集型操作)
 
 2. **与慢日志的联动**:
-   - 用户在 TopSQL 中发现高 RU 消耗的 SQL
+   - 用户在 TopRU 中发现高 RU 消耗的 SQL
    - 可以通过 sql_digest 关联到慢日志中的详细执行记录
    - 获取更详细的执行计划和执行详情
 
@@ -1711,52 +1703,51 @@ func (tsr *RemoteTopSQLReporter) GetTopRecords(sortBy string, topN int) []*TopRe
 ### 5.1 Functional
 
 1. **与 Resource Control 的兼容性**:
-   - TopSQL RU 扩展依赖 `util.RUDetails` 收集 RU 数据,需要确保 Resource Control 功能已启用
+   - TopRU 依赖 `util.RUDetails` 收集 RU 数据,需要确保 Resource Control 功能已启用
    - 如果 Resource Control 未启用,`util.RUDetails` 可能为空,导致 RU 字段为 0
    - **解决方案**: 
-     - 如果 Resource Control 未启用,RU 字段显示为 0,但不影响 TopSQL 其他功能
+     - 如果 Resource Control 未启用,RU 字段显示为 0,但不影响其他可观测性功能
      - 在文档中说明需要启用 Resource Control 才能获得准确的 RU 数据
 
-2. **与 TopSQL 现有功能的兼容性**:
-   - RU 扩展作为 TopSQL 的一部分,与现有 CPU 时间统计功能完全兼容
+2. **与现有可观测性功能的兼容性**:
+   - TopRU 与现有的 CPU 时间统计功能完全兼容
    - 可以同时支持按 CPU 时间排序和按 RU 排序
    - **解决方案**: 
-     - 保持向后兼容,现有的 CPU 时间查询不受影响
-     - 新增 RU 相关字段和排序选项
+     - 保持向后兼容,现有的查询不受影响
+     - TopRU 提供独立的查询接口
 
 3. **与 Statement Summary 的兼容性**:
-   - TopSQL 可能从 Statement Summary 获取 SQL 文本,该机制保持不变
+   - 可能从 Statement Summary 获取 SQL 文本,该机制保持不变
    - 但对于执行中 SQL/瞬时 SQL,SQL 文本可能存在缺失或延迟注册的情况,因此不保证 TopRU 一定能展示完整 SQL statement（见 Non-Goals / Limitation）
    - **解决方案**: 无特殊处理,复用现有机制
 
 4. **与慢日志的兼容性**:
-   - TopSQL RU 扩展和慢日志可以同时启用,两者独立工作
-   - TopSQL RU 扩展可以提供慢日志中 RU 字段的聚合视图
+   - TopRU 和慢日志可以同时启用,两者独立工作
+   - TopRU 可以提供慢日志中 RU 字段的聚合视图
    - **解决方案**: 无特殊处理,两者完全兼容
 
 ### 5.2 Upgrade
 
 1. **从旧版本升级**:
-   - 新版本在 TopSQL 中扩展 RU 功能,旧版本 TopSQL 无 RU 字段
-   - 升级后,如果 TopSQL 已启用,则 RU 功能自动可用
+   - 新版本提供 TopRU 功能,旧版本无 RU 统计能力
+   - 升级后,TopRU 功能自动可用（如果可观测性功能已启用）
    - **解决方案**: 
-     - RU 扩展作为 TopSQL 的一部分,无需额外配置
-     - 如果 TopSQL 未启用,需要先启用 TopSQL 才能使用 RU 功能
-     - 在升级文档中说明 RU 功能的使用方法
+     - TopRU 作为新功能,无需额外配置
+     - 在升级文档中说明 TopRU 功能的使用方法
 
 2. **数据格式兼容性**:
-   - TopSQL 的内存数据不持久化,升级后数据会丢失
+   - 内存数据不持久化,升级后数据会丢失
    - Protobuf 消息格式扩展,需要考虑向前兼容
    - **解决方案**: 
      - RU 相关字段使用 optional 字段,旧版本客户端可以忽略
      - 使用 Protobuf 的向后兼容机制,确保旧版本客户端不会出错
 
 3. **API 兼容性**:
-   - TopSQL 查询接口扩展,添加按 RU 排序的选项
-   - 保持现有接口不变,新增可选参数
+   - 提供 TopRU 查询接口,支持按 RU 排序
+   - 保持现有接口不变,新增独立的 TopRU 接口
    - **解决方案**: 
-     - 新增参数使用默认值,现有调用不受影响
-     - 在 API 文档中说明新参数的使用方法
+     - 新接口不影响现有调用
+     - 在 API 文档中说明新接口的使用方法
 
 ## 6. Test Design
 
@@ -1878,31 +1869,31 @@ func (tsr *RemoteTopSQLReporter) GetTopRecords(sortBy string, topN int) []*TopRe
 
 2. **内存泄漏**:
    - 长时间运行测试,检查是否存在内存泄漏
-   - 目标: 内存使用稳定,与 TopSQL 现有表现一致
+   - 目标: 内存使用稳定,符合可观测性模块的一致性要求
 
 3. **OOM 防护**:
-   - 复用 TopSQL 现有的 OOM 防护测试
-   - 目标: RU 扩展不影响 TopSQL 现有的防护机制
+   - 验证现有的 OOM 防护机制对 TopRU 有效
+   - 目标: TopRU 不影响现有的防护机制
 
 ## 7. Impact & Risk
 
 ### 7.1 Positive Impacts
 
-1. **提升可观测性**: TopSQL RU 扩展提供了 RU 维度可观测能力,在现有 CPU 时间统计基础上增加了资源消耗视角。
+1. **提升可观测性**: TopRU 提供了 RU 维度可观测能力,增加了资源消耗视角,直接对应计费维度。
 
-2. **加速排障**: 能够快速定位高 RU 消耗的 SQL,加速问题排查。
+2. **加速排障**: 能够快速定位高 RU 消耗的 SQL,加速问题排查,特别是在 MAXRU 限制场景下。
 
 3. **支持资源治理**: 按用户维度聚合,支持资源配额管理和审计。
 
-4. **统一实现**: 作为 TopSQL 的扩展,保持了可观测性模块的统一性,降低实现复杂度。
+4. **实现高效**: 复用可观测性基础设施,降低实现复杂度,保持系统架构统一性。
 
 ### 7.2 Negative Impacts
 
-1. **性能开销**: RU 扩展会带来少量的 CPU 和内存开销,但相对于 TopSQL 现有开销很小(< 1%)。
+1. **性能开销**: TopRU 会带来少量的 CPU 和内存开销,但开销很小(< 1%)。
 
 2. **内存使用**: 每个 record 增加约 50 字节内存,总体内存开销可控。
 
-3. **复杂度增加**: 在 TopSQL 中增加 RU 相关字段和逻辑,但复杂度增加有限。
+3. **复杂度增加**: 增加 RU 相关字段和逻辑,但复杂度增加有限。
 
 ### 7.3 Risks
 
@@ -1910,15 +1901,15 @@ func (tsr *RemoteTopSQLReporter) GetTopRecords(sortBy string, topN int) []*TopRe
    - **风险**: RU 数据采集可能带来额外的性能开销(采集频率为 1 秒)
    - **缓解措施**:
      - RU 数据采集开销很小(从 context 读取已有对象)
-     - 复用 TopSQL 现有的异步采集机制
-     - 采集频率与 CPU 时间对齐(1 秒),不会增加额外的采集周期
-     - 性能开销 < 1% CPU (仍在可接受范围内)
+     - 利用现有的异步采集机制
+     - 采集频率 1 秒,不会增加额外的采集周期
+     - 性能开销 < 1% CPU (在可接受范围内)
 
 2. **内存风险**:
    - **风险**: user 字段的字符串存储可能增加内存使用
    - **缓解措施**:
      - user 字符串可以共享以减少内存占用
-     - 复用 TopSQL 现有的内存管理和清理机制
+     - 利用现有的内存管理和清理机制
      - 额外内存开销 < 1%
 
 3. **数据准确性风险**:
@@ -1935,9 +1926,9 @@ func (tsr *RemoteTopSQLReporter) GetTopRecords(sortBy string, topN int) []*TopRe
      - 旧版本客户端可以忽略新字段
 
 5. **稳定性风险**:
-   - **风险**: RU 扩展可能存在 bug,影响 TopSQL 稳定性
+   - **风险**: TopRU 功能可能存在 bug,影响系统稳定性
    - **缓解措施**:
      - 充分的单元测试和集成测试
      - 代码审查
      - 灰度发布
-     - 如果出现问题,可以禁用 TopSQL 功能(同时禁用 RU 扩展)
+     - 提供配置开关,可以随时禁用 TopRU 功能
