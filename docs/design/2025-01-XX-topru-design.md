@@ -115,14 +115,6 @@ TopRU 的核心目标是:
   - 功能测试、兼容性测试、性能测试
   - 文档完善
 
-### 2.2 交付物
-
-1. 实现代码: 在 `pkg/util/topsql/` 目录下实现（复用现有可观测性基础设施）
-2. 查询接口: 提供 TopRU 查询接口，支持按 RU 排序
-3. 配置参数: 相关系统变量与控制参数（复用现有可观测性配置）
-4. 测试用例: 单元测试与集成测试
-5. 设计文档: 本文档
-
 ## 3. Detailed Design
 
 ### 3.1 功能与语义定义
@@ -293,8 +285,9 @@ type StatementStats struct {
 
 // ExecutionContext 存储当前执行的 SQL 上下文信息
 type ExecutionContext struct {
-    Ctx          context.Context   // 核心：用于读取 util.RUDetails
-    LastRUSample *atomic.Float64   // 核心：上次采样值，用于计算增量
+    Ctx           context.Context   // 核心：用于读取 util.RUDetails
+    LastRUSample  *atomic.Float64   // 核心：上次采样值，用于计算增量
+    LastSampleSeq *atomic.Uint64    // 核心：上次采样的序列号，用于去重避免重复计数
     
     // SQL 标识信息（用于关联到 ruRecords）
     SQLDigest  []byte
@@ -302,12 +295,6 @@ type ExecutionContext struct {
     User       string
 }
 ```
-
-**优势**：
-1. ✅ 名称准确：`executionContext` 明确表达"执行上下文"的语义
-2. ✅ 结构精简：只保留核心字段和必要的标识信息
-3. ✅ 避免混淆：明确区分 "活跃 session" 和 "正在执行的 SQL"
-4. ✅ 无需比较：通过 `executionContext != nil` 判断是否正在执行
 
 **执行上下文的生命周期管理**：
 
@@ -318,11 +305,12 @@ func (s *StatementStats) StartExecution(sqlDigest, planDigest []byte, user strin
     defer s.mu.Unlock()
     
     s.executionContext = &ExecutionContext{
-        Ctx:          ctx,
-        LastRUSample: atomic.NewFloat64(0.0),
-        SQLDigest:    sqlDigest,
-        PlanDigest:   planDigest,
-        User:         user,
+        Ctx:           ctx,
+        LastRUSample:  atomic.NewFloat64(0.0),
+        LastSampleSeq: atomic.NewUint64(0),
+        SQLDigest:     sqlDigest,
+        PlanDigest:    planDigest,
+        User:          user,
     }
 }
 
@@ -454,6 +442,18 @@ func (tsr *RemoteTopSQLReporter) processRUIncrementBuffer() {
     tsr.ruIncrementBuffer = make(map[UserSQLPlanDigest]*RUIncrement)
     tsr.ruBufferMu.Unlock()
     
+    // 提取全局 others
+    othersKey := stmtstats.UserSQLPlanDigest{
+        User:       "",
+        SQLDigest:  nil, // 和 topSQL 的 sqlDigest 保持一致
+        PlanDigest: nil, // 和 topSQL 的 planDigest 保持一致
+    }
+    var globalOthersRU float64
+    if othersInc, ok := buffer[othersKey]; ok {
+        globalOthersRU = othersInc.totalRU
+        delete(buffer, othersKey)
+    }
+
     // 按 user 分组
     userDataMap := make(map[string]map[UserSQLPlanDigest]float64)
     for key, inc := range buffer {
@@ -465,9 +465,11 @@ func (tsr *RemoteTopSQLReporter) processRUIncrementBuffer() {
     
     // 每个 user 取 Top 200，并限制 user 总数 100
     topUsers := selectTopUsers(userDataMap, 100)
+    timestamp := uint64(time.Now().Unix())
+    var totalEvictedRU float64
+
     for user, data := range topUsers {
-        topN := getTopNRU(data, 200)
-        timestamp := uint64(time.Now().Unix())
+        topN, evicted := getTopNRU(data, 200)
         
         // 现在才创建 record/tsItem（重对象）
         for key, ru := range topN {
@@ -479,6 +481,17 @@ func (tsr *RemoteTopSQLReporter) processRUIncrementBuffer() {
             tsItem := record.getOrCreateTsItem(timestamp)
             tsItem.stmtStats.TotalRU += ru
         }
+
+        // evicted 部分累加到总量
+        for _, ru := range evicted {
+            totalEvictedRU += ru
+        }
+    }
+
+    // 将所有 evicted RU + 全局 others 一次性写入
+    totalEvictedRU += globalOthersRU
+    if totalEvictedRU > 0 {
+        tsr.collecting.appendOthersRU(timestamp, totalEvictedRU)
     }
 }
 ```
@@ -502,11 +515,6 @@ func (tsr *RemoteTopSQLReporter) processRUIncrementBuffer() {
 **本地采集实现(复用 aggregator)**:
 
 RU 采集采用与 CPU 时间相同的 1 秒周期读取 `util.RUDetails`，并将“执行中采样”下沉到 `stmtstats.aggregator` 的 1s tick 中（`m.aggregate()` 后追加 `m.ruAggregate()`）；写入时间桶仍采用“10 秒过滤后落桶”的方式以控制内存。
-
-**侵入性评估（为什么认为可控）**:
-- **对现有 Collector 接口零破坏**：不修改 `Collector`（`CollectStmtStatsMap`）签名；RU 通过一个**可选接口** `RUCollector` 透出，TopSQL reporter 额外实现即可。
-- **调度点复用**：复用 aggregator 已存在的 1s ticker，不需要在 reporter 侧再启动一个“扫描 statsSet”的 goroutine。
-- **逻辑归位**：执行中 RU 采样属于“全局扫描活跃 session”，与 aggregator 的职责更贴近；而 10s TopK/user 过滤属于 TopRU 产品策略，留在 reporter 更合理。
 
 ```go
 type RUIncrement struct {
@@ -537,8 +545,23 @@ func (tsr *RemoteTopSQLReporter) CollectRUIncrements(incr stmtstats.RUIncrements
         }
         if tsr.ruMaxBufferEntries > 0 && len(tsr.ruIncrementBuffer) >= tsr.ruMaxBufferEntries {
             // 可按策略淘汰/汇总到 others
-            break
+            othersKey := stmtstats.UserSQLPlanDigest{
+                User:       "",  // 空字符串表示全局 others
+                SQLDigest:  nil, // 和 topSQL 的 sqlDigest 保持一致
+                PlanDigest: nil, // 和 topSQL 的 planDigest 保持一致
+            }
+            
+            inc := tsr.ruIncrementBuffer[othersKey]
+            if inc == nil {
+                inc = &RUIncrement{}
+                tsr.ruIncrementBuffer[othersKey] = inc
+            }
+            inc.totalRU += delta
+            
+            reporter_metrics.IgnoreRUBufferFullCounter.Inc()
+            continue
         }
+
         inc := tsr.ruIncrementBuffer[key]
         if inc == nil {
             inc = &RUIncrement{}
@@ -1697,6 +1720,54 @@ func (tsr *RemoteTopSQLReporter) GetTopRecords(sortBy string, topN int) []*TopRe
 10. **执行中 SQL 文本可用性限制**:
    - TopRU 的核心聚合维度是 `(user, sql_digest, plan_digest)`；对执行中 SQL,系统不保证一定能拿到对应的 SQL 文本/statement
    - 若 SQL 元信息缺失,列表可能仅展示 digest 与 plan digest；用户可结合慢日志/执行计划等信息进一步排查
+
+11. **10s 过滤窗口的数据精度限制**:
+   
+   TopRU 采用"1s 采样 + 10s 过滤"的分层设计以控制内存：
+   - **1s 采样**：将 RU 增量累积到轻量级 `ruIncrementBuffer`（每个条目仅 24 字节）
+   - **10s 过滤**：按每个 user 的 Top 200 过滤后写入 `collecting.ruRecords`（每个 record 含时间桶数据，约 100+ 字节）
+   
+   **数据精度影响**：
+   
+   - **边界 SQL 的历史数据可能丢失**：
+     - 如果某条 SQL 在某个 10s 窗口内未进入该 user 的 Top 200，其 RU 数据会被汇总到全局 `"__others__"`
+     - 若该 SQL 在下一个 10s 窗口进入 Top 200（例如突然进入慢查询阶段），之前窗口的数据无法追溯
+     - **示例场景**：
+       ```
+       T=0-9s:  SQL_201 累积 45 RU，排名 201 → 被过滤到 "__others__"
+       T=10-19s: SQL_201 累积 4500 RU，排名 15 → 进入 Top 200
+       结果：用户查询到 SQL_201 的 RU = 4500，但实际应为 4545
+       ```
+     - **影响范围**：主要影响排名在第 180-220 名之间的"边界 SQL"
+   
+   - **间歇性高 RU SQL 的数据不连续**：
+     - 执行模式为"高 RU → 低 RU → 高 RU"的 SQL，其低 RU 阶段的数据可能被过滤
+     - **示例场景**：
+       ```
+       T=0-9s:  SQL_X 高 RU (1000)，排名 50 → 进入 Top 200
+       T=10-19s: SQL_X 低 RU (10)，排名 250 → 被过滤到 "__others__"
+       T=20-29s: SQL_X 再次高 RU (1000)，排名 50 → 再次进入 Top 200
+       结果：RU 趋势图在 T=10-19s 出现"断点"
+       ```
+     - **影响**：RU 趋势图可能不连续，但累计 RU 总量仍准确（丢失部分汇总在 `"__others__"` 中）
+   
+   - **TopN 边界抖动**：
+     - 第 199-202 名的 SQL 可能在每个 10s 周期反复进出 Top 200
+     - 导致这些 SQL 的部分时间点数据在 `"__others__"`，部分在正常 record 中
+   
+   **缓解措施**：
+   
+   - **扩大过滤阈值**：内部维护 Top 300（buffer 过滤阈值），对外查询仍为 Top 200，留 50% 余量减少抖动
+   - **"__others__" 汇总机制**：所有被过滤的 RU 汇总到 `"__others__"` record（按 timestamp），用户可通过 `"__others__"` 的 RU 变化判断是否有重要 SQL 被遗漏
+   - **适用场景说明**：
+     - TopRU 的核心目标是"快速定位头部高 RU SQL"（Top 10-50）
+     - 对于稳定在 Top 100 的 SQL，数据精度不受影响（始终在 Top 200 阈值内）
+     - 对于排名在 200 名之后的 SQL，建议结合慢日志、Statement Summary 等其他工具分析
+   
+   **查询建议**：
+   
+   - 如果发现 `"__others__"` 的 RU 占比较高（例如 > 20%），说明可能有重要 SQL 未进入 Top 200
+   - 此时建议缩短查询时间窗口（例如从 1 小时缩短到 10 分钟），或配合慢日志定位具体 SQL
 
 ## 5. Compatibility Issues
 
