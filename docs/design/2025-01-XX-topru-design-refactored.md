@@ -6,27 +6,29 @@
 
 ## Table of Contents
 
-* [1. Introduction](#1-introduction)
-  * [1.1 Background](#11-background)
-  * [1.2 Goals](#12-goals)
-  * [1.3 Non-Goals](#13-non-goals)
-* [2. Detailed Design](#2-detailed-design)
-  * [2.1 Architecture Overview](#21-architecture-overview)
-  * [2.2 功能与语义定义](#22-功能与语义定义)
-    * [2.2.1 TopRU 定义](#221-topru-定义)
-    * [2.2.2 功能开关](#222-功能开关)
-  * [2.3 数据采集机制](#23-数据采集机制)
-  * [2.4 数据模型与存储](#24-数据模型与存储)
-  * [2.5 性能与风险分析](#25-性能与风险分析)
-  * [2.6 与其他可观测性模块联动](#26-与其他可观测性模块联动)
-* [3. Limitation](#3-limitation)
-* [4. Compatibility Issues](#4-compatibility-issues)
-* [5. Test Design](#5-test-design)
-* [6. Impact & Risk](#6-impact--risk)
+* [Introduction](#introduction)
+  * [Background](#background)
+  * [Goals](#goals)
+  * [Non-Goals](#non-goals)
+* [Detailed Design](#detailed-design)
+  * [Architecture Overview](#architecture-overview)
+  * [功能与语义定义](#功能与语义定义)
+    * [TopRU 定义](#topru-定义)
+    * [功能开关](#功能开关)
+    * [关键特性](#关键特性)
+  * [数据采集机制](#数据采集机制)
+  * [数据模型与存储](#数据模型与存储)
+  * [性能与风险分析](#性能与风险分析)
+  * [与其他可观测性模块联动](#与其他可观测性模块联动)
+* [Limitation](#limitation)
+* [Compatibility Issues](#compatibility-issues)
+* [Test Design](#test-design)
+* [Impact & Risk](#impact--risk)
+* [Investigation & Alternatives](#investigation--alternatives)
 
-## 1. Introduction
+## Introduction
 
-### 1.1 Background
+### Background
 
 Next-gen TiDB Cloud 按 RU（Request Unit） 计费。当集群 RU 消耗异常或达到限制时，用户需要快速定位高 RU 消耗的 SQL，但目前缺乏有效手段识别 RU 消耗的主要来源。
 
@@ -46,7 +48,7 @@ TopRU 的核心价值：当监控系统检测到 RU 限流事件时，TopRU 提�
 
 **TopRU** 通过复用 TopSQL 基础设施，提供按 RU 消耗排序的近实时可观测能力，弥补上述不足。
 
-### 1.2 Goals
+### Goals
 
 1. **按 RU 消耗排序**: 支持按累计 RU 消耗进行排序和查询，识别高 RU SQL（包括执行时间短但 RU 消耗大的 SQL）
 2. **用户维度聚合**: 按 `(user, sql_digest, plan_digest)` 三元组维度聚合，支持按用户进行资源治理和配额管理
@@ -56,16 +58,16 @@ TopRU 的核心价值：当监控系统检测到 RU 限流事件时，TopRU 提�
    - 支持查询最近时间段的 RU 消耗历史数据
 4. **兼容现有能力**: 与 TopSQL 现有的 CPU 时间统计功能并存，互不影响
 
-### 1.3 Non-Goals
+### Non-Goals
 
 1. **TopRU RU ≠ Billing RU**: TopRU 展示的 RU 来自 `util.RUDetails` 运行时观测值，与 Billing RU 的计费口径不保证一致，本期不做对齐工作
 2. **执行中 SQL 完整信息保证**: 执行中 SQL 即使已消耗大量 RU，也可能因 SQL 尚未完成而无法获取完整的 slow query / SQL statement 相关信息
 3. **RU Baseline 智能对比**: 基于历史数据的 baseline 计算、异常评分等高级分析功能作为本期不支持
 4. **异常检测与自动告警**: 自动检测 RU 消耗异常并生成告警的功能本期不做支持
 
-## 2. Detailed Design
+## Detailed Design
 
-### 2.1 Architecture Overview
+### Architecture Overview
 
 TopRU 采用**三层缓冲架构**，复用 TopSQL 的采集和上报链路，在保证实时性的同时控制内存开销。
 
@@ -192,7 +194,7 @@ flowchart TB
 |              +---------------+---------------+                          |
 |              v                               v                          |
 |    +------------------+            +------------------+                  |
-|    | 1s periodic sample|            | on finish collect |                  |
+|    | 1s periodic sample|            | on finish collect |                 |
 |    | (ruAggregate)    |            | (final data)     |                  |
 |    +--------+---------+            +--------+---------+                  |
 |             +---------------+---------------+                           |
@@ -201,19 +203,22 @@ flowchart TB
 +-------------------------------------------------------------------------+
 |                        Buffer & Storage Layer                           |
 |                                                                         |
-|  Layer 1: ruIncrementBuffer (1s write)                                  |
+|  Layer 1: ruIncrementBuffer (1s write, with 3-layer filtering)          |
 |  +-------------------------------------------------------------------+  |
-|  | map[uint64]RUIncrementsMap  (key: timestamp, lightweight buffer)  |
-|  | - 1s sample RU delta accumulates here                             |  |
-|  | - hard limit: overflow goes to _others_                         |  |
+|  | timestampBuffer: map[uint64]*timestampBuffer                      |  |
+|  |   - Layer 1: max 200 users per timestamp                          |  |
+|  |     - track userTotalRU, evict minRU user when > 200              |  |
+|  |   - Layer 2: max 200 SQLs per user                                |  |
+|  |     - track sqlRU, evict minRU SQL when > 200                     |  |
+|  |   - Layer 3: othersRU (evicted RU aggregated here)                |  |
 |  +-------------------------------------------------------------------+  |
-|                              | per 10s trigger TopK/user filter         |
+|                              | per 10s transfer to ruRecords            |
 |                              v                                          |
 |  Layer 2: collecting.ruRecords (10s write)                              |
 |  +-------------------------------------------------------------------+  |
-|  | map[string]*record  (heavy object: 100+ bytes/record)             |  |
+|  | map[string]*record  (heavy object: ~180 bytes/record)             |  |
 |  | - key: user + sqlDigest + planDigest                              |  |
-|  | - memory limit: 100 users x 100 entries = 10,000 max              |  |
+|  | - memory limit: 200 users x 200 SQLs = 40,000 max                 |  |
 |  | - each record contains tsItems time bucket data                   |  |
 |  +-------------------------------------------------------------------+  |
 |                              | per 60s trigger report                   |
@@ -248,9 +253,10 @@ flowchart TB
   end
 
   subgraph Buffer2["Buffer & Storage Layer"]
-    buf["ruIncrementBuffer (1s)<br/>map[ts]map[User,SQL,Plan] → RU delta"]
-    process10["processRUIncrementBuffer() (10s)<br/>TopK per user + others"]
-    ruRecords["collecting.ruRecords (10s)<br/>record.tsItems.TotalRU"]
+    buf["timestampBuffer (1s)<br/>3-layer filter: 200 users × 200 SQLs"]
+    filter["Layer 1: user limit (200)<br/>Layer 2: SQL limit (200/user)<br/>Layer 3: othersRU"]
+    process10["processRUIncrementBuffer() (10s)<br/>transfer to ruRecords"]
+    ruRecords["collecting.ruRecords<br/>record.tsItems.TotalRU"]
   end
 
   subgraph Report2["Report Layer"]
@@ -262,7 +268,8 @@ flowchart TB
   begin --> execCtx
   execCtx -- "1s" --> sample --> buf
   finish --> finishCollect --> buf
-  buf -- "10s" --> process10 --> ruRecords
+  buf --> filter
+  filter -- "10s" --> process10 --> ruRecords
   ruRecords -- "60s" --> send2 --> worker2 --> sink2
 ```
 
@@ -271,23 +278,25 @@ flowchart TB
 | 原则 | 说明 |
 |------|------|
 | 复用基础设施 | 采集点、上报链路、时间桶机制均复用 TopSQL 现有实现 |
-| 分层存储 | 1s 写轻量 buffer → 10s 过滤后写重对象 → 60s 批量上报，逐层控制内存 |
+| 前置过滤 | 1s 采集时即做三层过滤（200 users × 200 SQLs），避免 buffer 膨胀 |
+| 分层存储 | 1s 写轻量 buffer → 10s 平移到重对象 → 60s 批量上报，逐层控制内存 |
 | 分离存储 | CPU 数据用 `collecting.records`，RU 数据用 `collecting.ruRecords`，互不影响 |
-| 内存可控 | 三层缓冲 + TopK 过滤 + 硬上限保护，确保内存占用可预测 |
+| 内存可控 | 三层过滤 + 硬上限保护，最坏情况内存占用 ~72 MB（10s 累积） |
 
 **核心数据流**：
 
 ```
-SQL 执行 → executionContext 注册 → 1s 采样写入 ruIncrementBuffer
+SQL 执行 → executionContext 注册 → 1s 采样写入 timestampBuffer
+                                           ↓ (三层过滤: 200 users × 200 SQLs)
                                            ↓ (10s)
-                                  TopK/user 过滤后写入 ruRecords
+                                  平移到 ruRecords
                                            ↓ (60s)
                                   批量上报给 DataSink
 ```
 
-### 2.2 功能与语义定义
+### 功能与语义定义
 
-#### 2.2.1 TopRU 定义
+#### TopRU 定义
 
 **TopRU** 是 TiDB 提供的按 RU 消耗排序和查询 SQL 的可观测性功能，支持按用户维度聚合，帮助用户快速定位高 RU 消耗的 SQL。
 
@@ -298,7 +307,7 @@ SQL 执行 → executionContext 注册 → 1s 采样写入 ruIncrementBuffer
 - `sql_digest`: SQL Digest，标识 SQL 语句模式
 - `plan_digest`: Plan Digest，标识执行计划
 
-#### 2.2.2 功能开关
+#### 功能开关
 
 TopRU 通过独立开关 `tidb_enable_top_ru` 控制（可以考虑复用 `tidb_enable_top_sql`，这里暂定使用独立变量）：
 
@@ -317,7 +326,7 @@ TopRU 通过独立开关 `tidb_enable_top_ru` 控制（可以考虑复用 `tidb_
 - 已采集数据随下一个上报周期清空
 - 不影响 TopSQL 现有功能
 
-#### 2.2.3 关键特性
+#### 关键特性
 
 | 特性 | 说明 |
 |------|------|
@@ -328,9 +337,9 @@ TopRU 通过独立开关 `tidb_enable_top_ru` 控制（可以考虑复用 `tidb_
 | 时间窗口 | 基于时间桶机制（PrecisionSeconds），支持历史数据查询 |
 | 数据保留 | 内存中短期保留，复用 TopSQL 现有保留策略 |
 
-### 2.3 数据采集机制
+### 数据采集机制
 
-#### 2.3.1 采集时机
+#### 采集时机
 
 | 采集点 | 频率 | 位置 | 目的 |
 |--------|------|------|------|
@@ -338,7 +347,7 @@ TopRU 通过独立开关 `tidb_enable_top_ru` 控制（可以考虑复用 `tidb_
 | 执行完成采集 | 实时 | `observeStmtFinishedForTopSQL()` | 补充最终数据，确保准确性 |
 | 上报/持久化 | 60s | `collectWorker` | 批量发送给外部组件 |
 
-#### 2.3.2 ExecutionContext 设计
+#### ExecutionContext 设计
 
 在 `StatementStats` 中新增 `executionContext` 字段，存储执行中 SQL 的采样状态：
 
@@ -369,7 +378,7 @@ type RUIncrementsMap map[UserSQLPlanDigest]float64
 - RU 采样: `GetExecutionContext()` 读取并更新 LastRUSample
 - SQL 完成: `FinishExecution()` 清空 executionContext
 
-#### 2.3.3 RU 增量计算
+#### RU 增量计算
 
 采用差值计算机制，避免重复计数：
 
@@ -405,7 +414,7 @@ func (s *StatementStats) collectRUDelta(currentRU float64) (key UserSQLPlanDiges
 - `util.RUDetails` 为空: 跳过本次采样
 - SQL 执行完成: 从活跃列表移除，不再采样
 
-#### 2.3.4 数据流实现
+#### 数据流实现
 
 **1s 采样（下沉到 aggregator）**：
 
@@ -451,13 +460,21 @@ func (m *aggregator) ruAggregate() {
 }
 ```
 
-**1s 采集时内存控制（两级 minRU 淘汰方案）**：
+**1s 采集时内存控制（三层过滤方案）**：
 
-为防止极端场景（1000 users × 5000 SQL）导致内存溢出，在 1s 采集时即做内存控制：
+为防止极端场景（1000 users × 5000 SQL）导致内存溢出，在 1s 采集时即做内存控制，采用**三层过滤机制**：
 
-- **Layer 1: User 限流**：每个 timestamp 最多保留 200 users，超限时比较 totalRU 淘汰最小的 user
-- **Layer 2: SQL 限流**：每个 user 最多保留 200 SQL，超限时比较 totalRU 淘汰最小的 SQL
-- **Layer 3: Others 兆底**：所有被淘汰的 RU 汇总到 `_others_`
+- **Layer 1: 限制每个 timestamp 的 user 数量**：每个 timestamp 记录 Top 200 users（按该 user 下所有 SQL 的 totalRU 排序），超限时新 user 的 totalRU 若不大于当前 minTotalRU 则放入 others；若大于则替换 minTotalRU 的 user，并将原 user 放入 others
+- **Layer 2: 限制每个 user 的 SQL 数量**：每个 user 记录 Top 200 SQLs（按该 SQL 的 totalRU 排序），超限时新 SQL 的 totalRU 若不大于当前 minTotalRU 则放入 others；若大于则替换 minTotalRU 的 SQL，并将原 SQL 放入 others
+- **Layer 3: Others 兜底**：所有被过滤/淘汰的 RU 汇总到 `_others_`
+
+**核心思路**：
+1. 每个 timestamp 维护一个 `timestampBuffer`，内部按 user 组织数据
+2. 每个 user 维护一个 `userBuffer`，记录该 user 下所有 SQL 的 totalRU
+3. 到达第 201 个 user 时，对比新 user 的 totalRU 与当前 minTotalRU：
+   - 若 `新user.totalRU <= minTotalRU`：直接放入 others
+   - 若 `新user.totalRU > minTotalRU`：替换 minTotalRU 的 user，原 user 放入 others
+4. 同理，每个 user 内到达第 201 个 SQL 时，采用相同逻辑比较和淘汰
 
 ```go
 // 配置参数
@@ -467,25 +484,25 @@ const (
     MinRUThreshold       = 0.01  // RU 增量 < 0.01 直接忽略（可选优化）
 )
 
-// timestampBuffer：每个 timestamp 的 buffer，内置两级限流
+// timestampBuffer：每个 timestamp 的 buffer，三层过滤的 Layer 1
 type timestampBuffer struct {
     users       map[string]*userBuffer  // user -> userBuffer
-    userTotalRU map[string]float64      // user -> 该 user 的总 RU
-    minRUUser   string                  // 当前 RU 最小的 user
-    minRUValue  float64                 // 最小 RU 值
+    userTotalRU map[string]float64      // user -> 该 user 下所有 SQL 的总 RU
+    minRUUser   string                  // 当前 totalRU 最小的 user
+    minRUValue  float64                 // 最小 totalRU 值
     minRUDirty  bool                    // 是否需要重新计算 min
-    othersRU    float64                 // 被淘汰的 RU 汇总
+    othersRU    float64                 // 被淘汰的 RU 汇总（Layer 3）
 }
 
-// userBuffer：每个 user 的 buffer，限制 SQL 个数
+// userBuffer：每个 user 的 buffer，三层过滤的 Layer 2
 type userBuffer struct {
-    sqlRU      map[UserSQLPlanDigest]float64  // SQL key -> RU
-    minRUKey   UserSQLPlanDigest              // 当前 RU 最小的 SQL
-    minRUValue float64                        // 最小 RU 值
+    sqlRU      map[UserSQLPlanDigest]float64  // SQL key -> totalRU
+    minRUKey   UserSQLPlanDigest              // 当前 totalRU 最小的 SQL
+    minRUValue float64                        // 最小 totalRU 值
     minRUDirty bool                           // 是否需要重新计算 min
 }
 
-// 核心逻辑：添加 RU 增量
+// 核心逻辑：添加 RU 增量到 timestampBuffer
 func (tb *timestampBuffer) Add(key UserSQLPlanDigest, ruDelta float64) {
     // 可选：前置阈值过滤
     if ruDelta < MinRUThreshold {
@@ -493,36 +510,57 @@ func (tb *timestampBuffer) Add(key UserSQLPlanDigest, ruDelta float64) {
     }
     user := key.User
     
-    // Case 1: user 已存在
+    // Case 1: user 已存在，直接累加
     if userBuf, exists := tb.users[user]; exists {
         userBuf.Add(key, ruDelta, &tb.othersRU)
         tb.userTotalRU[user] += ruDelta
+        // 更新 minRUValue（如果当前操作的是 minRUUser）
         if user == tb.minRUUser {
             tb.minRUValue += ruDelta
         }
         return
     }
     
-    // Case 2: 新 user，未达上限
+    // Case 2: 新 user，未达上限，直接添加
     if len(tb.users) < MaxUsersPerTimestamp {
         tb.addNewUser(user, key, ruDelta)
         tb.updateMinUser(user, ruDelta)
         return
     }
     
-    // Case 3: 新 user，已达上限，需要比较
+    // Case 3: 新 user，已达上限（第 201 个 user），需要比较 totalRU
     tb.refreshMinUserIfDirty()
     if ruDelta <= tb.minRUValue {
-        tb.othersRU += ruDelta  // 新 user RU 更小，直接放入 others
+        // 新 user 的 totalRU 不大于当前最小值，直接放入 others
+        tb.othersRU += ruDelta
         return
     }
-    // 新 user RU 更大，替换 minRUUser
-    tb.evictMinUser()
+    // 新 user 的 totalRU 大于当前最小值，替换 minRUUser
+    tb.evictMinUser()  // 将原 minRUUser 的所有 RU 放入 others
     tb.addNewUser(user, key, ruDelta)
-    tb.minRUDirty = true
+    tb.minRUDirty = true  // 需要重新计算 min
+}
+
+func (tb *timestampBuffer) addNewUser(user string, key UserSQLPlanDigest, ruDelta float64) {
+    userBuf := &userBuffer{
+        sqlRU:      make(map[UserSQLPlanDigest]float64),
+        minRUValue: ruDelta,
+        minRUKey:   key,
+    }
+    userBuf.sqlRU[key] = ruDelta
+    tb.users[user] = userBuf
+    tb.userTotalRU[user] = ruDelta
+}
+
+func (tb *timestampBuffer) updateMinUser(user string, ruDelta float64) {
+    if tb.minRUUser == "" || ruDelta < tb.minRUValue {
+        tb.minRUUser = user
+        tb.minRUValue = ruDelta
+    }
 }
 
 func (tb *timestampBuffer) evictMinUser() {
+    // 将被淘汰的 user 的所有 RU 汇总到 others
     tb.othersRU += tb.userTotalRU[tb.minRUUser]
     delete(tb.users, tb.minRUUser)
     delete(tb.userTotalRU, tb.minRUUser)
@@ -545,17 +583,19 @@ func (tb *timestampBuffer) refreshMinUserIfDirty() {
     tb.minRUDirty = false
 }
 
-// userBuffer.Add：限制每个 user 的 SQL 个数，逻辑类似
+// userBuffer.Add：Layer 2 - 限制每个 user 的 SQL 个数
 func (ub *userBuffer) Add(key UserSQLPlanDigest, ruDelta float64, othersRU *float64) {
-    // Case 1: SQL 已存在
+    // Case 1: SQL 已存在，直接累加
     if _, exists := ub.sqlRU[key]; exists {
         ub.sqlRU[key] += ruDelta
+        // 更新 minRUValue（如果当前操作的是 minRUKey）
         if key == ub.minRUKey {
             ub.minRUValue += ruDelta
         }
         return
     }
-    // Case 2: 新 SQL，未达上限
+    
+    // Case 2: 新 SQL，未达上限，直接添加
     if len(ub.sqlRU) < MaxSQLPerUser {
         ub.sqlRU[key] = ruDelta
         if ruDelta < ub.minRUValue || len(ub.sqlRU) == 1 {
@@ -564,17 +604,36 @@ func (ub *userBuffer) Add(key UserSQLPlanDigest, ruDelta float64, othersRU *floa
         }
         return
     }
-    // Case 3: 新 SQL，已达上限
+    
+    // Case 3: 新 SQL，已达上限（第 201 个 SQL），需要比较 totalRU
     ub.refreshMinSQLIfDirty()
     if ruDelta <= ub.minRUValue {
+        // 新 SQL 的 totalRU 不大于当前最小值，直接放入 others
         *othersRU += ruDelta
         return
     }
-    // 替换
-    *othersRU += ub.minRUValue
+    // 新 SQL 的 totalRU 大于当前最小值，替换 minRUKey
+    *othersRU += ub.minRUValue  // 将被淘汰的 SQL 的 RU 放入 others
     delete(ub.sqlRU, ub.minRUKey)
     ub.sqlRU[key] = ruDelta
-    ub.minRUDirty = true
+    ub.minRUDirty = true  // 需要重新计算 min
+}
+
+func (ub *userBuffer) refreshMinSQLIfDirty() {
+    if !ub.minRUDirty && ub.minRUKey != (UserSQLPlanDigest{}) {
+        return
+    }
+    var minKey UserSQLPlanDigest
+    minRU := math.MaxFloat64
+    for key, ru := range ub.sqlRU {
+        if ru < minRU {
+            minRU = ru
+            minKey = key
+        }
+    }
+    ub.minRUKey = minKey
+    ub.minRUValue = minRU
+    ub.minRUDirty = false
 }
 ```
 
@@ -620,9 +679,9 @@ func (tsr *RemoteTopSQLReporter) processRUIncrementBuffer() {
 }
 ```
 
-### 2.4 数据模型与存储
+### 数据模型与存储
 
-#### 2.4.1 存储方案
+#### 存储方案
 
 采用**分层存储方案**（方案 C），`collecting.records` 存 CPU 数据，`collecting.ruRecords` 存 RU 数据，互不影响。
 
@@ -639,7 +698,7 @@ func (tsr *RemoteTopSQLReporter) processRUIncrementBuffer() {
 - 直接满足"每 user Top 100 & user ≤ 100"的产品约束
 - 与 `collectWorker/reportWorker` 的 60s 上报链路天然匹配
 
-#### 2.4.2 数据结构扩展
+#### 数据结构扩展
 
 **TopRU 上报字段**（与产品侧确认）：
 
@@ -678,7 +737,7 @@ type collecting struct {
 }
 ```
 
-#### 2.4.3 Protobuf 扩展
+#### Protobuf 扩展
 
 TopRU 上报数据通过 Protobuf 协议与外部组件交互，复用 TopSQL 现有的 `SQLMeta` 和 `PlanMeta` 定义，新增 `TopRURecord` 消息类型。
 
@@ -721,16 +780,16 @@ type ReportData struct {
 
 详细协议讨论参考：[TiDB TopRU 协议讨论稿](https://pingcap.feishu.cn/docx/ZLrBdNBkjo5jtcxAzSHcgEiYnZb)
 
-#### 2.4.4 内存控制
+#### 内存控制
 
 | 层级 | 数据结构 | 内存控制策略 |
 |------|----------|--------------|
 | ruIncrementBuffer | 轻量级 map (24 字节/条目) | 硬上限保护：超限汇总到 `_others_` |
 | ruRecords | record + tsItem (100+ 字节/record) | 100 users × 100 条 = 10,000 条上限 |
 
-### 2.5 性能与风险分析
+### 性能与风险分析
 
-#### 2.5.1 性能目标
+#### 性能目标
 
 | 指标 | 目标 |
 |------|------|
@@ -739,7 +798,7 @@ type ReportData struct {
 | 内存开销 | ruRecords ~20k 条，额外 < 1% |
 | CPU 开销 | < 1% 额外开销 |
 
-#### 2.5.2 性能优化措施
+#### 性能优化措施
 
 | 维度 | 措施 |
 |------|------|
@@ -748,7 +807,7 @@ type ReportData struct {
 | 并发 | executionContext 使用 RWMutex（读多写少），减少锁竞争 |
 | 网络 | 60s 批量上报，复用 TopSQL 现有上报链路 |
 
-#### 2.5.3 风险与缓解
+#### 风险与缓解
 
 | 风险 | 缓解措施 |
 |------|----------|
@@ -756,11 +815,11 @@ type ReportData struct {
 | CPU 突增 | RU 采集与 CPU 采集在同一调用路径，开销可控 |
 | 数据不准确 | Resource Control 未启用时 RU = 0，文档明确说明依赖关系 |
 
-### 2.6 与其他可观测性模块联动
+### 与其他可观测性模块联动
 
 - 使用 `(sql_digest, plan_digest)` 作为关联键，支持跳转到慢日志详情或者 Statement Summary。
 
-## 3. Limitation
+## Limitation
 
 1. **采样精度限制**: 执行时间 < 1s 的 SQL 可能只有执行完成时的一次采样
 
@@ -781,16 +840,16 @@ type ReportData struct {
 
 7. **用户维度限制**: 当前支持按用户名聚合，不支持按 Resource Group 聚合（后续可扩展）
 
-## 4. Compatibility Issues
+## Compatibility Issues
 
-### 4.1 Functional Compatibility
+### Functional Compatibility
 
 | 功能 | 兼容性说明 |
 |------|------------|
 | Resource Control | 需启用 Resource Control 才能获取准确 RU 数据；未启用时 RU = 0，不影响其他功能 |
 | TopSQL | 与现有 CPU 统计完全兼容，可同时按 CPU/RU 排序 |
 
-### 4.2 Upgrade Compatibility
+### Upgrade Compatibility
 
 | 方面 | 兼容性说明                           |
 |------|---------------------------------|
@@ -798,9 +857,9 @@ type ReportData struct {
 | Protobuf | RU 字段使用 optional，旧客户端可忽略新字段(待定) |
 | 数据 | 内存数据不持久化，升级后重新采集                |
 
-## 5. Test Design
+## Test Design
 
-### 5.1 Functional Test
+### Functional Test
 
 | 测试类别 | 测试内容 |
 |----------|----------|
@@ -809,7 +868,7 @@ type ReportData struct {
 | 查询 | 按 RU 排序、按 user 维度查询、Top N 排序、RU Share Percent 计算 |
 | 边界 | RU = 0（Resource Control 未启用）、user 为空（内部 SQL）、执行时间 < 1s |
 
-### 5.2 Performance Test
+### Performance Test
 
 - 基准测试：测量本地采样和上报开销，验证内存占用
   - 1000 users × 500 条活跃 SQL 采集
@@ -817,16 +876,16 @@ type ReportData struct {
   - 观察 CPU 和内存使用
 - 回归测试：确保 TopSQL 现有性能不受影响
 
-### 5.3 Compatibility Test
+### Compatibility Test
 
 - Resource Control 启用/禁用场景
 - Protobuf 向前兼容性
 - 与 TopSQL 现有功能的共存
 - 从旧版本 TopSQL 升级后的行为
 
-## 6. Impact & Risk
+## Impact & Risk
 
-### 6.1 Risks & Mitigations
+### Risks & Mitigations
 
 | 风险 | 缓解措施 |
 |------|----------|
@@ -835,11 +894,50 @@ type ReportData struct {
 | 数据不准确 | 文档明确 Resource Control 依赖，未启用时 RU = 0 |
 | 兼容性问题 | optional 字段 + 充分测试 |
 
-### 6.2 Rollback Plan
+### Rollback Plan
 
 TopRU 功能支持通过配置开关动态禁用，无需重启：
 - 禁用后停止采样和上报
 - 已采集数据随上报周期清空
 - 不影响 TopSQL 现有功能
 
-## 7. Investigation & Alternatives
+## Investigation & Alternatives
+
+### 原方案：10s 聚合 TopK 过滤
+
+**原方案描述**：
+- 1s 采集时将所有 RU 增量写入 `ruIncrementBuffer`，不做过滤
+- 10s 时触发聚合，对每个 user 的 SQL 按 totalRU 排序，取 Top 100
+- 超出 Top 100 的 SQL 汇总到 `_others_`
+
+**内存估算基准**（基于 TopRU 上报字段）：
+
+| 字段 | 类型 | 大小 |
+|------|------|------|
+| Keyspace | []byte | ~16 字节 |
+| User | string | ~16 字节（平均用户名） |
+| SQLDigest | []byte | 32 字节（SHA256） |
+| PlanDigest | []byte | 32 字节（SHA256） |
+| TotalRU | float64 | 8 字节 |
+| ExecCount | uint64 | 8 字节 |
+| SumDurationNs | uint64 | 8 字节 |
+| **合计** | | **~120 字节/条目** |
+
+注：实际内存占用还需考虑 Go map 开销（约 50%），因此每条目实际占用约 **180 字节**。
+
+**不足之处**：
+
+1. **内存风险高**：
+   - 极端场景（1000 users × 5000 SQL）下，`ruIncrementBuffer` 可能在 1s 内膨胀到 500 万条目
+   - 每条目约 180 字节，1s 内存占用可达 ~900 MB，10s 累积可能达到 **9 GB**
+   - 高并发场景下极易触发 OOM
+
+2. **计算开销大**：
+   - 10s 聚合时需要对所有 users 的所有 SQL 进行全量排序
+   - 1000 users × 5000 SQL 的排序复杂度为 O(n log n)，耗时可能超过百毫秒
+   - 影响 collectWorker 主循环，可能导致上报延迟
+
+3. **缺乏前置保护**：
+   - 1s 采集时不做限流，完全依赖 10s 过滤
+   - 如果 10s 过滤失败或延迟，内存可能失控
+   - 缺少"fail-safe"机制
