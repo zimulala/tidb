@@ -106,6 +106,212 @@ TopRU 的核心价值：当监控系统检测到 RU 限流事件时，TopRU 提�
 
 ## 3. Detailed Design
 
+### Architecture Overview
+
+TopRU 采用**三层缓冲架构**，复用 TopSQL 的采集和上报链路，在保证实时性的同时控制内存开销。
+
+**现有 TopSQL 架构（CPU Time / StatementStats）**：
+
+```
++---------------------------------------------------------------------------------+
+|                            SQL Execution Layer                                  |
+|  +------------------------------------+    +-------------------------------+    |
+|  | pprof.SetGoroutineLabels()         |    | OnExecutionFinished           |    |
+|  | (sql_digest, plan_digest label)    |    | (write StatementStats.data)   |    |
+|  +-------------------+----------------+    +---------------+---------------+    |
++----------------------|-------------------------------------|--------------------|+
+                       | (CPU Time pipeline)                 | (StmtStats pipeline)
+                       v                                     v
++---------------------------------------------------------------------------------+
+|                          Data Collection Layer                                  |
+|                                                                                 |
+|  +----------------------------------+    +----------------------------------+   |
+|  | SQLCPUCollector                  |    | StatementStats.data              |   |
+|  | - profileConsumer recv profile   |    | map[SQLPlanDigest]*Item          |   |
+|  | - parseCPUProfileBySQLLabels()   |    | - ExecCount, Duration            |   |
+|  | - parse pprof label get CPU Time |    | - NetworkBytes, KvStats          |   |
+|  +----------------+-----------------+    +----------------+-----------------+   |
+|                   |                                       |                     |
+|                   v Collect() per 1s                      v aggregator.aggregate()
+|                   |                                       | per 1s Take() + Merge
+|  +----------------+---------------------------------------+------------------+  |
+|  |                      RemoteTopSQLReporter.collectWorker                   |  |
+|  |  collectCPUTimeChan        collectStmtStatsChan                           |  |
+|  |        |                          |                                       |  |
+|  |        v                          v                                       |  |
+|  |  processCPUTimeData()       stmtStatsBuffer (buffer by timestamp)         |  |
+|  |  - TopN filter                    |                                       |  |
+|  |  - evicted -> others              v                                       |  |
+|  |        |                    processStmtStatsData() (per 60s)              |  |
+|  |        |                    - TopN by NetworkBytes                        |  |
+|  |        |                    - merge to collecting.records                 |  |
+|  |        v                          |                                       |  |
+|  |  +-----------------------------+--+------------------------------------+  |  |
+|  |  | collecting.records                                                  |  |  |
+|  |  | map[string]*record  (key: sql_digest + plan_digest)                 |  |  |
+|  |  | - record.tsItems: cpuTimeMs + stmtStats (merge same timestamp)      |  |  |
+|  |  +---------------------------------------------------------------------+  |  |
+|  +--------------------------------------+------------------------------------+  |
++-----------------------------------------|---------------------------------------+
+                                          | per 60s reportTicker
+                                          v
++---------------------------------------------------------------------------------+
+|                              Report Layer                                       |
+|  +---------------------------------------------------------------------------+  |
+|  | takeDataAndSendToReportChan()                                             |  |
+|  | - getReportRecords(): sort by totalCPUTimeMs, take TopN                   |  |
+|  | -> reportCollectedDataChan -> reportWorker -> DataSink                    |  |
+|  +---------------------------------------------------------------------------+  |
++---------------------------------------------------------------------------------+
+```
+
+Mermaid 版：
+
+```mermaid
+---
+config:
+  theme: neutral
+---
+flowchart TB
+    subgraph SQL_Execution["SQL Execution Layer"]
+        ex1["pprof.SetGoroutineLabels<br/>(sql_digest, plan_digest)"]
+        ex2["OnExecutionFinished<br/>(write StatementStats.data)"]
+    end
+
+    subgraph Data_Collection["Data Collection Layer"]
+        cpu["SQLCPUCollector<br/>profileConsumer + parseCPUProfileBySQLLabels"]
+        agg["aggregator.aggregate() (1s)<br/>Take() + Merge"]
+    end
+
+    subgraph Reporter["RemoteTopSQLReporter.collectWorker"]
+        cpuChan["collectCPUTimeChan"]
+        stmtChan["collectStmtStatsChan"]
+        procCPU["processCPUTimeData()<br/>TopN + others"]
+        stmtBuf["stmtStatsBuffer<br/>(buffer by timestamp)"]
+        procStmt["processStmtStatsData() (60s)<br/>TopN by NetworkBytes + merge"]
+    end
+
+    subgraph Storage["Buffer & Storage Layer"]
+        rec["collecting.records<br/>record.tsItems: cpuTimeMs + stmtStats"]
+    end
+
+    subgraph Report["Report Layer"]
+        ticker["reportTicker (60s)"]
+        send["takeDataAndSendToReportChan()"]
+        worker["reportWorker"]
+        sink["DataSink"]
+    end
+
+    ex1 -- "1s Collect()" --> cpu
+    cpu --> cpuChan --> procCPU --> rec
+
+    ex2 --> agg --> stmtChan --> stmtBuf --> procStmt --> rec
+
+    rec --> send
+    ticker --> send --> worker --> sink
+```
+
+**TopRU 扩展架构（新增 RU 采集链路）**：
+
+```
++-------------------------------------------------------------------------+
+|                           SQL Execution Layer                           |
+|  +--------------+    +------------------+    +------------------------+ |
+|  | StartExecution|    | OnExecution      |    | util.RUDetails         | |
+|  | (register ctx)|    | Finished         |    | (KV response accum RU) | |
+|  +------+-------+    +--------+---------+    +-----------+------------+ |
++---------|--------------------|-------------------------|----------------+
+          |                    |                         |
+          v                    v                         v
++-------------------------------------------------------------------------+
+|                        Data Collection Layer                            |
+|  +-------------------------------------------------------------------+  |
+|  | StatementStats.executionContext                                   |  |
+|  | (store running SQL ctx: Ctx, LastRUSample, SQLDigest, User)       |  |
+|  +-------------------------------------------------------------------+  |
+|                              |                                          |
+|              +---------------+---------------+                          |
+|              v                               v                          |
+|    +------------------+            +------------------+                  |
+|    | 1s periodic sample|            | on finish collect |                 |
+|    | (ruAggregate)    |            | (final data)     |                  |
+|    +--------+---------+            +--------+---------+                  |
+|             +---------------+---------------+                           |
++-----------------------------|-----------------------------------------+
+                              v
++-------------------------------------------------------------------------+
+|                        Buffer & Storage Layer                           |
+|                                                                         |
+|  Layer 1: ruIncrementBuffer (1s write, with 3-layer filtering)          |
+|  +-------------------------------------------------------------------+  |
+|  | timestampBuffer: map[uint64]*timestampBuffer                      |  |
+|  |   - Layer 1: max 200 users per timestamp                          |  |
+|  |     - track userTotalRU, evict minRU user when > 200              |  |
+|  |   - Layer 2: max 200 SQLs per user                                |  |
+|  |     - track sqlRU, evict minRU SQL when > 200                     |  |
+|  |   - Layer 3: othersRU (evicted RU aggregated here)                |  |
+|  +-------------------------------------------------------------------+  |
+|                              | per 10s filter + transfer to ruRecords    |
+|                              v                                           |
+|  Layer 2: collecting.ruRecords (10s write)                               |
+|  +-------------------------------------------------------------------+   |
+|  | map[string]*record  (heavy object: ~180 bytes/record)             |   |
+|  | - key: user + sqlDigest + planDigest                              |   |
+|  | - 10s filter: 200x200 -> 100 users x 100 SQLs = 10,000 max        |   |
+|  | - each record contains tsItems time bucket data                   |   |
+|  +-------------------------------------------------------------------+   |
+|                              | per 60s trigger report                   |
+|                              v                                          |
+|  Layer 3: Report (60s report)                                           |
+|  +-------------------------------------------------------------------+  |
+|  | takeDataAndSendToReportChan() -> reportWorker -> DataSink         |  |
+|  | - reuse TopSQL existing report pipeline                           |  |
+|  | - RU data batch reported with CPU data                            |  |
+|  +-------------------------------------------------------------------+  |
++-------------------------------------------------------------------------+
+```
+
+Mermaid 版：
+
+```mermaid
+---
+config:
+  theme: neutral
+---
+flowchart TB
+  subgraph SQL_Execution2["SQL Execution Layer"]
+    begin["StartExecution<br/>(register context)"]
+    finish["OnExecutionFinished"]
+    rud["util.RUDetails<br/>(KV response accumulates RU)"]
+  end
+
+  subgraph Data_Collection2["Data Collection Layer"]
+    execCtx["StatementStats.executionContext<br/>Ctx, LastRUSample, Digests, User"]
+    sample["ruAggregate() (1s)<br/>collectActiveRUInto()"]
+    finishCollect["final RU collect<br/>(delta + cleanup)"]
+  end
+
+  subgraph Buffer2["Buffer & Storage Layer"]
+    buf["timestampBuffer (1s)<br/>3-layer filter: 200 users × 200 SQLs"]
+    filter["Layer 1: user limit (200)<br/>Layer 2: SQL limit (200/user)<br/>Layer 3: othersRU"]
+    process10["processRUIncrementBuffer() (10s)<br/>200×200 → 100×100 filter"]
+    ruRecords["collecting.ruRecords<br/>record.tsItems.TotalRU"]
+  end
+
+  subgraph Report2["Report Layer"]
+    send2["takeDataAndSendToReportChan() (60s)"]
+    worker2["reportWorker"]
+    sink2["DataSink"]
+  end
+
+  begin --> execCtx
+  execCtx -- "1s" --> sample --> buf
+  finish --> finishCollect --> buf
+  buf --> filter
+  filter -- "10s" --> process10 --> ruRecords
+  ruRecords -- "60s" --> send2 --> worker2 --> sink2
+```
+
 ### 3.1 功能与语义定义
 
 #### 3.1.1 TopRU 的精确定义
