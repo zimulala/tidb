@@ -23,6 +23,7 @@ import (
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	reporter_metrics "github.com/pingcap/tidb/pkg/util/topsql/reporter/metrics"
+	topsqlstate "github.com/pingcap/tidb/pkg/util/topsql/state"
 	"github.com/pingcap/tipb/go-tipb"
 	"go.uber.org/zap"
 )
@@ -45,8 +46,8 @@ var _ tipb.TopSQLPubSubServer = &TopSQLPubSubService{}
 
 // Subscribe registers dataSinks to the reporter and redirects data received from reporter
 // to subscribers associated with those dataSinks.
-func (ps *TopSQLPubSubService) Subscribe(_ *tipb.TopSQLSubRequest, stream tipb.TopSQLPubSub_SubscribeServer) error {
-	ds := newPubSubDataSink(stream, ps.dataSinkRegisterer)
+func (ps *TopSQLPubSubService) Subscribe(req *tipb.TopSQLSubRequest, stream tipb.TopSQLPubSub_SubscribeServer) error {
+	ds := newPubSubDataSink(req, stream, ps.dataSinkRegisterer)
 	if err := ps.dataSinkRegisterer.Register(ds); err != nil {
 		return err
 	}
@@ -62,12 +63,26 @@ type pubSubDataSink struct {
 
 	// for deregister
 	registerer DataSinkRegisterer
+
+	// TopRU subscription config
+	enableTopRU    bool
+	reportInterval tipb.ReportInterval
 }
 
-func newPubSubDataSink(stream tipb.TopSQLPubSub_SubscribeServer, registerer DataSinkRegisterer) *pubSubDataSink {
+// newPubSubDataSink creates a DataSink for PubSub subscription.
+//
+// Design: Subscription Lifecycle Management
+//   - Parses TopRU config from subscription request (enable_top_ru, report_interval)
+//   - Enables global TopRU state if requested (activates collection)
+//   - State is disabled in run() defer when subscription ends
+//
+// Protocol Compatibility:
+//   - Old clients without enable_top_ru field: GetEnableTopRu() returns false
+//   - TopRU data only sent if enableTopRU is true (backward compatible)
+func newPubSubDataSink(req *tipb.TopSQLSubRequest, stream tipb.TopSQLPubSub_SubscribeServer, registerer DataSinkRegisterer) *pubSubDataSink {
 	ctx, cancel := context.WithCancel(stream.Context())
 
-	return &pubSubDataSink{
+	ds := &pubSubDataSink{
 		ctx:    ctx,
 		cancel: cancel,
 
@@ -75,7 +90,21 @@ func newPubSubDataSink(stream tipb.TopSQLPubSub_SubscribeServer, registerer Data
 		sendTaskCh: make(chan sendTask, 1),
 
 		registerer: registerer,
+
+		enableTopRU:    req.GetEnableTopRu(),
+		reportInterval: req.GetReportInterval(),
 	}
+
+	// Enable TopRU if requested by subscription.
+	// This activates RU collection in aggregator.aggregateRU().
+	if ds.enableTopRU {
+		topsqlstate.EnableTopRU()
+		if interval := req.GetReportInterval(); interval != tipb.ReportInterval_REPORT_INTERVAL_UNSPECIFIED {
+			topsqlstate.SetTopRUReportInterval(int64(interval))
+		}
+	}
+
+	return ds
 }
 
 var _ DataSink = &pubSubDataSink{}
@@ -103,6 +132,10 @@ func (ds *pubSubDataSink) run() error {
 			logutil.BgLogger().Error("[top-sql] got panic in pub sub data sink, just ignore", zap.Error(util.GetRecoverError(r)))
 		}
 		ds.registerer.Deregister(ds)
+		// Disable TopRU if this sink enabled it
+		if ds.enableTopRU {
+			topsqlstate.DisableTopRU()
+		}
 		ds.cancel()
 	}()
 
@@ -160,6 +193,9 @@ func (ds *pubSubDataSink) doSend(ctx context.Context, data *ReportData) error {
 	if err := ds.sendTopSQLRecords(ctx, data.DataRecords); err != nil {
 		return err
 	}
+	if err := ds.sendTopRURecords(ctx, data.RURecords); err != nil {
+		return err
+	}
 	if err := ds.sendSQLMeta(ctx, data.SQLMetas); err != nil {
 		return err
 	}
@@ -187,6 +223,57 @@ func (ds *pubSubDataSink) sendTopSQLRecords(ctx context.Context, records []tipb.
 
 	for i := range records {
 		topSQLRecord.Record = &records[i]
+		if err = ds.stream.Send(r); err != nil {
+			return
+		}
+		sentCount++
+
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+			return
+		default:
+		}
+	}
+
+	return
+}
+
+// sendTopRURecords sends TopRU records to subscriber via PubSub stream.
+//
+// Design: Defense-in-depth gating
+//   - Early return if no records or TopRU disabled
+//   - Uses TopSQLSubResponse_RuRecord oneof (protocol field 4)
+//   - Parallel structure to sendTopSQLRecords for consistency
+//
+// Phase 2: Records will be populated after two-level TopN filtering in reporter.
+func (ds *pubSubDataSink) sendTopRURecords(ctx context.Context, records []tipb.TopRURecord) (err error) {
+	if len(records) == 0 {
+		return
+	}
+
+	// Defense-in-depth: Only send RU records if TopRU is enabled.
+	// Primary gate is in aggregator.aggregateRU().
+	if !topsqlstate.TopRUEnabled() {
+		return
+	}
+
+	start := time.Now()
+	sentCount := 0
+	defer func() {
+		// TODO: add RU-specific metrics later
+		if err != nil {
+			reporter_metrics.ReportRecordDurationFailedHistogram.Observe(time.Since(start).Seconds())
+		} else {
+			reporter_metrics.ReportRecordDurationSuccHistogram.Observe(time.Since(start).Seconds())
+		}
+	}()
+
+	topRURecord := &tipb.TopSQLSubResponse_RuRecord{}
+	r := &tipb.TopSQLSubResponse{RespOneof: topRURecord}
+
+	for i := range records {
+		topRURecord.RuRecord = &records[i]
 		if err = ds.stream.Send(r); err != nil {
 			return
 		}

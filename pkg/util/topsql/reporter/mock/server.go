@@ -106,6 +106,27 @@ func (svr *mockAgentServer) ReportTopSQLRecords(stream tipb.TopSQLAgent_ReportTo
 	return stream.SendAndClose(&tipb.EmptyResponse{})
 }
 
+// ReportTopRURecords implements tipb.TopSQLAgentServer for TopRU records.
+// Phase 1: Stub implementation - drains stream and ignores RU records.
+//
+// Phase 2 Extension Point:
+//   - TODO(M3): Store RU records for test verification
+//   - TODO(M3): Add GetLatestRURecords() method parallel to GetLatestRecords()
+func (svr *mockAgentServer) ReportTopRURecords(stream tipb.TopSQLAgent_ReportTopRURecordsServer) error {
+	// Stub: drain stream and ignore RU records for now.
+	// RU records will be stored when M3 TopN buffering is implemented.
+	for {
+		svr.mayHang()
+		_, err := stream.Recv()
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			return err
+		}
+	}
+	return stream.SendAndClose(&tipb.EmptyResponse{})
+}
+
 func (svr *mockAgentServer) ReportSQLMeta(stream tipb.TopSQLAgent_ReportSQLMetaServer) error {
 	for {
 		svr.mayHang()

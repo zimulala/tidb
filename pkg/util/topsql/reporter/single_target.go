@@ -204,8 +204,8 @@ func (ds *SingleTargetDataSink) doSend(addr string, task sendTask) {
 	}
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 3)
-	wg.Add(3)
+	errCh := make(chan error, 4)
+	wg.Add(4)
 
 	go func() {
 		defer wg.Done()
@@ -218,6 +218,10 @@ func (ds *SingleTargetDataSink) doSend(addr string, task sendTask) {
 	go func() {
 		defer wg.Done()
 		errCh <- ds.sendBatchTopSQLRecord(ctx, task.data.DataRecords)
+	}()
+	go func() {
+		defer wg.Done()
+		errCh <- ds.sendBatchTopRURecord(ctx, task.data.RURecords)
 	}()
 	wg.Wait()
 	close(errCh)
@@ -258,6 +262,43 @@ func (ds *SingleTargetDataSink) sendBatchTopSQLRecord(ctx context.Context, recor
 	}
 
 	// See https://pkg.go.dev/google.golang.org/grpc#ClientConn.NewStream for how to avoid leaking the stream
+	_, err = stream.CloseAndRecv()
+	return
+}
+
+// sendBatchTopRURecord sends a batch of TopRU records by stream.
+// Uses ReportTopRURecords RPC from extended tipb protocol.
+//
+// Design: Parallel to sendBatchTopSQLRecord for consistency.
+// Phase 2: Records will be populated after two-level TopN filtering.
+func (ds *SingleTargetDataSink) sendBatchTopRURecord(ctx context.Context, records []tipb.TopRURecord) (err error) {
+	if len(records) == 0 {
+		return nil
+	}
+
+	start := time.Now()
+	sentCount := 0
+	defer func() {
+		// TODO: add RU-specific metrics later
+		if err != nil {
+			reporter_metrics.ReportRecordDurationFailedHistogram.Observe(time.Since(start).Seconds())
+		} else {
+			reporter_metrics.ReportRecordDurationSuccHistogram.Observe(time.Since(start).Seconds())
+		}
+	}()
+
+	client := tipb.NewTopSQLAgentClient(ds.conn)
+	stream, err := client.ReportTopRURecords(ctx)
+	if err != nil {
+		return err
+	}
+	for i := range records {
+		if err = stream.Send(&records[i]); err != nil {
+			return
+		}
+		sentCount++
+	}
+
 	_, err = stream.CloseAndRecv()
 	return
 }

@@ -68,6 +68,7 @@ type TopSQLReporter interface {
 
 var _ TopSQLReporter = &RemoteTopSQLReporter{}
 var _ DataSinkRegisterer = &RemoteTopSQLReporter{}
+var _ stmtstats.RUCollector = &RemoteTopSQLReporter{}
 
 // RemoteTopSQLReporter implements TopSQLReporter that sends data to a remote agent.
 // This should be called periodically to collect TopSQL resource usage metrics.
@@ -78,6 +79,7 @@ type RemoteTopSQLReporter struct {
 	sqlCPUCollector         *collector.SQLCPUCollector
 	collectCPUTimeChan      chan []collector.SQLCPUTimeRecord
 	collectStmtStatsChan    chan stmtstats.StatementStatsMap
+	collectRUIncrementsChan chan stmtstats.RUIncrementMap
 	collecting              *collecting
 	normalizedSQLMap        *normalizedSQLMap
 	normalizedPlanMap       *normalizedPlanMap
@@ -101,6 +103,7 @@ func NewRemoteTopSQLReporter(decodePlan planBinaryDecodeFunc, compressPlan planB
 		cancel:                    cancel,
 		collectCPUTimeChan:        make(chan []collector.SQLCPUTimeRecord, collectChanBufferSize),
 		collectStmtStatsChan:      make(chan stmtstats.StatementStatsMap, collectChanBufferSize),
+		collectRUIncrementsChan:   make(chan stmtstats.RUIncrementMap, collectChanBufferSize),
 		reportCollectedDataChan:   make(chan collectedData, 1),
 		collecting:                newCollecting(),
 		normalizedSQLMap:          newNormalizedSQLMap(),
@@ -162,6 +165,31 @@ func (tsr *RemoteTopSQLReporter) CollectStmtStatsMap(data stmtstats.StatementSta
 	}
 }
 
+// CollectRUIncrements implements stmtstats.RUCollector.
+// Called by aggregator every 1s with merged RU increments from all sessions.
+//
+// Design Rationale:
+//   - Non-blocking push to channel (drops on full, logs metric)
+//   - Separate channel from TopSQL stmtstats for pipeline independence
+//   - Currently data is dropped in collectWorker pending M3 implementation
+//
+// Phase 2 Extension Point:
+//   - TODO(M3): collectWorker will buffer into ruIncrementBuffer with TopN
+//
+// WARN: It will drop the data if the processing is not in time.
+// This function is thread-safe and efficient.
+func (tsr *RemoteTopSQLReporter) CollectRUIncrements(data stmtstats.RUIncrementMap) {
+	if len(data) == 0 {
+		return
+	}
+	select {
+	case tsr.collectRUIncrementsChan <- data:
+	default:
+		// ignore if chan blocked
+		reporter_metrics.IgnoreCollectChannelFullCounter.Inc()
+	}
+}
+
 // RegisterSQL implements TopSQLReporter.
 //
 // This function is thread-safe and efficient.
@@ -200,6 +228,15 @@ func (tsr *RemoteTopSQLReporter) collectWorker() {
 		case data := <-tsr.collectStmtStatsChan:
 			timestamp := uint64(nowFunc().Unix())
 			tsr.stmtStatsBuffer[timestamp] = data
+		case data := <-tsr.collectRUIncrementsChan:
+			// Phase 2 Extension Point:
+			// TODO(M3): Implement two-level TopN buffering for RU increments
+			//   1. ruIncrementBuffer.Add(ts=sec, increments) with 200×200 TopN
+			//   2. Every 15s: merge to ruPointBucket[startTs]
+			//   3. Every report_interval: merge buckets, 100×100 final filtering
+			//   4. Build tipb.TopRURecord and populate ReportData.RURecords
+			// For now, just drop the data to avoid blocking aggregator
+			_ = data
 		case <-reportTicker.C:
 			tsr.processStmtStatsData()
 			tsr.takeDataAndSendToReportChan()

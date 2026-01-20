@@ -32,13 +32,14 @@ var globalAggregator = newAggregator()
 // It is responsible for collecting data from all StatementStats, aggregating
 // them together, uploading them and regularly cleaning up the closed StatementStats.
 type aggregator struct {
-	ctx        context.Context
-	cancel     context.CancelFunc
-	running    *atomic.Bool
-	statsSet   sync.Map // map[*StatementStats]struct{}
-	collectors sync.Map // map[Collector]struct{}
-	wg         sync.WaitGroup
-	statsLen   atomic.Uint32
+	ctx          context.Context
+	cancel       context.CancelFunc
+	running      *atomic.Bool
+	statsSet     sync.Map // map[*StatementStats]struct{}
+	collectors   sync.Map // map[Collector]struct{}
+	ruCollectors sync.Map // map[RUCollector]struct{}
+	wg           sync.WaitGroup
+	statsLen     atomic.Uint32
 }
 
 // newAggregator creates an empty aggregator.
@@ -69,6 +70,7 @@ func (m *aggregator) run() {
 			return
 		case <-tick.C:
 			m.aggregate()
+			m.aggregateRU()
 		}
 	}
 }
@@ -89,6 +91,41 @@ func (m *aggregator) aggregate() {
 	if len(total) > 0 && state.TopSQLEnabled() {
 		m.collectors.Range(func(c, _ any) bool {
 			c.(Collector).CollectStmtStatsMap(total)
+			return true
+		})
+	}
+}
+
+// aggregateRU collects RU increment data from all associated StatementStats.
+// This runs in parallel with aggregate() on each 1s tick.
+//
+// Design Rationale (D2 - Separate RU Pipeline):
+//   - TopRU runs independently from TopSQL (CPU) pipeline
+//   - aggregate() -> Collector.CollectStmtStatsMap() for TopSQL
+//   - aggregateRU() -> RUCollector.CollectRUIncrements() for TopRU
+//   - Separate enable flags: TopSQLEnabled() vs TopRUEnabled()
+//
+// Behavior:
+//   1. Iterates all registered StatementStats
+//   2. Calls MergeRUInto() to drain RU increments from each session
+//   3. Merges all increments into single RUIncrementMap
+//   4. Gates on TopRUEnabled() - drops data if disabled
+//   5. Pushes to all registered RUCollectors
+//
+// Phase 2 Extension Point:
+//   - TODO(M3): TopN filtering should happen in reporter, not here
+func (m *aggregator) aggregateRU() {
+	total := RUIncrementMap{}
+	m.statsSet.Range(func(statsR, _ any) bool {
+		stats := statsR.(*StatementStats)
+		// No need to check Finished() again - already checked in aggregate()
+		total.Merge(stats.MergeRUInto())
+		return true
+	})
+	// If TopRU is not enabled, just drop them.
+	if len(total) > 0 && state.TopRUEnabled() {
+		m.ruCollectors.Range(func(c, _ any) bool {
+			c.(RUCollector).CollectRUIncrements(total)
 			return true
 		})
 	}
@@ -121,6 +158,18 @@ func (m *aggregator) registerCollector(collector Collector) {
 // unregisterCollector is thread-safe.
 func (m *aggregator) unregisterCollector(collector Collector) {
 	m.collectors.Delete(collector)
+}
+
+// registerRUCollector binds an RUCollector to aggregator.
+// registerRUCollector is thread-safe.
+func (m *aggregator) registerRUCollector(collector RUCollector) {
+	m.ruCollectors.Store(collector, struct{}{})
+}
+
+// unregisterRUCollector removes RUCollector from aggregator.
+// unregisterRUCollector is thread-safe.
+func (m *aggregator) unregisterRUCollector(collector RUCollector) {
+	m.ruCollectors.Delete(collector)
 }
 
 // close ends the execution of the current aggregator.
@@ -164,8 +213,41 @@ func UnregisterCollector(collector Collector) {
 	globalAggregator.unregisterCollector(collector)
 }
 
+// RegisterRUCollector binds an RUCollector to globalAggregator.
+// Called at TopSQL startup to wire reporter into RU data flow.
+// RegisterRUCollector is thread-safe.
+func RegisterRUCollector(collector RUCollector) {
+	globalAggregator.registerRUCollector(collector)
+}
+
+// UnregisterRUCollector removes RUCollector from globalAggregator.
+// UnregisterRUCollector is thread-safe.
+func UnregisterRUCollector(collector RUCollector) {
+	globalAggregator.unregisterRUCollector(collector)
+}
+
 // Collector is used to collect StatementStatsMap.
 type Collector interface {
 	// CollectStmtStatsMap is used to collect StatementStatsMap.
 	CollectStmtStatsMap(StatementStatsMap)
+}
+
+// RUCollector is used to collect RU increment data.
+// This interface is parallel to Collector but handles TopRU data flow.
+//
+// Design Rationale:
+//   - Separate interface from Collector to maintain TopSQL/TopRU independence
+//   - Single method design matches Collector pattern
+//   - Reporter implements this interface to receive aggregated RU data
+//
+// Data Flow:
+//   aggregator (1s tick) -> RUCollector.CollectRUIncrements()
+//   -> Reporter.collectRUIncrementsChan -> collectWorker
+//
+// Phase 2 Extension Point:
+//   - TODO(M3): Reporter will apply two-level TopN buffering after receiving data
+type RUCollector interface {
+	// CollectRUIncrements is called by aggregator every 1s with merged RU deltas
+	// from all sessions, aggregated by (user, sql_digest, plan_digest).
+	CollectRUIncrements(RUIncrementMap)
 }

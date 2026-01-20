@@ -58,6 +58,12 @@ func SetupTopSQL(keyspaceName []byte, updater collector.ProcessCPUTimeUpdater) {
 	singleTargetDataSink.Start()
 
 	stmtstats.RegisterCollector(globalTopSQLReport)
+	// Register reporter as RUCollector to receive RU increments from aggregator.
+	// This wires the TopRU data flow: aggregator -> reporter -> agent.
+	// Type assertion ensures backward compatibility if reporter doesn't implement RUCollector.
+	if ruCollector, ok := globalTopSQLReport.(stmtstats.RUCollector); ok {
+		stmtstats.RegisterRUCollector(ruCollector)
+	}
 	stmtstats.SetupAggregator()
 }
 
