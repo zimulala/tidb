@@ -48,8 +48,7 @@ type DataSinkRegisterer interface {
 //   - RURecords: TopRU records (new, separate from CPU)
 //   - Both share SQLMetas/PlanMetas for digest->text lookup
 //
-// Phase 2 Extension Point:
-//   - TODO(M3): RURecords will be populated from ruPointBucket after TopN filtering
+// Phase 2: RURecords populated from ruCollecting.getReportRecords() with Hybrid TopN.
 type ReportData struct {
 	// DataRecords contains the topN records of each second and the `others`
 	// record which aggregation all []tipb.TopSQLRecord that is out of Top N.

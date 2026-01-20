@@ -38,6 +38,7 @@ type mockAgentServer struct {
 	planMetas  map[string]string
 	addr       string
 	records    [][]*tipb.TopSQLRecord
+	ruRecords  [][]*tipb.TopRURecord // Phase 2: RU records storage
 	sync.Mutex
 }
 
@@ -107,23 +108,22 @@ func (svr *mockAgentServer) ReportTopSQLRecords(stream tipb.TopSQLAgent_ReportTo
 }
 
 // ReportTopRURecords implements tipb.TopSQLAgentServer for TopRU records.
-// Phase 1: Stub implementation - drains stream and ignores RU records.
-//
-// Phase 2 Extension Point:
-//   - TODO(M3): Store RU records for test verification
-//   - TODO(M3): Add GetLatestRURecords() method parallel to GetLatestRecords()
+// Phase 2: Stores RU records for test verification.
 func (svr *mockAgentServer) ReportTopRURecords(stream tipb.TopSQLAgent_ReportTopRURecordsServer) error {
-	// Stub: drain stream and ignore RU records for now.
-	// RU records will be stored when M3 TopN buffering is implemented.
+	ruRecords := make([]*tipb.TopRURecord, 0, 10)
 	for {
 		svr.mayHang()
-		_, err := stream.Recv()
+		req, err := stream.Recv()
 		if err == io.EOF {
 			break
 		} else if err != nil {
 			return err
 		}
+		ruRecords = append(ruRecords, req)
 	}
+	svr.Lock()
+	svr.ruRecords = append(svr.ruRecords, ruRecords)
+	svr.Unlock()
 	return stream.SendAndClose(&tipb.EmptyResponse{})
 }
 
@@ -239,6 +239,27 @@ func (svr *mockAgentServer) GetLatestRecords() []*tipb.TopSQLRecord {
 		return nil
 	}
 	return records[len(records)-1]
+}
+
+// GetLatestRURecords returns the latest batch of RU records and clears storage.
+// Phase 2: Used for test verification of TopRU data flow.
+func (svr *mockAgentServer) GetLatestRURecords() []*tipb.TopRURecord {
+	svr.Lock()
+	ruRecords := svr.ruRecords
+	svr.ruRecords = [][]*tipb.TopRURecord{}
+	svr.Unlock()
+
+	if len(ruRecords) == 0 {
+		return nil
+	}
+	return ruRecords[len(ruRecords)-1]
+}
+
+// RURecordsCnt returns the count of RU record batches received.
+func (svr *mockAgentServer) RURecordsCnt() int {
+	svr.Lock()
+	defer svr.Unlock()
+	return len(svr.ruRecords)
 }
 
 func (svr *mockAgentServer) GetTotalSQLMetas() []tipb.SQLMeta {

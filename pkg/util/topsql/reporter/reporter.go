@@ -81,6 +81,7 @@ type RemoteTopSQLReporter struct {
 	collectStmtStatsChan    chan stmtstats.StatementStatsMap
 	collectRUIncrementsChan chan stmtstats.RUIncrementMap
 	collecting              *collecting
+	ruCollecting            *ruCollecting // Phase 2: RU data collection with Hybrid TopN
 	normalizedSQLMap        *normalizedSQLMap
 	normalizedPlanMap       *normalizedPlanMap
 	stmtStatsBuffer         map[uint64]stmtstats.StatementStatsMap // timestamp => stmtstats.StatementStatsMap
@@ -106,6 +107,7 @@ func NewRemoteTopSQLReporter(decodePlan planBinaryDecodeFunc, compressPlan planB
 		collectRUIncrementsChan:   make(chan stmtstats.RUIncrementMap, collectChanBufferSize),
 		reportCollectedDataChan:   make(chan collectedData, 1),
 		collecting:                newCollecting(),
+		ruCollecting:              newRUCollecting(),
 		normalizedSQLMap:          newNormalizedSQLMap(),
 		normalizedPlanMap:         newNormalizedPlanMap(),
 		stmtStatsBuffer:           map[uint64]stmtstats.StatementStatsMap{},
@@ -229,14 +231,9 @@ func (tsr *RemoteTopSQLReporter) collectWorker() {
 			timestamp := uint64(nowFunc().Unix())
 			tsr.stmtStatsBuffer[timestamp] = data
 		case data := <-tsr.collectRUIncrementsChan:
-			// Phase 2 Extension Point:
-			// TODO(M3): Implement two-level TopN buffering for RU increments
-			//   1. ruIncrementBuffer.Add(ts=sec, increments) with 200×200 TopN
-			//   2. Every 15s: merge to ruPointBucket[startTs]
-			//   3. Every report_interval: merge buckets, 100×100 final filtering
-			//   4. Build tipb.TopRURecord and populate ReportData.RURecords
-			// For now, just drop the data to avoid blocking aggregator
-			_ = data
+			// Phase 2: Buffer RU increments with Hybrid TopN (Decision A)
+			timestamp := uint64(nowFunc().Unix())
+			tsr.ruCollecting.addBatch(timestamp, data)
 		case <-reportTicker.C:
 			tsr.processStmtStatsData()
 			tsr.takeDataAndSendToReportChan()
@@ -342,6 +339,7 @@ func (tsr *RemoteTopSQLReporter) takeDataAndSendToReportChan() {
 	select {
 	case tsr.reportCollectedDataChan <- collectedData{
 		collected:         tsr.collecting.take(),
+		ruCollected:       tsr.ruCollecting.take(),
 		normalizedSQLMap:  tsr.normalizedSQLMap.take(),
 		normalizedPlanMap: tsr.normalizedPlanMap.take(),
 	}:
@@ -364,9 +362,12 @@ func (tsr *RemoteTopSQLReporter) reportWorker() {
 			// are finished.
 			time.Sleep(time.Millisecond * 100)
 			rs := data.collected.getReportRecords()
+			// Phase 2: Get RU records with Hybrid TopN filtering
+			ruRecords := data.ruCollected.getReportRecords(tsr.keyspaceName)
 			// Convert to protobuf data and do report.
 			tsr.doReport(&ReportData{
 				DataRecords: rs.toProto(tsr.keyspaceName),
+				RURecords:   ruRecords,
 				SQLMetas:    data.normalizedSQLMap.toProto(tsr.keyspaceName),
 				PlanMetas:   data.normalizedPlanMap.toProto(tsr.keyspaceName, tsr.decodePlan, tsr.compressPlan),
 			})
@@ -425,6 +426,7 @@ func (tsr *RemoteTopSQLReporter) onReporterClosing() {
 // collectedData is used for transmission in the channel.
 type collectedData struct {
 	collected         *collecting
+	ruCollected       *ruCollecting // Phase 2: RU data with Hybrid TopN
 	normalizedSQLMap  *normalizedSQLMap
 	normalizedPlanMap *normalizedPlanMap
 }

@@ -31,8 +31,9 @@
 //   -> RUCollector.CollectRUIncrements()
 //   -> Reporter channel
 //
-// Phase 2 Extension Points:
-//   - TODO(M3): Two-level TopN buffering (200×200 at 1s/15s, 100×100 at report)
+// Phase 2 Status:
+//   - Two-level TopN: Implemented in reporter/ru_datamodel.go (200 users × 200 SQLs)
+//   - Backpressure: Implemented in aggregator.go (10,000 key cap)
 //   - TODO(M4): Executor hooks (OnRUExecutionBegin/Finished calls)
 package stmtstats
 
@@ -119,7 +120,7 @@ type RUIncrement struct {
 //   - Map key by value (RUKey) rather than pointer for correct grouping
 //
 // Memory Bounds (Phase 2):
-//   - TODO(M3): Apply TopN filtering (200 users × 200 SQLs) before passing to reporter
+//   - TopN filtering (200 users × 200 SQLs) applied in reporter.ruCollecting
 type RUIncrementMap map[RUKey]*RUIncrement
 
 // Merge merges other into RUIncrementMap.

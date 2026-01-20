@@ -82,7 +82,12 @@ func (s *mockPubSubDataSinkStream) RecvMsg(m any) error {
 
 func TestPubSubDataSink(t *testing.T) {
 	mockStream := &mockPubSubDataSinkStream{}
-	ds := newPubSubDataSink(mockStream, &mockPubSubDataSinkRegisterer{})
+	// Create a subscription request (Phase 1 TopRU support)
+	req := &tipb.TopSQLSubRequest{
+		EnableTopRu:    false,
+		ReportInterval: tipb.ReportInterval_REPORT_INTERVAL_UNSPECIFIED,
+	}
+	ds := newPubSubDataSink(req, mockStream, &mockPubSubDataSinkRegisterer{})
 	go func() {
 		_ = ds.run()
 	}()

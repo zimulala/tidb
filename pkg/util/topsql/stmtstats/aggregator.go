@@ -25,6 +25,11 @@ import (
 
 const maxStmtStatsSize = 1000000
 
+// maxRUKeysPerAggregate is the hard cap on distinct RU keys per aggregation cycle.
+// This implements Session-level backpressure (Phase 2 Decision E).
+// Excess keys are dropped early to protect hot paths.
+const maxRUKeysPerAggregate = 10000
+
 // globalAggregator is global *aggregator.
 var globalAggregator = newAggregator()
 
@@ -109,17 +114,37 @@ func (m *aggregator) aggregate() {
 //   1. Iterates all registered StatementStats
 //   2. Calls MergeRUInto() to drain RU increments from each session
 //   3. Merges all increments into single RUIncrementMap
-//   4. Gates on TopRUEnabled() - drops data if disabled
-//   5. Pushes to all registered RUCollectors
-//
-// Phase 2 Extension Point:
-//   - TODO(M3): TopN filtering should happen in reporter, not here
+//   4. Applies hard cap on distinct keys (Phase 2 Decision E - backpressure)
+//   5. Gates on TopRUEnabled() - drops data if disabled
+//   6. Pushes to all registered RUCollectors
 func (m *aggregator) aggregateRU() {
 	total := RUIncrementMap{}
 	m.statsSet.Range(func(statsR, _ any) bool {
 		stats := statsR.(*StatementStats)
 		// No need to check Finished() again - already checked in aggregate()
-		total.Merge(stats.MergeRUInto())
+		sessionRU := stats.MergeRUInto()
+		// Phase 2 Decision E: Apply hard cap on distinct RU keys.
+		// When approaching the limit, stop merging new keys to protect hot paths.
+		for key, incr := range sessionRU {
+			if len(total) >= maxRUKeysPerAggregate {
+				// At capacity - only merge into existing keys
+				if existing, ok := total[key]; ok {
+					existing.TotalRU += incr.TotalRU
+					existing.ExecCount += incr.ExecCount
+					existing.ExecDuration += incr.ExecDuration
+				}
+				// Else: drop the key (backpressure)
+			} else {
+				// Under capacity - normal merge
+				if existing, ok := total[key]; ok {
+					existing.TotalRU += incr.TotalRU
+					existing.ExecCount += incr.ExecCount
+					existing.ExecDuration += incr.ExecDuration
+				} else {
+					total[key] = incr
+				}
+			}
+		}
 		return true
 	})
 	// If TopRU is not enabled, just drop them.
@@ -242,10 +267,9 @@ type Collector interface {
 //
 // Data Flow:
 //   aggregator (1s tick) -> RUCollector.CollectRUIncrements()
-//   -> Reporter.collectRUIncrementsChan -> collectWorker
+//   -> Reporter.collectRUIncrementsChan -> collectWorker -> ruCollecting
 //
-// Phase 2 Extension Point:
-//   - TODO(M3): Reporter will apply two-level TopN buffering after receiving data
+// Phase 2: Reporter applies Hybrid TopN filtering (200 users × 200 SQLs) in ruCollecting.
 type RUCollector interface {
 	// CollectRUIncrements is called by aggregator every 1s with merged RU deltas
 	// from all sessions, aggregated by (user, sql_digest, plan_digest).

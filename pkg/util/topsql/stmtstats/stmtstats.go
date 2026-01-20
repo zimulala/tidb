@@ -47,13 +47,18 @@ type StatementStats struct {
 	data     StatementStatsMap
 	finished *atomic.Bool
 	mu       sync.Mutex
+
+	// RU tracking fields (Phase 1 TopRU support)
+	// These fields are separate from TopSQL stmtstats to maintain pipeline independence.
+	finishedRUBuffer RUIncrementMap // Completed SQL RU deltas (drained by 1s tick)
 }
 
 // CreateStatementStats try to create and register an StatementStats.
 func CreateStatementStats() *StatementStats {
 	stats := &StatementStats{
-		data:     StatementStatsMap{},
-		finished: atomic.NewBool(false),
+		data:             StatementStatsMap{},
+		finished:         atomic.NewBool(false),
+		finishedRUBuffer: RUIncrementMap{},
 	}
 	globalAggregator.register(stats)
 	return stats
@@ -132,6 +137,24 @@ func (s *StatementStats) SetFinished() {
 // Finished returns whether the StatementStats has been finished.
 func (s *StatementStats) Finished() bool {
 	return s.finished.Load()
+}
+
+// MergeRUInto drains the finishedRUBuffer and returns all accumulated RU increments.
+// Called by aggregator every 1s tick to collect RU data from this session.
+//
+// Phase 1 Design:
+//   - Drains finishedRUBuffer (completed SQL RU deltas)
+//   - Thread-safe (mutex protected)
+//   - Returns empty map if no RU data accumulated
+//
+// Note: Active execution sampling (execCtx) is deferred to Phase 2 M4.
+func (s *StatementStats) MergeRUInto() RUIncrementMap {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result := s.finishedRUBuffer
+	s.finishedRUBuffer = RUIncrementMap{}
+	return result
 }
 
 // BinaryDigest is converted from parser.Digest.Bytes(), and the purpose
