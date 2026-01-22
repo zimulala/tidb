@@ -31,6 +31,7 @@ const (
 //   - TopRU defaults to disabled (enable via subscription with enable_top_ru=true)
 //   - Default 60s report interval aligns with TopSQL; can be 15s/30s/60s via subscription
 //   - TopRU enable/disable is independent from TopSQL enable/disable
+//   - Phase 3: Reference-counted subscriber tracking ensures subscriber isolation
 const (
 	DefTiDBTopRUEnable                = false
 	DefTiDBTopRUReportIntervalSeconds = 60
@@ -43,7 +44,7 @@ var GlobalState = State{
 	MaxStatementCount:     atomic.NewInt64(DefTiDBTopSQLMaxTimeSeriesCount),
 	MaxCollect:            atomic.NewInt64(DefTiDBTopSQLMaxMetaCount),
 	ReportIntervalSeconds: atomic.NewInt64(DefTiDBTopSQLReportIntervalSeconds),
-	enableTopRU:                atomic.NewBool(DefTiDBTopRUEnable),
+	ruConsumerCount:            atomic.NewInt64(0),
 	TopRUReportIntervalSeconds: atomic.NewInt64(DefTiDBTopRUReportIntervalSeconds),
 }
 
@@ -60,12 +61,16 @@ type State struct {
 	// The report data interval of top-sql.
 	ReportIntervalSeconds *atomic.Int64
 
-	// enable top-ru or not.
-	// Controlled by pubSubDataSink lifecycle: enabled on subscribe, disabled on unsubscribe.
-	// Independent from TopSQL enable flag.
-	enableTopRU *atomic.Bool
+	// ruConsumerCount tracks the number of active TopRU subscribers.
+	// Phase 3 Design: Reference-counted subscriber tracking.
+	//   - TopRU is enabled when ruConsumerCount > 0
+	//   - TopRU is disabled when ruConsumerCount == 0
+	// This ensures subscriber isolation: one subscriber's unsubscribe
+	// does not affect others.
+	ruConsumerCount *atomic.Int64
 	// The report data interval of top-ru.
 	// Set from subscription request (15s/30s/60s); defaults to 60s.
+	// Phase 3: Smaller interval prevails when multiple subscribers set different values.
 	TopRUReportIntervalSeconds *atomic.Int64
 }
 
@@ -84,32 +89,71 @@ func TopSQLEnabled() bool {
 	return GlobalState.enable.Load()
 }
 
-// EnableTopRU enables the top RU feature.
+// EnableTopRU increments the TopRU consumer count.
 // Called by pubSubDataSink when agent subscribes with enable_top_ru=true.
-// This activates RU collection in aggregator.aggregateRU().
+// This activates RU collection in aggregator.aggregateRU() when count becomes > 0.
+//
+// Phase 3 Design: Reference-counted subscriber tracking.
+// TopRU is enabled when at least one subscriber has enabled it.
 func EnableTopRU() {
-	GlobalState.enableTopRU.Store(true)
+	GlobalState.ruConsumerCount.Inc()
 }
 
-// DisableTopRU disables the top RU feature.
+// DisableTopRU decrements the TopRU consumer count.
 // Called by pubSubDataSink when subscription ends (defer in run()).
-// This stops RU data from being pushed to RUCollectors.
+// TopRU collection stops only when count reaches 0 (no more subscribers).
+//
+// Phase 3 Design: Reference-counted subscriber tracking.
+// This ensures one subscriber's unsubscribe does not affect others.
+// When the last subscriber leaves, the report interval is reset to default.
 func DisableTopRU() {
-	GlobalState.enableTopRU.Store(false)
+	for {
+		current := GlobalState.ruConsumerCount.Load()
+		if current <= 0 {
+			// Already at 0, nothing to decrement (defensive guard)
+			return
+		}
+		if GlobalState.ruConsumerCount.CAS(current, current-1) {
+			// If this was the last subscriber, reset report interval to default
+			if current == 1 {
+				ResetTopRUReportInterval()
+			}
+			return
+		}
+		// CAS failed, retry
+	}
 }
 
-// TopRUEnabled checks whether enabled the top RU feature.
+// TopRUEnabled checks whether TopRU feature is enabled.
+// Returns true if at least one subscriber has enabled TopRU.
 // Used by aggregator.aggregateRU() to gate RU data push.
 // Also used by sendTopRURecords() as defense-in-depth.
+//
+// Phase 3 Design: enable_topru == (ruConsumerCount > 0)
 func TopRUEnabled() bool {
-	return GlobalState.enableTopRU.Load()
+	return GlobalState.ruConsumerCount.Load() > 0
 }
 
 // SetTopRUReportInterval sets the report interval for TopRU (in seconds).
 // Called from pubSubDataSink when processing subscription request.
 // Valid values: 15, 30, 60 (from tipb.ReportInterval enum).
+//
+// Phase 3 Design: When multiple subscribers set different intervals,
+// the smaller interval prevails. This ensures all subscribers receive
+// data at least as frequently as they requested.
 func SetTopRUReportInterval(intervalSeconds int64) {
-	GlobalState.TopRUReportIntervalSeconds.Store(intervalSeconds)
+	for {
+		current := GlobalState.TopRUReportIntervalSeconds.Load()
+		// Smaller interval prevails
+		if intervalSeconds >= current {
+			// Current interval is already smaller or equal, no change needed
+			return
+		}
+		if GlobalState.TopRUReportIntervalSeconds.CAS(current, intervalSeconds) {
+			return
+		}
+		// CAS failed, retry
+	}
 }
 
 // GetTopRUReportInterval returns the report interval for TopRU (in seconds).
@@ -117,4 +161,12 @@ func SetTopRUReportInterval(intervalSeconds int64) {
 //   - TODO(M3): Used by reporter to determine report_interval bucket merging
 func GetTopRUReportInterval() int64 {
 	return GlobalState.TopRUReportIntervalSeconds.Load()
+}
+
+// ResetTopRUReportInterval resets the report interval to the default value.
+// Called when the last TopRU subscriber unsubscribes.
+// This allows the next subscriber to set their preferred interval without
+// being constrained by a previous subscriber's smaller interval.
+func ResetTopRUReportInterval() {
+	GlobalState.TopRUReportIntervalSeconds.Store(DefTiDBTopRUReportIntervalSeconds)
 }
