@@ -39,11 +39,11 @@ const (
 
 // GlobalState is the global Top-SQL state.
 var GlobalState = State{
-	enable:                atomic.NewBool(false),
-	PrecisionSeconds:      atomic.NewInt64(DefTiDBTopSQLPrecisionSeconds),
-	MaxStatementCount:     atomic.NewInt64(DefTiDBTopSQLMaxTimeSeriesCount),
-	MaxCollect:            atomic.NewInt64(DefTiDBTopSQLMaxMetaCount),
-	ReportIntervalSeconds: atomic.NewInt64(DefTiDBTopSQLReportIntervalSeconds),
+	enable:                     atomic.NewBool(false),
+	PrecisionSeconds:           atomic.NewInt64(DefTiDBTopSQLPrecisionSeconds),
+	MaxStatementCount:          atomic.NewInt64(DefTiDBTopSQLMaxTimeSeriesCount),
+	MaxCollect:                 atomic.NewInt64(DefTiDBTopSQLMaxMetaCount),
+	ReportIntervalSeconds:      atomic.NewInt64(DefTiDBTopSQLReportIntervalSeconds),
 	ruConsumerCount:            atomic.NewInt64(0),
 	TopRUReportIntervalSeconds: atomic.NewInt64(DefTiDBTopRUReportIntervalSeconds),
 }
@@ -87,6 +87,15 @@ func DisableTopSQL() {
 // TopSQLEnabled uses to check whether enabled the top SQL feature.
 func TopSQLEnabled() bool {
 	return GlobalState.enable.Load()
+}
+
+// TopProfilingEnabled returns true if either TopSQL or TopRU is enabled.
+//
+// NOTE: This helper is intended for execution-path hooks that should run when
+// any Top* consumer exists (e.g. registering SQL/plan metas, stmt lifecycle
+// callbacks). CPU profiling / parsing should still be gated by TopSQLEnabled().
+func TopProfilingEnabled() bool {
+	return TopSQLEnabled() || TopRUEnabled()
 }
 
 // EnableTopRU increments the TopRU consumer count.
