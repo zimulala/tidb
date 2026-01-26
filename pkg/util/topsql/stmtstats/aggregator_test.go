@@ -123,6 +123,24 @@ func TestAggregatorDisableAggregate(t *testing.T) {
 	state.DisableTopSQL()
 }
 
+func TestAggregatorDisableAggregateRU(t *testing.T) {
+	for state.TopRUEnabled() {
+		state.DisableTopRU()
+	}
+
+	a := newAggregator()
+	stats := &StatementStats{
+		data:             StatementStatsMap{},
+		finished:         atomic.NewBool(false),
+		finishedRUBuffer: RUIncrementMap{},
+	}
+	stats.finishedRUBuffer[RUKey{User: "u1", SQLDigest: BinaryDigest("s1")}] = &RUIncrement{TotalRU: 1}
+	a.register(stats)
+
+	a.aggregateRU()
+	require.Len(t, stats.finishedRUBuffer, 1)
+}
+
 type mockCollector struct {
 	f func(data StatementStatsMap)
 }

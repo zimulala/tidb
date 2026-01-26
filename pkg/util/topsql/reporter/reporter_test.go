@@ -198,6 +198,26 @@ func TestCollectAndEvicted(t *testing.T) {
 	}
 }
 
+func TestEffectiveReportIntervalSeconds(t *testing.T) {
+	topsqlstate.DisableTopSQL()
+	for topsqlstate.TopRUEnabled() {
+		topsqlstate.DisableTopRU()
+	}
+	topsqlstate.GlobalState.ReportIntervalSeconds.Store(60)
+	topsqlstate.ResetTopRUReportInterval()
+
+	require.Equal(t, int64(60), effectiveReportIntervalSeconds())
+
+	topsqlstate.EnableTopRU()
+	defer func() {
+		for topsqlstate.TopRUEnabled() {
+			topsqlstate.DisableTopRU()
+		}
+	}()
+	topsqlstate.SetTopRUReportInterval(15)
+	require.Equal(t, int64(15), effectiveReportIntervalSeconds())
+}
+
 func newSQLCPUTimeRecord(tsr *RemoteTopSQLReporter, sqlID int, cpuTimeMs uint32) collector.SQLCPUTimeRecord {
 	key := []byte("sqlDigest" + strconv.Itoa(sqlID))
 	value := "sqlNormalized" + strconv.Itoa(sqlID)

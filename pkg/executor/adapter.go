@@ -2180,6 +2180,13 @@ func (a *ExecStmt) observeStmtBeginForTopProfiling(ctx context.Context) context.
 
 	if stats != nil {
 		stats.OnExecutionBegin(sqlDigestByte, planDigestByte, vars.InPacketBytes.Load())
+		if topsqlstate.TopRUEnabled() {
+			user := ""
+			if vars.User != nil {
+				user = vars.User.String()
+			}
+			stats.AddRUOnBegin(user, sqlDigestByte, planDigestByte)
+		}
 		// This is a special logic prepared for TiKV's SQLExecCount.
 		sc.KvExecCounter = stats.CreateKvExecCounter(sqlDigestByte, planDigestByte)
 	}
@@ -2230,6 +2237,15 @@ func (a *ExecStmt) observeStmtFinishedForTopProfiling() {
 		sqlDigest, planDigest := a.getSQLPlanDigest()
 		execDuration := vars.GetTotalCostDuration()
 		stats.OnExecutionFinished(sqlDigest, planDigest, execDuration, vars.OutPacketBytes.Load())
+		if topsqlstate.TopRUEnabled() {
+			if ruDetailRaw := a.GoCtx.Value(util.RUDetailsCtxKey); ruDetailRaw != nil {
+				user := ""
+				if vars.User != nil {
+					user = vars.User.String()
+				}
+				stats.AddRUOnFinish(user, sqlDigest, planDigest, ruDetailRaw.(*util.RUDetails), execDuration)
+			}
+		}
 	}
 }
 

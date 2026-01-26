@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/tikv/client-go/v2/util"
 )
 
 // String is only used for debugging.
@@ -207,4 +209,33 @@ func TestExecCounter_AddExecCount_Take(t *testing.T) {
 	assert.Equal(t, uint64(3*10e5), m[SQLPlanDigest{SQLDigest: "SQL-3"}].SumDurationNs)
 	m = stats.Take()
 	assert.Len(t, m, 0)
+}
+
+func TestAddRUOnFinish(t *testing.T) {
+	stats := CreateStatementStats()
+	ru := util.NewRUDetailsWith(10.0, 20.0, time.Millisecond)
+	stats.AddRUOnFinish("user1", []byte("sql1"), []byte("plan1"), ru, time.Second)
+
+	m := stats.MergeRUInto()
+	require.Len(t, m, 1)
+	key := RUKey{User: "user1", SQLDigest: BinaryDigest("sql1"), PlanDigest: BinaryDigest("plan1")}
+	incr, ok := m[key]
+	require.True(t, ok)
+	require.Equal(t, 30.0, incr.TotalRU)
+	require.Equal(t, uint64(0), incr.ExecCount)
+	require.Equal(t, uint64(time.Second.Nanoseconds()), incr.ExecDuration)
+}
+
+func TestAddRUOnBegin(t *testing.T) {
+	stats := CreateStatementStats()
+	stats.AddRUOnBegin("user1", []byte("sql1"), []byte("plan1"))
+
+	m := stats.MergeRUInto()
+	require.Len(t, m, 1)
+	key := RUKey{User: "user1", SQLDigest: BinaryDigest("sql1"), PlanDigest: BinaryDigest("plan1")}
+	incr, ok := m[key]
+	require.True(t, ok)
+	require.Equal(t, uint64(1), incr.ExecCount)
+	require.Equal(t, 0.0, incr.TotalRU)
+	require.Equal(t, uint64(0), incr.ExecDuration)
 }

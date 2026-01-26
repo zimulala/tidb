@@ -166,8 +166,7 @@ func SetTopRUReportInterval(intervalSeconds int64) {
 }
 
 // GetTopRUReportInterval returns the report interval for TopRU (in seconds).
-// Phase 2 Extension Point:
-//   - TODO(M3): Used by reporter to determine report_interval bucket merging
+// Used by reporter to determine effective report interval.
 func GetTopRUReportInterval() int64 {
 	return GlobalState.TopRUReportIntervalSeconds.Load()
 }

@@ -31,9 +31,8 @@ const (
 	// maxTopSQLsPerUser is the maximum number of SQLs to keep per user.
 	maxTopSQLsPerUser = 200
 	// keyRUOthersUser is the special user key for aggregated "others" users.
-	keyRUOthersUser = ""
-	// keyRUOthersSQL is the special SQL key for aggregated "others" SQLs within a user.
-	keyRUOthersSQL = ""
+	// Use a non-empty sentinel to avoid collision with real empty user names.
+	keyRUOthersUser = "<others>"
 
 	// Phase 3: Pre-TopN memory bounding caps.
 	// These caps are applied during collection to prevent unbounded memory growth
@@ -396,19 +395,4 @@ func (c *ruCollecting) getReportRecords(keyspaceName []byte) []tipb.TopRURecord 
 	}
 
 	return result
-}
-
-// encodeRUKey encodes user + sqlDigest + planDigest into a string key.
-func encodeRUKey(buf *bytes.Buffer, user string, sqlDigest, planDigest []byte) string {
-	buf.Reset()
-	buf.WriteString(user)
-	buf.WriteByte(0) // separator
-	buf.Write(sqlDigest)
-	buf.Write(planDigest)
-	return buf.String()
-}
-
-// RUKeyString returns a string representation of RUKey for map indexing.
-func RUKeyString(key stmtstats.RUKey) string {
-	return key.User + string(rune(0)) + string(key.SQLDigest) + string(key.PlanDigest)
 }

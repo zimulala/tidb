@@ -29,7 +29,9 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -290,16 +292,25 @@ func (ds *SingleTargetDataSink) sendBatchTopRURecord(ctx context.Context, record
 	client := tipb.NewTopSQLAgentClient(ds.conn)
 	stream, err := client.ReportTopRURecords(ctx)
 	if err != nil {
+		if status.Code(err) == codes.Unimplemented {
+			return nil
+		}
 		return err
 	}
 	for i := range records {
 		if err = stream.Send(&records[i]); err != nil {
+			if status.Code(err) == codes.Unimplemented {
+				return nil
+			}
 			return
 		}
 		sentCount++
 	}
 
 	_, err = stream.CloseAndRecv()
+	if status.Code(err) == codes.Unimplemented {
+		return nil
+	}
 	return
 }
 

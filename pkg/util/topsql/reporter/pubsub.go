@@ -51,6 +51,12 @@ func (ps *TopSQLPubSubService) Subscribe(req *tipb.TopSQLSubRequest, stream tipb
 	if err := ps.dataSinkRegisterer.Register(ds); err != nil {
 		return err
 	}
+	if ds.enableTopRU {
+		topsqlstate.EnableTopRU()
+		if ds.reportInterval != tipb.ReportInterval_REPORT_INTERVAL_UNSPECIFIED {
+			topsqlstate.SetTopRUReportInterval(int64(ds.reportInterval))
+		}
+	}
 	return ds.run()
 }
 
@@ -92,19 +98,26 @@ func newPubSubDataSink(req *tipb.TopSQLSubRequest, stream tipb.TopSQLPubSub_Subs
 		registerer: registerer,
 
 		enableTopRU:    req.GetEnableTopRu(),
-		reportInterval: req.GetReportInterval(),
-	}
-
-	// Enable TopRU if requested by subscription.
-	// This activates RU collection in aggregator.aggregateRU().
-	if ds.enableTopRU {
-		topsqlstate.EnableTopRU()
-		if interval := req.GetReportInterval(); interval != tipb.ReportInterval_REPORT_INTERVAL_UNSPECIFIED {
-			topsqlstate.SetTopRUReportInterval(int64(interval))
-		}
+		reportInterval: normalizeTopRUReportInterval(req.GetReportInterval()),
 	}
 
 	return ds
+}
+
+func normalizeTopRUReportInterval(interval tipb.ReportInterval) tipb.ReportInterval {
+	if interval == tipb.ReportInterval_REPORT_INTERVAL_UNSPECIFIED {
+		return interval
+	}
+	switch int32(interval) {
+	case 15, 30, 60:
+		return interval
+	default:
+		logutil.BgLogger().Warn(
+			"[top-sql] invalid top ru report interval, fallback to default",
+			zap.Int32("report_interval", int32(interval)),
+		)
+		return tipb.ReportInterval_REPORT_INTERVAL_UNSPECIFIED
+	}
 }
 
 var _ DataSink = &pubSubDataSink{}
@@ -254,6 +267,9 @@ func (ds *pubSubDataSink) sendTopRURecords(ctx context.Context, records []tipb.T
 
 	// Defense-in-depth: Only send RU records if TopRU is enabled.
 	// Primary gate is in aggregator.aggregateRU().
+	if !ds.enableTopRU {
+		return
+	}
 	if !topsqlstate.TopRUEnabled() {
 		return
 	}

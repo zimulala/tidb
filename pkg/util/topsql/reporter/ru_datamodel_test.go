@@ -134,6 +134,19 @@ func TestUserRUCollectingTopNSQLs(t *testing.T) {
 	require.Equal(t, 55.0, othersRec.totalRU)
 }
 
+func TestUserRUCollectingPreTopNSQLCap(t *testing.T) {
+	user := newUserRUCollecting("user1")
+	extra := 5
+	for i := 0; i < maxPreTopNSQLsPerUser+extra; i++ {
+		sqlDigest := []byte(fmt.Sprintf("sql%d", i))
+		user.add(1000, sqlDigest, nil, 1.0, 1, 10)
+	}
+
+	require.Len(t, user.records, maxPreTopNSQLsPerUser)
+	require.NotNil(t, user.othersRec)
+	require.Equal(t, float64(extra), user.othersRec.totalRU)
+}
+
 func TestRUCollectingHybridTopN(t *testing.T) {
 	collecting := newRUCollecting()
 
@@ -179,6 +192,23 @@ func TestRUCollectingHybridTopN(t *testing.T) {
 	for _, rec := range records {
 		require.Equal(t, []byte("test-keyspace"), rec.KeyspaceName)
 	}
+}
+
+func TestRUCollectingPreTopNUserCap(t *testing.T) {
+	collecting := newRUCollecting()
+	extra := 5
+	for u := 0; u < maxPreTopNUsers+extra; u++ {
+		key := stmtstats.RUKey{
+			User:      fmt.Sprintf("user%d", u),
+			SQLDigest: stmtstats.BinaryDigest("sql"),
+		}
+		incr := &stmtstats.RUIncrement{TotalRU: 1}
+		collecting.add(1000, key, incr)
+	}
+
+	require.Len(t, collecting.users, maxPreTopNUsers)
+	require.NotNil(t, collecting.othersUser)
+	require.Equal(t, float64(extra), collecting.othersUser.totalRU)
 }
 
 func TestRUCollectingAddBatch(t *testing.T) {

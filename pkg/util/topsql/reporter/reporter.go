@@ -36,6 +36,17 @@ const (
 
 var nowFunc = time.Now
 
+func effectiveReportIntervalSeconds() int64 {
+	interval := topsqlstate.GlobalState.ReportIntervalSeconds.Load()
+	if topsqlstate.TopRUEnabled() {
+		ruInterval := topsqlstate.GetTopRUReportInterval()
+		if ruInterval > 0 && ruInterval < interval {
+			interval = ruInterval
+		}
+	}
+	return interval
+}
+
 // TopSQLReporter collects Top SQL metrics.
 type TopSQLReporter interface {
 	collector.Collector
@@ -173,10 +184,7 @@ func (tsr *RemoteTopSQLReporter) CollectStmtStatsMap(data stmtstats.StatementSta
 // Design Rationale:
 //   - Non-blocking push to channel (drops on full, logs metric)
 //   - Separate channel from TopSQL stmtstats for pipeline independence
-//   - Currently data is dropped in collectWorker pending M3 implementation
-//
-// Phase 2 Extension Point:
-//   - TODO(M3): collectWorker will buffer into ruIncrementBuffer with TopN
+//   - collectWorker buffers RU increments into ruCollecting with Hybrid TopN
 //
 // WARN: It will drop the data if the processing is not in time.
 // This function is thread-safe and efficient.
@@ -217,7 +225,7 @@ func (tsr *RemoteTopSQLReporter) Close() {
 func (tsr *RemoteTopSQLReporter) collectWorker() {
 	defer util.Recover("top-sql", "collectWorker", nil, false)
 
-	currentReportInterval := topsqlstate.GlobalState.ReportIntervalSeconds.Load()
+	currentReportInterval := effectiveReportIntervalSeconds()
 	reportTicker := time.NewTicker(time.Second * time.Duration(currentReportInterval))
 	defer reportTicker.Stop()
 	for {
@@ -238,7 +246,7 @@ func (tsr *RemoteTopSQLReporter) collectWorker() {
 			tsr.processStmtStatsData()
 			tsr.takeDataAndSendToReportChan()
 			// Update `reportTicker` if report interval changed.
-			if newInterval := topsqlstate.GlobalState.ReportIntervalSeconds.Load(); newInterval != currentReportInterval {
+			if newInterval := effectiveReportIntervalSeconds(); newInterval != currentReportInterval {
 				currentReportInterval = newInterval
 				reportTicker.Reset(time.Second * time.Duration(currentReportInterval))
 			}

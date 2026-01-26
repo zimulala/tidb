@@ -102,7 +102,6 @@ func (m *aggregator) aggregate() {
 }
 
 // aggregateRU collects RU increment data from all associated StatementStats.
-// This runs in parallel with aggregate() on each 1s tick.
 //
 // Design Rationale (D2 - Separate RU Pipeline):
 //   - TopRU runs independently from TopSQL (CPU) pipeline
@@ -111,13 +110,16 @@ func (m *aggregator) aggregate() {
 //   - Separate enable flags: TopSQLEnabled() vs TopRUEnabled()
 //
 // Behavior:
-//   1. Iterates all registered StatementStats
-//   2. Calls MergeRUInto() to drain RU increments from each session
-//   3. Merges all increments into single RUIncrementMap
-//   4. Applies hard cap on distinct keys (Phase 2 Decision E - backpressure)
-//   5. Gates on TopRUEnabled() - drops data if disabled
-//   6. Pushes to all registered RUCollectors
+//  1. Iterates all registered StatementStats
+//  2. Calls MergeRUInto() to drain RU increments from each session
+//  3. Merges all increments into single RUIncrementMap
+//  4. Applies hard cap on distinct keys (Phase 2 Decision E - backpressure)
+//  5. Gates on TopRUEnabled() - drops data if disabled
+//  6. Pushes to all registered RUCollectors
 func (m *aggregator) aggregateRU() {
+	if !state.TopRUEnabled() {
+		return
+	}
 	total := RUIncrementMap{}
 	m.statsSet.Range(func(statsR, _ any) bool {
 		stats := statsR.(*StatementStats)
@@ -266,8 +268,9 @@ type Collector interface {
 //   - Reporter implements this interface to receive aggregated RU data
 //
 // Data Flow:
-//   aggregator (1s tick) -> RUCollector.CollectRUIncrements()
-//   -> Reporter.collectRUIncrementsChan -> collectWorker -> ruCollecting
+//
+//	aggregator (1s tick) -> RUCollector.CollectRUIncrements()
+//	-> Reporter.collectRUIncrementsChan -> collectWorker -> ruCollecting
 //
 // Phase 2: Reporter applies Hybrid TopN filtering (200 users × 200 SQLs) in ruCollecting.
 type RUCollector interface {

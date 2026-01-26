@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tikv/client-go/v2/util"
 	"go.uber.org/atomic"
 )
 
@@ -155,6 +156,56 @@ func (s *StatementStats) MergeRUInto() RUIncrementMap {
 	result := s.finishedRUBuffer
 	s.finishedRUBuffer = RUIncrementMap{}
 	return result
+}
+
+// AddRUOnFinish appends RU increment data when a SQL execution finishes.
+// This is the minimal RU data source for TopRU Phase 1.
+//
+// It is safe to call even if ru is nil or total RU is 0.
+// ExecCount is incremented at execution begin (AddRUOnBegin).
+func (s *StatementStats) AddRUOnFinish(user string, sqlDigest, planDigest []byte, ru *util.RUDetails, execDuration time.Duration) {
+	if ru == nil {
+		return
+	}
+	totalRU := ru.RRU() + ru.WRU()
+	if totalRU <= 0 {
+		return
+	}
+	if execDuration < 0 {
+		return
+	}
+	key := RUKey{
+		User:       user,
+		SQLDigest:  BinaryDigest(sqlDigest),
+		PlanDigest: BinaryDigest(planDigest),
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	incr, ok := s.finishedRUBuffer[key]
+	if !ok {
+		incr = &RUIncrement{}
+		s.finishedRUBuffer[key] = incr
+	}
+	incr.TotalRU += totalRU
+	incr.ExecDuration += uint64(execDuration.Nanoseconds())
+}
+
+// AddRUOnBegin increments ExecCount when a SQL execution starts.
+// This aligns with Phase 2 design: exec_count is counted at begin.
+func (s *StatementStats) AddRUOnBegin(user string, sqlDigest, planDigest []byte) {
+	key := RUKey{
+		User:       user,
+		SQLDigest:  BinaryDigest(sqlDigest),
+		PlanDigest: BinaryDigest(planDigest),
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	incr, ok := s.finishedRUBuffer[key]
+	if !ok {
+		incr = &RUIncrement{}
+		s.finishedRUBuffer[key] = incr
+	}
+	incr.ExecCount++
 }
 
 // BinaryDigest is converted from parser.Digest.Bytes(), and the purpose
