@@ -64,6 +64,8 @@ func (m *aggregator) start() {
 
 // run will block the current goroutine and execute the main loop of aggregator.
 func (m *aggregator) run() {
+	// Run order matters: aggregateRU() must run before aggregate() to avoid
+	// dropping RU increments from finished sessions.
 	tick := time.NewTicker(time.Second)
 	defer func() {
 		tick.Stop()
@@ -74,13 +76,13 @@ func (m *aggregator) run() {
 		case <-m.ctx.Done():
 			return
 		case <-tick.C:
-			m.aggregate()
 			m.aggregateRU()
+			m.aggregate()
 		}
 	}
 }
 
-// aggregate data from all associated StatementStats.
+// aggregate collects TopSQL data (CPU + stmt stats) from all associated StatementStats.
 // If StatementStats has been closed, collect will remove it from the map.
 func (m *aggregator) aggregate() {
 	total := StatementStatsMap{}
@@ -103,12 +105,6 @@ func (m *aggregator) aggregate() {
 
 // aggregateRU collects RU increment data from all associated StatementStats.
 //
-// Design Rationale (D2 - Separate RU Pipeline):
-//   - TopRU runs independently from TopSQL (CPU) pipeline
-//   - aggregate() -> Collector.CollectStmtStatsMap() for TopSQL
-//   - aggregateRU() -> RUCollector.CollectRUIncrements() for TopRU
-//   - Separate enable flags: TopSQLEnabled() vs TopRUEnabled()
-//
 // Behavior:
 //  1. Iterates all registered StatementStats
 //  2. Calls MergeRUInto() to drain RU increments from each session
@@ -117,12 +113,10 @@ func (m *aggregator) aggregate() {
 //  5. Gates on TopRUEnabled() - drops data if disabled
 //  6. Pushes to all registered RUCollectors
 func (m *aggregator) aggregateRU() {
-	if !state.TopRUEnabled() {
-		return
-	}
+	// Always drain RU increments to avoid keeping stale data when TopRU is disabled.
 	total := RUIncrementMap{}
-	m.statsSet.Range(func(statsR, _ any) bool {
-		stats := statsR.(*StatementStats)
+	m.statsSet.Range(func(statsAny, _ any) bool {
+		stats := statsAny.(*StatementStats)
 		// No need to check Finished() again - already checked in aggregate()
 		sessionRU := stats.MergeRUInto()
 		// Phase 2 Decision E: Apply hard cap on distinct RU keys.
@@ -149,7 +143,6 @@ func (m *aggregator) aggregateRU() {
 		}
 		return true
 	})
-	// If TopRU is not enabled, just drop them.
 	if len(total) > 0 && state.TopRUEnabled() {
 		m.ruCollectors.Range(func(c, _ any) bool {
 			c.(RUCollector).CollectRUIncrements(total)

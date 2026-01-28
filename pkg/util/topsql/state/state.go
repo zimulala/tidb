@@ -135,8 +135,6 @@ func DisableTopRU() {
 
 // TopRUEnabled checks whether TopRU feature is enabled.
 // Returns true if at least one subscriber has enabled TopRU.
-// Used by aggregator.aggregateRU() to gate RU data push.
-// Also used by sendTopRURecords() as defense-in-depth.
 //
 // Phase 3 Design: enable_topru == (ruConsumerCount > 0)
 func TopRUEnabled() bool {

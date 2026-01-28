@@ -211,24 +211,19 @@ func TestExecCounter_AddExecCount_Take(t *testing.T) {
 	assert.Len(t, m, 0)
 }
 
-func TestAddRUOnFinish(t *testing.T) {
+func TestOnExecutionBeginFinishRU(t *testing.T) {
 	stats := CreateStatementStats()
+	stats.OnExecutionBegin([]byte("sql1"), []byte("plan1"), &ExecBeginInfo{
+		User:         "user1",
+		TopRUEnabled: true,
+	})
 	ru := util.NewRUDetailsWith(10.0, 20.0, time.Millisecond)
-	stats.AddRUOnFinish("user1", []byte("sql1"), []byte("plan1"), ru, time.Second)
-
-	m := stats.MergeRUInto()
-	require.Len(t, m, 1)
-	key := RUKey{User: "user1", SQLDigest: BinaryDigest("sql1"), PlanDigest: BinaryDigest("plan1")}
-	incr, ok := m[key]
-	require.True(t, ok)
-	require.Equal(t, 30.0, incr.TotalRU)
-	require.Equal(t, uint64(0), incr.ExecCount)
-	require.Equal(t, uint64(time.Second.Nanoseconds()), incr.ExecDuration)
-}
-
-func TestAddRUOnBegin(t *testing.T) {
-	stats := CreateStatementStats()
-	stats.AddRUOnBegin("user1", []byte("sql1"), []byte("plan1"))
+	stats.OnExecutionFinished([]byte("sql1"), []byte("plan1"), &ExecFinishInfo{
+		User:         "user1",
+		TopRUEnabled: true,
+		RUDetails:    ru,
+		ExecDuration: time.Second,
+	})
 
 	m := stats.MergeRUInto()
 	require.Len(t, m, 1)
@@ -236,6 +231,6 @@ func TestAddRUOnBegin(t *testing.T) {
 	incr, ok := m[key]
 	require.True(t, ok)
 	require.Equal(t, uint64(1), incr.ExecCount)
-	require.Equal(t, 0.0, incr.TotalRU)
-	require.Equal(t, uint64(0), incr.ExecDuration)
+	require.Equal(t, 30.0, incr.TotalRU)
+	require.Equal(t, uint64(time.Second.Nanoseconds()), incr.ExecDuration)
 }

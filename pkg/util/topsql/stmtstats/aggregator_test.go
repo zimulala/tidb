@@ -138,7 +138,47 @@ func TestAggregatorDisableAggregateRU(t *testing.T) {
 	a.register(stats)
 
 	a.aggregateRU()
-	require.Len(t, stats.finishedRUBuffer, 1)
+	require.Len(t, stats.finishedRUBuffer, 0)
+}
+
+func TestAggregatorRunOrderKeepsFinishedRU(t *testing.T) {
+	for state.TopRUEnabled() {
+		state.DisableTopRU()
+	}
+	state.EnableTopRU()
+	defer func() {
+		for state.TopRUEnabled() {
+			state.DisableTopRU()
+		}
+	}()
+
+	a := newAggregator()
+	stats := &StatementStats{
+		data:             StatementStatsMap{},
+		finished:         atomic.NewBool(true),
+		finishedRUBuffer: RUIncrementMap{},
+	}
+	key := RUKey{User: "u1", SQLDigest: BinaryDigest("s1")}
+	stats.finishedRUBuffer[key] = &RUIncrement{TotalRU: 1}
+	a.register(stats)
+
+	collected := RUIncrementMap{}
+	a.registerRUCollector(&mockRUCollector{f: func(m RUIncrementMap) { collected.Merge(m) }})
+	a.aggregateRU()
+	a.aggregate()
+
+	require.Len(t, collected, 1)
+	require.Equal(t, 1.0, collected[key].TotalRU)
+	_, ok := a.statsSet.Load(stats)
+	require.False(t, ok)
+}
+
+type mockRUCollector struct {
+	f func(RUIncrementMap)
+}
+
+func (c *mockRUCollector) CollectRUIncrements(data RUIncrementMap) {
+	c.f(data)
 }
 
 type mockCollector struct {
