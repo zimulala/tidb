@@ -58,8 +58,8 @@ func Test_aggregator_register_collect(t *testing.T) {
 		finished: atomic.NewBool(false),
 	}
 	a.register(stats)
-	stats.OnExecutionBegin([]byte("SQL-1"), []byte(""), 0)
-	stats.OnExecutionFinished([]byte("SQL-1"), []byte(""), time.Millisecond, 0)
+	stats.OnExecutionBegin([]byte("SQL-1"), []byte(""), &ExecBeginInfo{InNetworkBytes: 0})
+	stats.OnExecutionFinished([]byte("SQL-1"), []byte(""), &ExecFinishInfo{ExecDuration: time.Millisecond})
 	total := StatementStatsMap{}
 	a.registerCollector(newMockCollector(func(data StatementStatsMap) {
 		total.Merge(data)

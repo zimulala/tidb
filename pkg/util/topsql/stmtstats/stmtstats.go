@@ -31,13 +31,29 @@ var _ StatementObserver = &StatementStats{}
 // corresponding locations, without paying attention to implementation details.
 type StatementObserver interface {
 	// OnExecutionBegin should be called before statement execution.
-	OnExecutionBegin(sqlDigest, planDigest []byte, inNetworkBytes uint64)
+	OnExecutionBegin(sqlDigest, planDigest []byte, info *ExecBeginInfo)
 
 	// OnExecutionFinished should be called after the statement is executed.
 	// WARNING: Currently Only call StatementObserver API when TopSQL is enabled,
 	// there is no guarantee that both OnExecutionBegin and OnExecutionFinished will be called for a SQL,
 	// such as TopSQL is enabled during a SQL execution.
-	OnExecutionFinished(sqlDigest, planDigest []byte, execDuration time.Duration, outNetworkBytes uint64)
+	OnExecutionFinished(sqlDigest, planDigest []byte, info *ExecFinishInfo)
+}
+
+// ExecBeginInfo carries optional execution-begin context for extensible stats collection.
+type ExecBeginInfo struct {
+	InNetworkBytes uint64
+	User           string
+	TopRUEnabled   bool
+}
+
+// ExecFinishInfo carries optional execution-finish context for extensible stats collection.
+type ExecFinishInfo struct {
+	OutNetworkBytes uint64
+	ExecDuration    time.Duration
+	User            string
+	TopRUEnabled    bool
+	RUDetails       *util.RUDetails
 }
 
 // StatementStats is a counter used locally in each session.
@@ -66,19 +82,41 @@ func CreateStatementStats() *StatementStats {
 }
 
 // OnExecutionBegin implements StatementObserver.OnExecutionBegin.
-func (s *StatementStats) OnExecutionBegin(sqlDigest, planDigest []byte, inNetworkBytes uint64) {
+func (s *StatementStats) OnExecutionBegin(sqlDigest, planDigest []byte, info *ExecBeginInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	item := s.GetOrCreateStatementStatsItem(sqlDigest, planDigest)
 
 	item.ExecCount++
-	item.NetworkInBytes = inNetworkBytes
+	if info != nil {
+		item.NetworkInBytes = info.InNetworkBytes
+		if info.TopRUEnabled {
+			s.addRUOnBeginLocked(info.User, sqlDigest, planDigest)
+		}
+	}
 	// Count more data here.
 }
 
+func (s *StatementStats) addRUOnBeginLocked(user string, sqlDigest, planDigest []byte) {
+	key := RUKey{
+		User:       user,
+		SQLDigest:  BinaryDigest(sqlDigest),
+		PlanDigest: BinaryDigest(planDigest),
+	}
+	incr, ok := s.finishedRUBuffer[key]
+	if !ok {
+		incr = &RUIncrement{}
+		s.finishedRUBuffer[key] = incr
+	}
+	incr.ExecCount++
+}
+
 // OnExecutionFinished implements StatementObserver.OnExecutionFinished.
-func (s *StatementStats) OnExecutionFinished(sqlDigest, planDigest []byte, execDuration time.Duration, outNetworkBytes uint64) {
-	ns := execDuration.Nanoseconds()
+func (s *StatementStats) OnExecutionFinished(sqlDigest, planDigest []byte, info *ExecFinishInfo) {
+	if info == nil {
+		return
+	}
+	ns := info.ExecDuration.Nanoseconds()
 	if ns < 0 {
 		return
 	}
@@ -89,8 +127,36 @@ func (s *StatementStats) OnExecutionFinished(sqlDigest, planDigest []byte, execD
 
 	item.SumDurationNs += uint64(ns)
 	item.DurationCount++
-	item.NetworkOutBytes = outNetworkBytes
+	item.NetworkOutBytes = info.OutNetworkBytes
+	if info.TopRUEnabled {
+		s.addRUOnFinishLocked(info.User, sqlDigest, planDigest, info.RUDetails, info.ExecDuration)
+	}
 	// Count more data here.
+}
+
+func (s *StatementStats) addRUOnFinishLocked(user string, sqlDigest, planDigest []byte, ru *util.RUDetails, execDuration time.Duration) {
+	if ru == nil {
+		return
+	}
+	totalRU := ru.RRU() + ru.WRU()
+	if totalRU <= 0 {
+		return
+	}
+	if execDuration < 0 {
+		return
+	}
+	key := RUKey{
+		User:       user,
+		SQLDigest:  BinaryDigest(sqlDigest),
+		PlanDigest: BinaryDigest(planDigest),
+	}
+	incr, ok := s.finishedRUBuffer[key]
+	if !ok {
+		incr = &RUIncrement{}
+		s.finishedRUBuffer[key] = incr
+	}
+	incr.TotalRU += totalRU
+	incr.ExecDuration += uint64(execDuration.Nanoseconds())
 }
 
 // GetOrCreateStatementStatsItem creates the corresponding StatementStatsItem
@@ -164,48 +230,17 @@ func (s *StatementStats) MergeRUInto() RUIncrementMap {
 // It is safe to call even if ru is nil or total RU is 0.
 // ExecCount is incremented at execution begin (AddRUOnBegin).
 func (s *StatementStats) AddRUOnFinish(user string, sqlDigest, planDigest []byte, ru *util.RUDetails, execDuration time.Duration) {
-	if ru == nil {
-		return
-	}
-	totalRU := ru.RRU() + ru.WRU()
-	if totalRU <= 0 {
-		return
-	}
-	if execDuration < 0 {
-		return
-	}
-	key := RUKey{
-		User:       user,
-		SQLDigest:  BinaryDigest(sqlDigest),
-		PlanDigest: BinaryDigest(planDigest),
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	incr, ok := s.finishedRUBuffer[key]
-	if !ok {
-		incr = &RUIncrement{}
-		s.finishedRUBuffer[key] = incr
-	}
-	incr.TotalRU += totalRU
-	incr.ExecDuration += uint64(execDuration.Nanoseconds())
+	s.addRUOnFinishLocked(user, sqlDigest, planDigest, ru, execDuration)
 }
 
 // AddRUOnBegin increments ExecCount when a SQL execution starts.
 // This aligns with Phase 2 design: exec_count is counted at begin.
 func (s *StatementStats) AddRUOnBegin(user string, sqlDigest, planDigest []byte) {
-	key := RUKey{
-		User:       user,
-		SQLDigest:  BinaryDigest(sqlDigest),
-		PlanDigest: BinaryDigest(planDigest),
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	incr, ok := s.finishedRUBuffer[key]
-	if !ok {
-		incr = &RUIncrement{}
-		s.finishedRUBuffer[key] = incr
-	}
-	incr.ExecCount++
+	s.addRUOnBeginLocked(user, sqlDigest, planDigest)
 }
 
 // BinaryDigest is converted from parser.Digest.Bytes(), and the purpose
