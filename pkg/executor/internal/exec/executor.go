@@ -250,7 +250,7 @@ func (e *executorStats) RuntimeStats() *execdetails.BasicRuntimeStats {
 
 // RegisterSQLAndPlanInExecForTopSQL registers the current SQL and Plan on top sql
 func (e *executorStats) RegisterSQLAndPlanInExecForTopSQL() {
-	if topsqlstate.TopProfilingEnabled() && e.isSQLAndPlanRegistered.CompareAndSwap(false, true) {
+	if topsqlstate.TopSQLEnabled() && e.isSQLAndPlanRegistered.CompareAndSwap(false, true) {
 		topsql.RegisterSQL(e.normalizedSQL, e.sqlDigest, e.inRestrictedSQL)
 		if len(e.normalizedPlan) > 0 {
 			topsql.RegisterPlan(e.normalizedPlan, e.planDigest)

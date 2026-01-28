@@ -41,28 +41,28 @@ const (
 )
 
 var (
-	globalTopProfilingReport reporter.TopSQLReporter
-	singleTargetDataSink     *reporter.SingleTargetDataSink
+	globalTopSQLReport   reporter.TopSQLReporter
+	singleTargetDataSink *reporter.SingleTargetDataSink
 )
 
 func init() {
 	remoteReporter := reporter.NewRemoteTopSQLReporter(plancodec.DecodeNormalizedPlan, plancodec.Compress)
-	globalTopProfilingReport = remoteReporter
+	globalTopSQLReport = remoteReporter
 	singleTargetDataSink = reporter.NewSingleTargetDataSink(remoteReporter)
 }
 
 // SetupTopSQL sets up the top-sql worker.
 func SetupTopSQL(keyspaceName []byte, updater collector.ProcessCPUTimeUpdater) {
-	globalTopProfilingReport.BindKeyspaceName(keyspaceName)
-	globalTopProfilingReport.BindProcessCPUTimeUpdater(updater)
-	globalTopProfilingReport.Start()
+	globalTopSQLReport.BindKeyspaceName(keyspaceName)
+	globalTopSQLReport.BindProcessCPUTimeUpdater(updater)
+	globalTopSQLReport.Start()
 	singleTargetDataSink.Start()
 
-	stmtstats.RegisterCollector(globalTopProfilingReport)
+	stmtstats.RegisterCollector(globalTopSQLReport)
 	// Register reporter as RUCollector to receive RU increments from aggregator.
 	// This wires the TopRU data flow: aggregator -> reporter -> agent.
 	// Type assertion ensures backward compatibility if reporter doesn't implement RUCollector.
-	if ruCollector, ok := globalTopProfilingReport.(stmtstats.RUCollector); ok {
+	if ruCollector, ok := globalTopSQLReport.(stmtstats.RUCollector); ok {
 		stmtstats.RegisterRUCollector(ruCollector)
 	}
 	stmtstats.SetupAggregator()
@@ -70,12 +70,12 @@ func SetupTopSQL(keyspaceName []byte, updater collector.ProcessCPUTimeUpdater) {
 
 // SetupTopSQLForTest sets up the global top-sql reporter, it's exporting for test.
 func SetupTopSQLForTest(r reporter.TopSQLReporter) {
-	globalTopProfilingReport = r
+	globalTopSQLReport = r
 }
 
 // RegisterPubSubServer registers TopSQLPubSubService to the given gRPC server.
 func RegisterPubSubServer(s *grpc.Server) {
-	if register, ok := globalTopProfilingReport.(reporter.DataSinkRegisterer); ok {
+	if register, ok := globalTopSQLReport.(reporter.DataSinkRegisterer); ok {
 		service := reporter.NewTopSQLPubSubService(register)
 		tipb.RegisterTopSQLPubSubServer(s, service)
 	}
@@ -84,11 +84,11 @@ func RegisterPubSubServer(s *grpc.Server) {
 // Close uses to close and release the top sql resource.
 func Close() {
 	singleTargetDataSink.Close()
-	globalTopProfilingReport.Close()
+	globalTopSQLReport.Close()
 	stmtstats.CloseAggregator()
 }
 
-// RegisterSQL uses to register SQL information into Top Profiling.
+// RegisterSQL uses to register SQL information into Top SQL.
 func RegisterSQL(normalizedSQL string, sqlDigest *parser.Digest, isInternal bool) {
 	if sqlDigest != nil {
 		sqlDigestBytes := sqlDigest.Bytes()
@@ -96,7 +96,7 @@ func RegisterSQL(normalizedSQL string, sqlDigest *parser.Digest, isInternal bool
 	}
 }
 
-// RegisterPlan uses to register plan information into Top Profiling.
+// RegisterPlan uses to register plan information into Top SQL.
 func RegisterPlan(normalizedPlan string, planDigest *parser.Digest) {
 	if planDigest != nil {
 		planDigestBytes := planDigest.Bytes()
@@ -104,7 +104,7 @@ func RegisterPlan(normalizedPlan string, planDigest *parser.Digest) {
 	}
 }
 
-// AttachAndRegisterSQLInfo attach the sql information into Top Profiling and register the SQL meta information.
+// AttachAndRegisterSQLInfo attach the sql information into Top SQL and register the SQL meta information.
 func AttachAndRegisterSQLInfo(ctx context.Context, normalizedSQL string, sqlDigest *parser.Digest, isInternal bool) context.Context {
 	if sqlDigest == nil || len(sqlDigest.String()) == 0 {
 		return ctx
@@ -133,7 +133,7 @@ func AttachAndRegisterSQLInfo(ctx context.Context, normalizedSQL string, sqlDige
 	return ctx
 }
 
-// AttachSQLAndPlanInfo attach the sql and plan information into Top Profiling.
+// AttachSQLAndPlanInfo attach the sql and plan information into Top SQL.
 func AttachSQLAndPlanInfo(ctx context.Context, sqlDigest *parser.Digest, planDigest *parser.Digest) context.Context {
 	if sqlDigest == nil || len(sqlDigest.String()) == 0 {
 		return ctx
@@ -201,9 +201,9 @@ func linkSQLTextWithDigest(sqlDigest []byte, normalizedSQL string, isInternal bo
 		normalizedSQL = normalizedSQL[:MaxSQLTextSize]
 	}
 
-	globalTopProfilingReport.RegisterSQL(sqlDigest, normalizedSQL, isInternal)
+	globalTopSQLReport.RegisterSQL(sqlDigest, normalizedSQL, isInternal)
 }
 
 func linkPlanTextWithDigest(planDigest []byte, normalizedBinaryPlan string) {
-	globalTopProfilingReport.RegisterPlan(planDigest, normalizedBinaryPlan, len(normalizedBinaryPlan) > MaxBinaryPlanSize)
+	globalTopSQLReport.RegisterPlan(planDigest, normalizedBinaryPlan, len(normalizedBinaryPlan) > MaxBinaryPlanSize)
 }
