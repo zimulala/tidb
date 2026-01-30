@@ -83,4 +83,3 @@ Options:
 <!-- NAVIGATOR:END AUTO_DECISIONS -->
 
 ## Notes (human)
-- TODO
