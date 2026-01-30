@@ -31,6 +31,25 @@ Patch sources:
 - Otherwise core templates:
   <protocol_root>/templates/
 
+----------------------------
+BUDGET + FORCED EXIT (v2-lite)
+----------------------------
+Goal: avoid long-running exploration. Be fast and predictable.
+
+Command budget:
+- You MUST execute at most 12 shell/tool commands total (including git/cp/date/list/read).
+- If budget would be exceeded, STOP patching and output current best-effort state + next actions.
+
+File read budget:
+- You MUST read at most 8 files total.
+- For each file, read at most the first 200 lines (or equivalent snippet).
+- You MUST NOT scan the repo (no grep/ripgrep, no directory traversal beyond checking existence of the allowed governance files).
+
+Forced exit:
+- Once you have (a) ensured required files exist, and (b) updated <project>/PROJECT_STATE.md managed block,
+  you MUST immediately output the final result sections and STOP.
+- You MUST NOT continue exploring/listing/reading after PROJECT_STATE is updated.
+
 Patch scope rules (idempotent + predictable):
 - Only edit within navigator-managed blocks:
   <!-- NAVIGATOR:BEGIN ... --> ... <!-- NAVIGATOR:END ... -->
