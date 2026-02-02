@@ -2156,7 +2156,8 @@ func (a *ExecStmt) updatePrevStmt() {
 func (a *ExecStmt) observeStmtBeginForTopSQL(ctx context.Context) context.Context {
 	topSQL := topsqlstate.TopSQLEnabled()
 	topRU := topsqlstate.TopRUEnabled()
-	if !(topSQL || topRU) && IsFastPlan(a.Plan) {
+	topProfiling := topsqlstate.TopProfilingEnabled()
+	if !topProfiling && IsFastPlan(a.Plan) {
 		// To reduce the performance impact on fast plan.
 		// Drop them does not cause notable accuracy issue in TopSQL.
 		return ctx
@@ -2174,7 +2175,7 @@ func (a *ExecStmt) observeStmtBeginForTopSQL(ctx context.Context) context.Contex
 		planDigestByte = planDigest.Bytes()
 	}
 	stats := a.Ctx.GetStmtStats()
-	if !topSQL {
+	if !topProfiling {
 		// Always attach the SQL and plan info uses to catch the running SQL when Top SQL is enabled in execution.
 		if stats != nil {
 			stats.OnExecutionBegin(sqlDigestByte, planDigestByte, &stmtstats.ExecBeginInfo{
@@ -2194,8 +2195,10 @@ func (a *ExecStmt) observeStmtBeginForTopSQL(ctx context.Context) context.Contex
 			TopRUEnabled:   topRU,
 			Ctx:            a.GoCtx,
 		})
-		// This is a special logic prepared for TiKV's SQLExecCount.
-		sc.KvExecCounter = stats.CreateKvExecCounter(sqlDigestByte, planDigestByte)
+		if topSQL {
+			// This is a special logic prepared for TiKV's SQLExecCount.
+			sc.KvExecCounter = stats.CreateKvExecCounter(sqlDigestByte, planDigestByte)
+		}
 	}
 
 	isSQLRegistered := sc.IsSQLRegistered.Load()
