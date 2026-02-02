@@ -5,6 +5,7 @@ rules:
 - each E# MUST include: commit, time, env, command, artifact_path
 - if commit != PROJECT_STATE.current_commit (when known), evidence is stale ⇒ COLLECT_EVIDENCE
 - do not close findings with stale/missing evidence
+- Go tests must include `-tags=intest`
 
 <!-- NAVIGATOR:BEGIN AUTO_EVIDENCE -->
 | ID | Type | What it proves | Commit | Time | Env | Command | Artifact path |

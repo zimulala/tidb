@@ -91,6 +91,11 @@ Definitions (important):
     - plan/doc entries are allowed during IMPLEMENT.
     - commit-bound completeness is required only when closing findings (Closed) or entering FINAL_REVIEW.
 
+Test command defaults (Go):
+- When generating or updating EVIDENCE_INDEX.md, all Go test commands MUST include `-tags=intest` by default.
+- If an exception is needed, you MUST document it explicitly in the Evidence row (Notes/What it proves) and explain why `-tags=intest` is not used.
+- Evidence generated without `-tags=intest` (and without an explicit documented exception) MUST be treated as non-compliant for closing correctness findings.
+
 State machine (determine exactly one state; order matters):
 1) LOCK_SEMANTICS:
     - any REQUIRED semantic decision lacks GO (Status != GO OR Approved missing)

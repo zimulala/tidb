@@ -55,8 +55,12 @@
     4) Add tests:
         - long-running query (>1s): generates >= N delta samples; sum(delta) approximates final RU within acceptable tolerance
         - cancellation/abnormal exit does not leak state and does not double-count
-- status: Open
-- evidence: TODO_E# (expected E1 correctness test suite; optional E2 perf/overhead)
+- status: Closed
+- evidence: E1
+- closure_note:
+    - Implemented single-session active `execCtx` lifecycle in `StatementStats` (begin bind, finish clear).
+    - `MergeRUInto()` now performs in-flight delta sampling from active execution context.
+    - Sampling cadence is aggregator-driven (nominal 1s tick), and finish path only flushes the final delta based on `LastRUSample` (no full-RU double count).
 
 ---
 
