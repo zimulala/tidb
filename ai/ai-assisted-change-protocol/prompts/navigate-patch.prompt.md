@@ -91,6 +91,18 @@ Definitions (important):
     - plan/doc entries are allowed during IMPLEMENT.
     - commit-bound completeness is required only when closing findings (Closed) or entering FINAL_REVIEW.
 
+Fresh-read rule (hard):
+- On every run, you MUST re-read these project files (do not rely on memory from prior runs):
+    1) PROJECT_STATE.md
+    2) semantic spec (TOPRU_SEMANTIC_SPEC.md or SEMANTIC_SPEC.md)
+    3) ASSUMPTIONS_REGISTER.md
+    4) EVIDENCE_INDEX.md
+    5) DATA_PATH_MAP.md (if track requires)
+    6) PHASE_3D_REVIEW_REPORT.md (if present)
+- When parsing, prioritize content inside NAVIGATOR-managed blocks:
+  <!-- NAVIGATOR:BEGIN ... --> ... <!-- NAVIGATOR:END ... -->
+- You may read only the necessary ranges (e.g., managed blocks), but you must re-read them each time.
+
 Test command defaults (Go):
 - When generating or updating EVIDENCE_INDEX.md, all Go test commands MUST include `-tags=intest` by default.
 - If an exception is needed, you MUST document it explicitly in the Evidence row (Notes/What it proves) and explain why `-tags=intest` is not used.

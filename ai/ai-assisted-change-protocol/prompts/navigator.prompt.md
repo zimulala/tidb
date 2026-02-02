@@ -9,13 +9,18 @@ NAVIGATE: project=<path> track=<optional>
 
 Read rules:
 - Read only these files if present under <project>/:
-  - PROJECT_STATE.md
-  - SEMANTIC_SPEC.md
-  - TOPRU_SEMANTIC_SPEC.md
-  - ASSUMPTIONS_REGISTER.md
-  - EVIDENCE_INDEX.md
-  - DATA_PATH_MAP.md
-  - PHASE_3D_REVIEW_REPORT.md
+    1) PROJECT_STATE.md
+    2) semantic spec (TOPRU_SEMANTIC_SPEC.md or SEMANTIC_SPEC.md)
+    3) ASSUMPTIONS_REGISTER.md
+    4) EVIDENCE_INDEX.md
+    5) DATA_PATH_MAP.md (if track requires)
+    6) PHASE_3D_REVIEW_REPORT.md (if present)
+
+Fresh-read rule (hard):
+- On EVERY run, you MUST re-read the latest content of the files you use for state detection.
+- You MUST NOT reuse conclusions from prior runs without re-reading.
+- Prefer parsing inside NAVIGATOR-managed blocks:
+  <!-- NAVIGATOR:BEGIN ... --> ... <!-- NAVIGATOR:END ... -->
 
 Protocol root:
 - <protocol_root> is the directory that contains START_HERE.md, templates/, prompts/, and tracks/.

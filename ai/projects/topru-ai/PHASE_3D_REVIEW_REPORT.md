@@ -104,8 +104,11 @@
         - register SQL meta always; plan meta subject to rate limit / size limit.
     3) Add tests:
         - TopSQL disabled + TopRU enabled still results in SQLMeta (and PlanMeta if required) being present in the reported payload.
-- status: Open
-- evidence: TODO_E# (E1 tests)
+- status: Closed
+- evidence: E1
+- closure_note:
+    - Changed `observeStmtBeginForTopSQL` gate to use `TopProfilingEnabled()` for meta registration path.
+    - Added executor unit test proving SQL/Plan meta registration when TopSQL is disabled and TopRU is enabled.
 
 ---
 
