@@ -66,7 +66,7 @@ Minimal generation policy (very important):
 - Generate DATA_PATH_MAP.md only if:
   - track requires it in TRACK.md, OR
   - file exists already, OR
-  - state would be IMPLEMENT for a pipeline-like feature and no map exists.
+  - state would be IMPLEMENT and the track is pipeline-like and no map exists.
 - Generate PHASE_3D_REVIEW_REPORT.md only if:
   - track requires it in TRACK.md, OR
   - file exists already, OR
@@ -83,14 +83,53 @@ Commit (for evidence staleness):
   git -C <project> rev-parse HEAD
 - If not available, set current commit to UNKNOWN and add a gate blocker.
 
-Gate rules (hard):
-- LOCK_SEMANTICS if any REQUIRED semantic decision is not GO or Approved missing.
-- CLOSE_ASSUMPTIONS if any REQUIRED assumption is Open.
-- COLLECT_EVIDENCE if any REQUIRED evidence row is missing OR not commit-bound:
-  missing commit/time/env/command/artifact_path
-  OR evidence commit != current commit (if current commit known).
-- FINAL_REVIEW if evidence present and commit-bound but findings not all Closed.
-- IMPLEMENT only if gates satisfied and there is remaining code work.
+Definitions (important):
+- Assumptions:
+    - Allowed to remain Open during IMPLEMENT.
+    - MUST be closed before FINAL_REVIEW/merge.
+- Evidence:
+    - plan/doc entries are allowed during IMPLEMENT.
+    - commit-bound completeness is required only when closing findings (Closed) or entering FINAL_REVIEW.
+
+State machine (determine exactly one state; order matters):
+1) LOCK_SEMANTICS:
+    - any REQUIRED semantic decision lacks GO (Status != GO OR Approved missing)
+
+2) IMPLEMENT:
+    - semantic GO satisfied AND there exists work remaining (any of):
+        - review report has Open findings, OR
+        - required assumptions are Open (still need implementation/validation), OR
+        - required track artifacts (e.g., DATA_PATH_MAP) are missing/empty
+
+3) CLOSE_ASSUMPTIONS:
+    - semantic GO satisfied AND
+    - no Open findings requiring code change are detected (review report missing or has no Open findings), AND
+    - any REQUIRED assumption remains Open
+
+4) COLLECT_EVIDENCE:
+    - semantic GO satisfied AND
+    - all REQUIRED assumptions are closed (no Open), AND
+    - evidence needed for finalization is missing/stale:
+        - any Closed finding references missing/non-commit-bound evidence, OR
+        - any REQUIRED non-plan evidence (Type != plan) missing commit/time/env/command/artifact_path, OR
+        - evidence.commit != current commit (if known)
+
+5) FINAL_REVIEW:
+  - semantic GO satisfied AND
+  - all REQUIRED assumptions closed, AND
+  - required evidence is commit-bound and present, BUT
+  - review findings not all Closed/WontFix
+
+IMPLEMENT output constraint (anti-drift):
+- In IMPLEMENT state, every next action MUST reference what it closes:
+    - closes: A# and/or F#
+    - produces: E# (if closure requires evidence)
+- You MUST NOT propose unrelated refactors or scope expansion.
+
+Evidence policy (anti-fake-closure):
+- Type=plan/doc may NOT be used to close correctness/performance findings.
+- Only allow marking F# as Closed when the referenced evidence is commit-bound and is NOT plan/doc
+  (e.g., test/bench/metrics/log).
 
 IMPORTANT:
 - In IMPLEMENT state you MUST NOT change code. Only write/document:
