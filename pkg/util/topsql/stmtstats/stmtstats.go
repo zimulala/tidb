@@ -15,6 +15,7 @@
 package stmtstats
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -45,6 +46,7 @@ type ExecBeginInfo struct {
 	InNetworkBytes uint64
 	User           string
 	TopRUEnabled   bool
+	Ctx            context.Context
 }
 
 // ExecFinishInfo carries optional execution-finish context for extensible stats collection.
@@ -68,6 +70,9 @@ type StatementStats struct {
 	// RU tracking fields (Phase 1 TopRU support)
 	// These fields are separate from TopSQL stmtstats to maintain pipeline independence.
 	finishedRUBuffer RUIncrementMap // Completed SQL RU deltas (drained by 1s tick)
+	// execCtx tracks the currently active SQL execution in this session.
+	// TiDB session execution is serialized, so at most one active context is kept.
+	execCtx *ExecutionContext
 }
 
 // CreateStatementStats try to create and register an StatementStats.
@@ -91,13 +96,13 @@ func (s *StatementStats) OnExecutionBegin(sqlDigest, planDigest []byte, info *Ex
 	if info != nil {
 		item.NetworkInBytes = info.InNetworkBytes
 		if info.TopRUEnabled {
-			s.addRUOnBeginLocked(info.User, sqlDigest, planDigest)
+			s.addRUOnBeginLocked(info.User, sqlDigest, planDigest, info.Ctx)
 		}
 	}
 	// Count more data here.
 }
 
-func (s *StatementStats) addRUOnBeginLocked(user string, sqlDigest, planDigest []byte) {
+func (s *StatementStats) addRUOnBeginLocked(user string, sqlDigest, planDigest []byte, ctx context.Context) {
 	key := RUKey{
 		User:       user,
 		SQLDigest:  BinaryDigest(sqlDigest),
@@ -109,6 +114,12 @@ func (s *StatementStats) addRUOnBeginLocked(user string, sqlDigest, planDigest [
 		s.finishedRUBuffer[key] = incr
 	}
 	incr.ExecCount++
+
+	// Replace any stale execution context defensively to avoid ghost sampling.
+	s.execCtx = &ExecutionContext{
+		Ctx: ctx,
+		Key: key,
+	}
 }
 
 // OnExecutionFinished implements StatementObserver.OnExecutionFinished.
@@ -118,6 +129,9 @@ func (s *StatementStats) OnExecutionFinished(sqlDigest, planDigest []byte, info 
 	}
 	ns := info.ExecDuration.Nanoseconds()
 	if ns < 0 {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.clearRUExecCtxLocked()
 		return
 	}
 
@@ -130,31 +144,94 @@ func (s *StatementStats) OnExecutionFinished(sqlDigest, planDigest []byte, info 
 	item.NetworkOutBytes = info.OutNetworkBytes
 	if info.TopRUEnabled {
 		s.addRUOnFinishLocked(info.User, sqlDigest, planDigest, info.RUDetails, info.ExecDuration)
+	} else {
+		s.clearRUExecCtxLocked()
 	}
 	// Count more data here.
 }
 
 func (s *StatementStats) addRUOnFinishLocked(user string, sqlDigest, planDigest []byte, ru *util.RUDetails, execDuration time.Duration) {
+	defer s.clearRUExecCtxLocked()
 	if ru == nil {
 		return
 	}
 
-	totalRU := ru.RRU() + ru.WRU()
-	if totalRU <= 0 {
-		return
-	}
 	key := RUKey{
 		User:       user,
 		SQLDigest:  BinaryDigest(sqlDigest),
 		PlanDigest: BinaryDigest(planDigest),
+	}
+
+	currentTotalRU := ru.RRU() + ru.WRU()
+	if currentTotalRU <= 0 {
+		return
+	}
+
+	lastTotalRU := 0.0
+	if s.execCtx != nil && s.execCtx.Key == key && s.execCtx.LastRUSample != nil {
+		lastTotalRU = s.execCtx.LastRUSample.RRU() + s.execCtx.LastRUSample.WRU()
+	}
+	deltaRU := currentTotalRU - lastTotalRU
+	if deltaRU <= 0 {
+		// Counter reset or already sampled by previous tick.
+		if s.execCtx != nil && s.execCtx.Key == key {
+			s.execCtx.LastRUSample = ru.Clone()
+		}
+		return
 	}
 	incr, ok := s.finishedRUBuffer[key]
 	if !ok {
 		incr = &RUIncrement{}
 		s.finishedRUBuffer[key] = incr
 	}
-	incr.TotalRU += totalRU
+	incr.TotalRU += deltaRU
 	incr.ExecDuration += uint64(execDuration.Nanoseconds())
+	if s.execCtx != nil && s.execCtx.Key == key {
+		s.execCtx.LastRUSample = ru.Clone()
+	}
+}
+
+func (s *StatementStats) clearRUExecCtxLocked() {
+	if s.execCtx == nil {
+		return
+	}
+	// Single active execution per session is the invariant; always clear stale contexts.
+	s.execCtx = nil
+}
+
+func (s *StatementStats) sampleActiveRUDeltaLocked(result RUIncrementMap) RUIncrementMap {
+	if s.execCtx == nil || s.execCtx.Ctx == nil {
+		return result
+	}
+	raw := s.execCtx.Ctx.Value(util.RUDetailsCtxKey)
+	if raw == nil {
+		return result
+	}
+	currentRU, ok := raw.(*util.RUDetails)
+	if !ok || currentRU == nil {
+		return result
+	}
+	currentSnapshot := currentRU.Clone()
+	currentTotalRU := currentSnapshot.RRU() + currentSnapshot.WRU()
+	lastTotalRU := 0.0
+	if s.execCtx.LastRUSample != nil {
+		lastTotalRU = s.execCtx.LastRUSample.RRU() + s.execCtx.LastRUSample.WRU()
+	}
+	deltaRU := currentTotalRU - lastTotalRU
+	if deltaRU > 0 {
+		if result == nil {
+			result = RUIncrementMap{}
+		}
+		incr, ok := result[s.execCtx.Key]
+		if !ok {
+			incr = &RUIncrement{}
+			result[s.execCtx.Key] = incr
+		}
+		incr.TotalRU += deltaRU
+	}
+	// Keep LastRUSample in sync even when delta <= 0 (e.g. counter reset).
+	s.execCtx.LastRUSample = currentSnapshot
+	return result
 }
 
 // GetOrCreateStatementStatsItem creates the corresponding StatementStatsItem
@@ -209,17 +286,16 @@ func (s *StatementStats) Finished() bool {
 //
 // Phase 1 Design:
 //   - Drains finishedRUBuffer (completed SQL RU deltas)
+//   - In-flight sampling cadence is driven by aggregator tick (nominal 1s), not a local ticker here.
 //   - Thread-safe (mutex protected)
 //   - Returns empty map if no RU data accumulated
-//
-// Note: Active execution sampling (execCtx) is deferred to Phase 2 M4.
 func (s *StatementStats) MergeRUInto() RUIncrementMap {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	result := s.finishedRUBuffer
 	s.finishedRUBuffer = RUIncrementMap{}
-	return result
+	return s.sampleActiveRUDeltaLocked(result)
 }
 
 // BinaryDigest is converted from parser.Digest.Bytes(), and the purpose

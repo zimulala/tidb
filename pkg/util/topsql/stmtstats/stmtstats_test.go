@@ -16,6 +16,7 @@ package stmtstats
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -233,4 +234,79 @@ func TestOnExecutionBeginFinishRU(t *testing.T) {
 	require.Equal(t, uint64(1), incr.ExecCount)
 	require.Equal(t, 30.0, incr.TotalRU)
 	require.Equal(t, uint64(time.Second.Nanoseconds()), incr.ExecDuration)
+}
+
+func TestMergeRUIntoInFlightSamplingAndFinishDedup(t *testing.T) {
+	stats := CreateStatementStats()
+	ru := util.NewRUDetailsWith(0, 0, 0)
+	ctx := context.WithValue(context.Background(), util.RUDetailsCtxKey, ru)
+	key := RUKey{User: "user1", SQLDigest: BinaryDigest("sql1"), PlanDigest: BinaryDigest("plan1")}
+
+	stats.OnExecutionBegin([]byte("sql1"), []byte("plan1"), &ExecBeginInfo{
+		User:         "user1",
+		TopRUEnabled: true,
+		Ctx:          ctx,
+	})
+
+	total := RUIncrementMap{}
+
+	ru.Merge(util.NewRUDetailsWith(10, 0, 0))
+	total.Merge(stats.MergeRUInto())
+
+	ru.Merge(util.NewRUDetailsWith(5, 0, 0))
+	total.Merge(stats.MergeRUInto())
+
+	ru.Merge(util.NewRUDetailsWith(7, 0, 0))
+	stats.OnExecutionFinished([]byte("sql1"), []byte("plan1"), &ExecFinishInfo{
+		User:         "user1",
+		TopRUEnabled: true,
+		RUDetails:    ru,
+		ExecDuration: 2 * time.Second,
+	})
+	total.Merge(stats.MergeRUInto())
+
+	incr, ok := total[key]
+	require.True(t, ok)
+	require.Equal(t, uint64(1), incr.ExecCount)
+	require.InDelta(t, 22.0, incr.TotalRU, 1e-9)
+	require.Equal(t, uint64((2 * time.Second).Nanoseconds()), incr.ExecDuration)
+
+	require.Nil(t, stats.execCtx)
+	ru.Merge(util.NewRUDetailsWith(3, 0, 0))
+	require.Len(t, stats.MergeRUInto(), 0)
+}
+
+func TestMergeRUIntoHandlesRUResetAndNilRUDetails(t *testing.T) {
+	stats := CreateStatementStats()
+	ru := util.NewRUDetailsWith(10, 0, 0)
+	ctx := context.WithValue(context.Background(), util.RUDetailsCtxKey, ru)
+	key := RUKey{User: "user2", SQLDigest: BinaryDigest("sql2"), PlanDigest: BinaryDigest("plan2")}
+
+	stats.OnExecutionBegin([]byte("sql2"), []byte("plan2"), &ExecBeginInfo{
+		User:         "user2",
+		TopRUEnabled: true,
+		Ctx:          ctx,
+	})
+	first := stats.MergeRUInto()
+	require.Len(t, first, 1)
+	require.InDelta(t, 10.0, first[key].TotalRU, 1e-9)
+
+	stats.mu.Lock()
+	stats.execCtx.LastRUSample = util.NewRUDetailsWith(100, 0, 0)
+	stats.mu.Unlock()
+	require.Len(t, stats.MergeRUInto(), 0)
+
+	ru.Merge(util.NewRUDetailsWith(5, 0, 0))
+	next := stats.MergeRUInto()
+	require.Len(t, next, 1)
+	require.InDelta(t, 5.0, next[key].TotalRU, 1e-9)
+	require.GreaterOrEqual(t, next[key].TotalRU, 0.0)
+
+	stats.OnExecutionFinished([]byte("sql2"), []byte("plan2"), &ExecFinishInfo{
+		User:         "user2",
+		TopRUEnabled: true,
+		RUDetails:    nil,
+		ExecDuration: time.Second,
+	})
+	require.Nil(t, stats.execCtx)
 }

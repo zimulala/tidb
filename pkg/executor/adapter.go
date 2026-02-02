@@ -2181,6 +2181,7 @@ func (a *ExecStmt) observeStmtBeginForTopSQL(ctx context.Context) context.Contex
 				InNetworkBytes: vars.InPacketBytes.Load(),
 				User:           userString(vars),
 				TopRUEnabled:   topRU,
+				Ctx:            a.GoCtx,
 			})
 		}
 		return topsql.AttachSQLAndPlanInfo(ctx, sqlDigest, planDigest)
@@ -2191,6 +2192,7 @@ func (a *ExecStmt) observeStmtBeginForTopSQL(ctx context.Context) context.Contex
 			InNetworkBytes: vars.InPacketBytes.Load(),
 			User:           userString(vars),
 			TopRUEnabled:   topRU,
+			Ctx:            a.GoCtx,
 		})
 		// This is a special logic prepared for TiKV's SQLExecCount.
 		sc.KvExecCounter = stats.CreateKvExecCounter(sqlDigestByte, planDigestByte)
