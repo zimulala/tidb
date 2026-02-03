@@ -310,3 +310,151 @@ func TestMergeRUIntoHandlesRUResetAndNilRUDetails(t *testing.T) {
 	})
 	require.Nil(t, stats.execCtx)
 }
+
+func TestExecCountBeginBased_LongRunningAcrossTicks(t *testing.T) {
+	stats := CreateStatementStats()
+	ru := util.NewRUDetailsWith(0, 0, 0)
+	ctx := context.WithValue(context.Background(), util.RUDetailsCtxKey, ru)
+	key := RUKey{User: "u1", SQLDigest: BinaryDigest("sql"), PlanDigest: BinaryDigest("plan")}
+
+	stats.OnExecutionBegin([]byte("sql"), []byte("plan"), &ExecBeginInfo{
+		User:         "u1",
+		TopRUEnabled: true,
+		Ctx:          ctx,
+	})
+
+	ru.Merge(util.NewRUDetailsWith(4, 0, 0))
+	tick1 := stats.MergeRUInto()
+	require.Len(t, tick1, 1)
+	require.InDelta(t, 4.0, tick1[key].TotalRU, 1e-9)
+	require.Equal(t, uint64(1), tick1[key].ExecCount)
+
+	ru.Merge(util.NewRUDetailsWith(6, 0, 0))
+	tick2 := stats.MergeRUInto()
+	require.Len(t, tick2, 1)
+	require.InDelta(t, 6.0, tick2[key].TotalRU, 1e-9)
+	require.Equal(t, uint64(0), tick2[key].ExecCount)
+
+	ru.Merge(util.NewRUDetailsWith(5, 0, 0))
+	stats.OnExecutionFinished([]byte("sql"), []byte("plan"), &ExecFinishInfo{
+		User:         "u1",
+		TopRUEnabled: true,
+		RUDetails:    ru,
+		ExecDuration: 3 * time.Second,
+	})
+	finish := stats.MergeRUInto()
+	require.Len(t, finish, 1)
+	require.InDelta(t, 5.0, finish[key].TotalRU, 1e-9)
+	require.Equal(t, uint64(0), finish[key].ExecCount)
+
+	total := RUIncrementMap{}
+	total.Merge(tick1)
+	total.Merge(tick2)
+	total.Merge(finish)
+	require.Equal(t, uint64(1), total[key].ExecCount)
+	require.InDelta(t, 15.0, total[key].TotalRU, 1e-9)
+}
+
+func TestExecCountBeginBased_ToggleMidExecution(t *testing.T) {
+	t.Run("begin-on-disable-mid-exec", func(t *testing.T) {
+		stats := CreateStatementStats()
+		ru := util.NewRUDetailsWith(3, 0, 0)
+		ctx := context.WithValue(context.Background(), util.RUDetailsCtxKey, ru)
+
+		stats.OnExecutionBegin([]byte("sql"), []byte("plan"), &ExecBeginInfo{
+			User:         "u1",
+			TopRUEnabled: true,
+			Ctx:          ctx,
+		})
+		stats.OnExecutionFinished([]byte("sql"), []byte("plan"), &ExecFinishInfo{
+			User:         "u1",
+			TopRUEnabled: false,
+			RUDetails:    ru,
+			ExecDuration: time.Second,
+		})
+		require.Nil(t, stats.execCtx)
+		require.Len(t, stats.MergeRUInto(), 0)
+
+		ru.Merge(util.NewRUDetailsWith(2, 0, 0))
+		require.Len(t, stats.MergeRUInto(), 0)
+	})
+
+	t.Run("late-enable", func(t *testing.T) {
+		stats := CreateStatementStats()
+		ru := util.NewRUDetailsWith(9, 0, 0)
+		key := RUKey{User: "u2", SQLDigest: BinaryDigest("sql2"), PlanDigest: BinaryDigest("plan2")}
+
+		stats.OnExecutionBegin([]byte("sql2"), []byte("plan2"), &ExecBeginInfo{
+			User:         "u2",
+			TopRUEnabled: false,
+		})
+		stats.OnExecutionFinished([]byte("sql2"), []byte("plan2"), &ExecFinishInfo{
+			User:         "u2",
+			TopRUEnabled: true,
+			RUDetails:    ru,
+			ExecDuration: time.Second,
+		})
+
+		m := stats.MergeRUInto()
+		require.Len(t, m, 1)
+		require.InDelta(t, 9.0, m[key].TotalRU, 1e-9)
+		// Late-enable has no begin signal, so RU is reported with ExecCount=0 by design.
+		require.Equal(t, uint64(0), m[key].ExecCount)
+	})
+}
+
+func TestExecCountBeginBased_RUZeroNoNoise(t *testing.T) {
+	stats := CreateStatementStats()
+	ru := util.NewRUDetailsWith(0, 0, 0)
+	ctx := context.WithValue(context.Background(), util.RUDetailsCtxKey, ru)
+
+	stats.OnExecutionBegin([]byte("sql"), []byte("plan"), &ExecBeginInfo{
+		User:         "u3",
+		TopRUEnabled: true,
+		Ctx:          ctx,
+	})
+	require.Len(t, stats.MergeRUInto(), 0)
+
+	stats.OnExecutionFinished([]byte("sql"), []byte("plan"), &ExecFinishInfo{
+		User:         "u3",
+		TopRUEnabled: true,
+		RUDetails:    ru,
+		ExecDuration: time.Second,
+	})
+	require.Len(t, stats.MergeRUInto(), 0)
+}
+
+func TestExecCountBeginBased_BucketMergeSameTick(t *testing.T) {
+	stats := CreateStatementStats()
+	key := RUKey{User: "u1", SQLDigest: BinaryDigest("sql"), PlanDigest: BinaryDigest("plan")}
+
+	// Execution 1: finish first, data stays in finishedRUBuffer before next tick.
+	ru1 := util.NewRUDetailsWith(6, 0, 0)
+	ctx1 := context.WithValue(context.Background(), util.RUDetailsCtxKey, ru1)
+	stats.OnExecutionBegin([]byte("sql"), []byte("plan"), &ExecBeginInfo{
+		User:         "u1",
+		TopRUEnabled: true,
+		Ctx:          ctx1,
+	})
+	stats.OnExecutionFinished([]byte("sql"), []byte("plan"), &ExecFinishInfo{
+		User:         "u1",
+		TopRUEnabled: true,
+		RUDetails:    ru1,
+		ExecDuration: time.Second,
+	})
+
+	// Execution 2: active with positive delta before the same tick drains.
+	ru2 := util.NewRUDetailsWith(0, 0, 0)
+	ctx2 := context.WithValue(context.Background(), util.RUDetailsCtxKey, ru2)
+	stats.OnExecutionBegin([]byte("sql"), []byte("plan"), &ExecBeginInfo{
+		User:         "u1",
+		TopRUEnabled: true,
+		Ctx:          ctx2,
+	})
+	ru2.Merge(util.NewRUDetailsWith(4, 0, 0))
+
+	m := stats.MergeRUInto()
+	require.Len(t, m, 1)
+	require.InDelta(t, 10.0, m[key].TotalRU, 1e-9)
+	require.Equal(t, uint64(2), m[key].ExecCount)
+}

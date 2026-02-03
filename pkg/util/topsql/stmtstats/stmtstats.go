@@ -108,17 +108,11 @@ func (s *StatementStats) addRUOnBeginLocked(user string, sqlDigest, planDigest [
 		SQLDigest:  BinaryDigest(sqlDigest),
 		PlanDigest: BinaryDigest(planDigest),
 	}
-	incr, ok := s.finishedRUBuffer[key]
-	if !ok {
-		incr = &RUIncrement{}
-		s.finishedRUBuffer[key] = incr
-	}
-	incr.ExecCount++
-
 	// Replace any stale execution context defensively to avoid ghost sampling.
 	s.execCtx = &ExecutionContext{
-		Ctx: ctx,
-		Key: key,
+		Ctx:              ctx,
+		Key:              key,
+		PendingExecCount: 1,
 	}
 }
 
@@ -179,16 +173,33 @@ func (s *StatementStats) addRUOnFinishLocked(user string, sqlDigest, planDigest 
 		}
 		return
 	}
+	incr := s.getOrCreateRUIncrementLocked(key)
+	incr.TotalRU += deltaRU
+	incr.ExecCount += s.consumePendingExecCountLocked(key)
+	incr.ExecDuration += uint64(execDuration.Nanoseconds())
+	if s.execCtx != nil && s.execCtx.Key == key {
+		s.execCtx.LastRUSample = ru.Clone()
+	}
+}
+
+func (s *StatementStats) getOrCreateRUIncrementLocked(key RUKey) *RUIncrement {
 	incr, ok := s.finishedRUBuffer[key]
 	if !ok {
 		incr = &RUIncrement{}
 		s.finishedRUBuffer[key] = incr
 	}
-	incr.TotalRU += deltaRU
-	incr.ExecDuration += uint64(execDuration.Nanoseconds())
-	if s.execCtx != nil && s.execCtx.Key == key {
-		s.execCtx.LastRUSample = ru.Clone()
+	return incr
+}
+
+func (s *StatementStats) consumePendingExecCountLocked(key RUKey) uint64 {
+	if s.execCtx == nil || s.execCtx.Key != key || s.execCtx.PendingExecCount == 0 {
+		return 0
 	}
+	count := s.execCtx.PendingExecCount
+	// Invariant: pending begin-based count can be consumed only once per execution.
+	// PendingExecCount is consumed exactly once on first positive RU delta.
+	s.execCtx.PendingExecCount = 0
+	return count
 }
 
 func (s *StatementStats) clearRUExecCtxLocked() {
@@ -228,6 +239,7 @@ func (s *StatementStats) sampleActiveRUDeltaLocked(result RUIncrementMap) RUIncr
 			result[s.execCtx.Key] = incr
 		}
 		incr.TotalRU += deltaRU
+		incr.ExecCount += s.consumePendingExecCountLocked(s.execCtx.Key)
 	}
 	// Keep LastRUSample in sync even when delta <= 0 (e.g. counter reset).
 	s.execCtx.LastRUSample = currentSnapshot

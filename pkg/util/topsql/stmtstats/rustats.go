@@ -26,10 +26,11 @@
 //   - User dimension: RUKey extends SQL/Plan digest with User for per-user attribution
 //
 // Data Flow (Phase 1):
-//   Session -> StatementStats (execCtx + finishedRUBuffer)
-//   -> aggregator.aggregateRU() [1s tick]
-//   -> RUCollector.CollectRUIncrements()
-//   -> Reporter channel
+//
+//	Session -> StatementStats (execCtx + finishedRUBuffer)
+//	-> aggregator.aggregateRU() [1s tick]
+//	-> RUCollector.CollectRUIncrements()
+//	-> Reporter channel
 //
 // Phase 2 Status:
 //   - Two-level TopN: Implemented in reporter/ru_datamodel.go (200 users × 200 SQLs)
@@ -84,6 +85,10 @@ type ExecutionContext struct {
 	// LastRUSample stores the last sampled cumulative RU value.
 	// Used to compute delta = current - last on each tick.
 	LastRUSample *util.RUDetails
+
+	// PendingExecCount tracks begin-based execution count waiting to be attributed.
+	// PendingExecCount is consumed exactly once on first positive RU delta.
+	PendingExecCount uint64
 }
 
 // RUIncrement represents a delta RU consumption for a specific RUKey.
@@ -102,8 +107,8 @@ type RUIncrement struct {
 	TotalRU float64
 
 	// ExecCount is the number of SQL executions that contributed to this increment.
-	// For active executions sampled mid-flight, this is 0.
-	// For finished executions, this is typically 1 per finish event.
+	// Begin-based semantics: each execution contributes at most one count on its
+	// first positive RU delta (tick or finish); later deltas carry count=0.
 	ExecCount uint64
 
 	// ExecDuration is the cumulative execution time in nanoseconds.
