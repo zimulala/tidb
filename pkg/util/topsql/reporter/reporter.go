@@ -37,14 +37,9 @@ const (
 var nowFunc = time.Now
 
 func effectiveReportIntervalSeconds() int64 {
-	interval := topsqlstate.GlobalState.ReportIntervalSeconds.Load()
-	if topsqlstate.TopRUEnabled() {
-		ruInterval := topsqlstate.GetTopRUReportInterval()
-		if ruInterval > 0 && ruInterval < interval {
-			interval = ruInterval
-		}
-	}
-	return interval
+	// TopSQL cadence is independent from TopRU cadence.
+	// TopRU reporting should use its own ticker/interval path.
+	return topsqlstate.GlobalState.ReportIntervalSeconds.Load()
 }
 
 // TopSQLReporter collects Top SQL metrics.

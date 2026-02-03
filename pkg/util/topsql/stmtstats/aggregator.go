@@ -113,12 +113,17 @@ func (m *aggregator) aggregate() {
 //  5. Gates on TopRUEnabled() - drops data if disabled
 //  6. Pushes to all registered RUCollectors
 func (m *aggregator) aggregateRU() {
+	topRUEnabled := state.TopRUEnabled()
 	// Always drain RU increments to avoid keeping stale data when TopRU is disabled.
+	// Disabled means no RU output (no-op on reporting), while housekeeping drain is still allowed.
 	total := RUIncrementMap{}
 	m.statsSet.Range(func(statsAny, _ any) bool {
 		stats := statsAny.(*StatementStats)
 		// No need to check Finished() again - already checked in aggregate()
 		sessionRU := stats.MergeRUInto()
+		if !topRUEnabled {
+			return true
+		}
 		// Phase 2 Decision E: Apply hard cap on distinct RU keys.
 		// When approaching the limit, stop merging new keys to protect hot paths.
 		for key, incr := range sessionRU {
@@ -143,7 +148,10 @@ func (m *aggregator) aggregateRU() {
 		}
 		return true
 	})
-	if len(total) > 0 && state.TopRUEnabled() {
+	if !topRUEnabled {
+		return
+	}
+	if len(total) > 0 {
 		m.ruCollectors.Range(func(c, _ any) bool {
 			c.(RUCollector).CollectRUIncrements(total)
 			return true
