@@ -18,6 +18,13 @@ Hard safety boundary (non-negotiable):
   - DATA_PATH_MAP.md (on-demand)
   - PHASE_3D_REVIEW_REPORT.md (on-demand)
 
+V2 patch policy (hard):
+- If <project>/PROJECT_STATE.md contains a SSOT_V2 managed block
+  (between <!-- NAVIGATOR:BEGIN SSOT_V2 --> and <!-- NAVIGATOR:END SSOT_V2 -->),
+  PATCH must update SSOT_V2 only.
+- Other governance files (SEMANTIC_SPEC/ASSUMPTIONS/EVIDENCE_INDEX/REVIEW_REPORT/DATA_PATH_MAP) are display-only in V2:
+  do not create/edit them during PATCH. They may be regenerated later.
+
 Do not invent facts:
 - You MUST NOT fill factual content you cannot verify.
 - Use standardized TODO tokens: TODO, TODO_NAME, TODO_DATE, TODO_TIME, TODO_TIMESTAMP, TODO_COMMIT, TODO_ENV, TODO_CMD, TODO_PATH.
@@ -63,6 +70,8 @@ Minimal generation policy (very important):
   2) (SEMANTIC_SPEC.md OR TOPRU_SEMANTIC_SPEC.md)
   3) ASSUMPTIONS_REGISTER.md
   4) EVIDENCE_INDEX.md
+- Exception (V2):
+  - If SSOT_V2 exists in PROJECT_STATE.md, do NOT generate or patch the other 3 files above; only patch SSOT_V2.
 - Generate DATA_PATH_MAP.md only if:
   - track requires it in TRACK.md, OR
   - file exists already, OR
@@ -92,16 +101,13 @@ Definitions (important):
     - commit-bound completeness is required only when closing findings (Closed) or entering FINAL_REVIEW.
 
 Fresh-read rule (hard):
-- On every run, you MUST re-read these project files (do not rely on memory from prior runs):
-    1) PROJECT_STATE.md
-    2) semantic spec (TOPRU_SEMANTIC_SPEC.md or SEMANTIC_SPEC.md)
-    3) ASSUMPTIONS_REGISTER.md
-    4) EVIDENCE_INDEX.md
-    5) DATA_PATH_MAP.md (if track requires)
-    6) PHASE_3D_REVIEW_REPORT.md (if present)
-- When parsing, prioritize content inside NAVIGATOR-managed blocks:
+- PROJECT_STATE.md is a cache; governance files are the source of truth.
+- Before deciding State, compare PROJECT_STATE timestamp (`last_updated` or mtime) with governance file mtimes (Key links or default set); re-read any newer file (managed block or first 200 lines).
+- Always re-read managed blocks of: semantic spec, ASSUMPTIONS_REGISTER.md, EVIDENCE_INDEX.md (even if mtime unchanged).
+- When reading, prioritize NAVIGATOR-managed blocks:
   <!-- NAVIGATOR:BEGIN ... --> ... <!-- NAVIGATOR:END ... -->
-- You may read only the necessary ranges (e.g., managed blocks), but you must re-read them each time.
+- You MUST NOT decide State using stale PROJECT_STATE content.
+- After computing State, you MUST write back updated state/blockers/next-actions/commit/time into PROJECT_STATE (or emit an explicit patch instruction in read-only mode).
 
 Test command defaults (Go):
 - When generating or updating EVIDENCE_INDEX.md, all Go test commands MUST include `-tags=intest` by default.

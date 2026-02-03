@@ -1,0 +1,15 @@
+{
+  "evidence_id": "E1",
+  "status": "Captured",
+  "type": "test",
+  "commit": "<sha>",
+  "patch_id": "<stable_patch_id>",
+  "time": "2026-02-03T12:34:56Z",
+  "env": "darwin/arm64 go1.xx",
+  "command": "go test ...",
+  "artifacts": [
+    "run.log",
+    "extra.log"
+  ]
+}
+

@@ -1,6 +1,6 @@
 # Repository Layout（建议）
 
-ai-assisted-change-protocol/
+ai-change-gates/
 ├── START_HERE.md
 ├── README.md
 ├── rfc/
