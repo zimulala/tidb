@@ -23,7 +23,7 @@
 - S2 ExecCount semantics: **begin-based (align with TopSQL semantics)**
 - S3 SQL/Plan meta when TopRU enabled and TopSQL disabled: **Required**
 - S4 disabled behavior: **No-op when disabled (do not record TopRU; no drop metrics)**
-- S5 report interval: **Coupled (Option A) — enabling TopRU may affect TopSQL cadence**
+- S5 report interval: **Separated tickers (Option B) — TopRU cadence must not affect TopSQL cadence**
 
 ---
 
@@ -129,12 +129,15 @@
     2) Align implementation with the “no-op” semantic:
         - If aggregator still runs for housekeeping, ensure it does not require RU collection and does not produce TopRU records.
     3) Add code comments near the gate(s) explaining why no drop metrics exist (explicit non-goal).
-- status: Open
-- evidence: Doc-only closure acceptable (no E# required), OR TODO_E# if you add a unit test confirming no TopRU output when disabled.
+- status: Closed
+- evidence: E1
+- closure_note:
+    - `aggregateRU()` now gates output on a TopRUEnabled snapshot: disabled mode performs housekeeping drain only and returns without RUCollector emission.
+    - Added aggregator test to verify disabled=no-op output semantics while allowing drain.
 
 ---
 
-### F5 — Major — Report interval semantics mixed; TopRU enabling may change TopSQL cadence — **Chosen: Coupled (min interval)**
+### F5 — Major — Report interval semantics mixed; TopRU enabling may change TopSQL cadence — **Chosen: Separated tickers**
 - severity: Major (semantic coupling / operational expectation)
 - issue:
     - Applying min(TopSQL interval, TopRU interval) can change TopSQL reporting cadence when TopRU enabled.
@@ -142,14 +145,17 @@
 - references:
     - pkg/util/topsql/reporter/reporter.go
 - decision context:
-    - **Chosen:** Option A (coupled). Enabling TopRU may affect TopSQL cadence.
+    - **Chosen:** Option B (separated tickers). TopRU cadence must not affect TopSQL cadence; separate tickers
 - closure_requirement:
     1) Document explicitly in TOPRU_SEMANTIC_SPEC.md + (optional) reporter-level comment:
-        - “TopRU can reduce effective report interval by taking min; this is expected.”
+        - “TopSQL and TopRU report intervals are independent (separate tickers).”
     2) Add minimal test or deterministic check:
-        - verify the effective interval selection behavior is stable and matches the coupling policy.
-- status: Open
-- evidence: TODO_E# (E1 minimal unit test) or Doc-only closure if you consider the doc sufficient (recommended: add small test).
+        - verify TopSQL effective interval is stable and does not depend on TopRU enable/interval.
+- status: Closed
+- evidence: E1
+- closure_note:
+    - `effectiveReportIntervalSeconds()` now returns only TopSQL interval and no longer applies TopRU min coupling.
+    - Added deterministic reporter unit test asserting TopSQL interval remains unchanged across TopRU enable/disable and interval values.
 
 ---
 
@@ -167,7 +173,7 @@
 - T1: in-flight sampling long query produces N deltas and no double count (E1)
 - T2: cancellation/abnormal exit does not leak execCtx or double count (E1)
 - T3: TopSQL disabled + TopRU enabled registers SQL/Plan meta per policy (E1)
-- T4: interval coupling behavior stable (E1)
+- T4: interval independence behavior stable (E1)
 - B1: sampling overhead (E2)
 - B2: aggregator overhead under high cardinality (E2)
 

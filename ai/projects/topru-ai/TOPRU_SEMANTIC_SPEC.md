@@ -70,17 +70,17 @@ Options:
 
 ## S5: interval coupling
 Status: GO
-Chosen: coupled (min interval)
+Chosen: separated tickers
 Options:
 - coupled (min interval)
 - separated tickers
   Impact:
-- Enabling TopRU may reduce effective report interval by taking min(TopSQL interval, TopRU interval).
-- This cross-feature coupling is explicitly accepted; must be documented to avoid future “is this a bug?” reviews.
-  Fallback: If coupling causes unexpected overhead, revisit to separated tickers in a follow-up change (would require new semantic GO).
-  Signals: Documentation + minimal test verifying effective interval selection behavior.
+- TopRU cadence must not affect TopSQL cadence.
+- TopSQL and TopRU report intervals evolve independently, reducing cross-feature surprise/regression risk.
+  Fallback: If separate tickers introduce unacceptable complexity, revisit coupling with a new semantic decision.
+  Signals: Documentation + deterministic unit test proving TopSQL effective interval ignores TopRU interval/enable state.
   Approved: zimulala @ 2026-01-30
-  Evidence: E_TBD  # E1 minimal unit test recommended
+  Evidence: E1
 <!-- NAVIGATOR:END AUTO_DECISIONS -->
 
 ## Notes (human)

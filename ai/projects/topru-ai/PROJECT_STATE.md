@@ -4,8 +4,8 @@
 project: topru-ai
 track: resource-observability-topru
 state: LOCK_SEMANTICS  # LOCK_SEMANTICS | CLOSE_ASSUMPTIONS | IMPLEMENT | COLLECT_EVIDENCE | FINAL_REVIEW
-current_commit: 89ac7bce41f577d265c1b0a454e66a283889e942  # <git sha> or UNKNOWN
-last_updated: 2026-02-03T01:56:09Z  # ISO8601 preferred
+current_commit: 13d8e8f5171ec60a154f1bdbfe2602bc625dac57  # <git sha> or UNKNOWN
+last_updated: 2026-02-03T02:27:45Z  # ISO8601 preferred
 
 ## Gate blockers
 - LOCK_SEMANTICS: required semantic decisions S1..S5 are not GO.

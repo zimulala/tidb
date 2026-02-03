@@ -28,5 +28,4 @@
 
 ## Notes
 - Disabled behavior: TopRU disabled => no-op (no RU collection/output).
-- Interval policy: effective reporting cadence may be min(TopSQL interval, TopRU interval) per semantic spec.
-
+- Interval policy: TopSQL and TopRU use independent cadence (separate ticker semantics).
