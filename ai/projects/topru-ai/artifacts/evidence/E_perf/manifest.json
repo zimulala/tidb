@@ -1,0 +1,15 @@
+{
+  "evidence_id": "E_perf",
+  "status": "Planned",
+  "type": "perf_sanity",
+  "commit": "TODO_COMMIT",
+  "patch_id": "TODO_PATCH_ID",
+  "time": "TODO_TIME",
+  "env": "TODO_ENV",
+  "command": "TODO_CMD",
+  "artifacts": [
+    "run.log",
+    "manifest.json"
+  ]
+}
+

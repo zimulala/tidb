@@ -156,6 +156,7 @@
 - closure_note:
     - `effectiveReportIntervalSeconds()` now returns only TopSQL interval and no longer applies TopRU min coupling.
     - Added deterministic reporter unit test asserting TopSQL interval remains unchanged across TopRU enable/disable and interval values.
+    - resolved by separated tickers
 
 ---
 

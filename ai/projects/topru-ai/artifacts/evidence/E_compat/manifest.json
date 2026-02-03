@@ -1,0 +1,15 @@
+{
+  "evidence_id": "E_compat",
+  "status": "Planned",
+  "type": "compat_matrix",
+  "commit": "TODO_COMMIT",
+  "patch_id": "TODO_PATCH_ID",
+  "time": "TODO_TIME",
+  "env": "TODO_ENV",
+  "command": "TODO_CMD",
+  "artifacts": [
+    "run.log",
+    "manifest.json"
+  ]
+}
+

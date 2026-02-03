@@ -1,0 +1,15 @@
+{
+  "evidence_id": "E_integ",
+  "status": "Planned",
+  "type": "integration_smoke",
+  "commit": "TODO_COMMIT",
+  "patch_id": "TODO_PATCH_ID",
+  "time": "TODO_TIME",
+  "env": "TODO_ENV",
+  "command": "TODO_CMD",
+  "artifacts": [
+    "run.log",
+    "manifest.json"
+  ]
+}
+
