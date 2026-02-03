@@ -32,7 +32,8 @@ Options:
 - finish-based
   Impact:
 - Aligns with TopSQL semantics (counts execution starts).
-- Can de-couple from RU/Duration across ticks/windows; consumer interpretation must be documented and validated to avoid RU>0 with count=0 confusion.
+- Begin count is attributed once on first positive RU delta (tick or finish), avoiding count-only RU=0 noise.
+- RU>0 with ExecCount=0 is allowed for follow-up sampling buckets and late-enable (TopRU enabled after execution already began); this is expected, not a bug.
   Fallback: If begin-based produces misleading aggregates, introduce explicit record typing or adjust aggregation so begin count cannot be misinterpreted as “completed RU record”.
   Signals: Unit tests for long-running queries, toggle changes mid-execution, and RU=0 behavior; documentation note clarifying interpretation.
   Approved: zimulala @ 2026-01-30

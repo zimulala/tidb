@@ -83,8 +83,12 @@
             - long query (>1s) does not produce misleading (ExecCount=0, RU>0) unless explicitly allowed and marked
             - toggle changes mid-execution behave consistently with the chosen semantics
             - RU=0 produces either no record or an explicitly marked record (to avoid noise)
-- status: Open
-- evidence: TODO_E# (E1 unit/integration tests; optional E2 doc excerpt if semantics accepted)
+- status: Closed
+- evidence: E1
+- closure_note:
+    - Begin-based ExecCount is now attributed once on first positive RU delta (tick or finish), preventing count-only RU=0 noise.
+    - Late-enable semantics are explicitly documented: RU>0 with ExecCount=0 is expected when TopRU is enabled after execution begins.
+    - Added stmtstats tests for long-running multi-tick behavior, mid-exec toggle, RU=0 noise prevention, and same-tick bucket merge semantics.
 
 ---
 
