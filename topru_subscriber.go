@@ -42,8 +42,10 @@ func main() {
 
 	client := tipb.NewTopSQLPubSubClient(conn)
 	stream, err := client.Subscribe(ctx, &tipb.TopSQLSubRequest{
-		EnableTopRu:    true,
-		ReportInterval: reportInterval,
+		Collectors: []tipb.CollectorType{tipb.CollectorType_COLLECTOR_TYPE_TOPRU},
+		Topru: &tipb.TopRUConfig{
+			ReportIntervalSeconds: reportInterval,
+		},
 	})
 	if err != nil {
 		log.Fatalf("subscribe failed: %v", err)
