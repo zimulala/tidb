@@ -75,6 +75,30 @@ type pubSubDataSink struct {
 	reportInterval tipb.ReportInterval
 }
 
+func parseTopRUSubscription(req *tipb.TopSQLSubRequest) (bool, tipb.ReportInterval) {
+	if req == nil {
+		return false, tipb.ReportInterval_REPORT_INTERVAL_UNSPECIFIED
+	}
+
+	cfg := req.GetTopru()
+	if cfg == nil {
+		return false, tipb.ReportInterval_REPORT_INTERVAL_UNSPECIFIED
+	}
+
+	enabled := false
+	for _, collector := range req.GetCollectors() {
+		if collector == tipb.CollectorType_COLLECTOR_TYPE_TOPRU {
+			enabled = true
+			break
+		}
+	}
+	if !enabled {
+		return false, tipb.ReportInterval_REPORT_INTERVAL_UNSPECIFIED
+	}
+
+	return true, normalizeTopRUReportInterval(cfg.GetReportIntervalSeconds())
+}
+
 // newPubSubDataSink creates a DataSink for PubSub subscription.
 //
 // Design: Subscription Lifecycle Management
@@ -87,6 +111,7 @@ type pubSubDataSink struct {
 //   - TopRU data only sent if enableTopRU is true (backward compatible)
 func newPubSubDataSink(req *tipb.TopSQLSubRequest, stream tipb.TopSQLPubSub_SubscribeServer, registerer DataSinkRegisterer) *pubSubDataSink {
 	ctx, cancel := context.WithCancel(stream.Context())
+	enableTopRU, reportInterval := parseTopRUSubscription(req)
 
 	ds := &pubSubDataSink{
 		ctx:    ctx,
@@ -97,8 +122,8 @@ func newPubSubDataSink(req *tipb.TopSQLSubRequest, stream tipb.TopSQLPubSub_Subs
 
 		registerer: registerer,
 
-		enableTopRU:    req.GetEnableTopRu(),
-		reportInterval: normalizeTopRUReportInterval(req.GetReportInterval()),
+		enableTopRU:    enableTopRU,
+		reportInterval: normalizeTopRUReportInterval(reportInterval),
 	}
 
 	return ds

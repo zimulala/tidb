@@ -96,10 +96,10 @@
 - severity: Major
 - issue:
     - TopRU records carry digests; without SQLMeta/PlanMeta, observability value is reduced.
-    - Current begin path `observeStmtBeginForTopSQL` early-returns when TopSQL disabled, so RegisterSQL/RegisterPlan not called even if TopRU enabled.
+    - Current begin path `observeStmtBeginForTopProfiling` early-returns when TopSQL disabled, so RegisterSQL/RegisterPlan not called even if TopRU enabled.
     - PubSub/single_target may still send meta sets, leading to situations where only digests are available when TopRU alone is enabled.
 - references:
-    - pkg/executor/adapter.go (observeStmtBeginForTopSQL gate)
+    - pkg/executor/adapter.go (observeStmtBeginForTopProfiling gate)
 - decision context:
     - **Need SQL/Plan meta when TopRU enabled (TopProfilingEnabled).**
 - closure_requirement:
@@ -111,7 +111,7 @@
 - status: Closed
 - evidence: E1
 - closure_note:
-    - Changed `observeStmtBeginForTopSQL` gate to use `TopProfilingEnabled()` for meta registration path.
+    - Changed `observeStmtBeginForTopProfiling` gate to use `TopProfilingEnabled()` for meta registration path.
     - Added executor unit test proving SQL/Plan meta registration when TopSQL is disabled and TopRU is enabled.
 
 ---
