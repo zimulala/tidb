@@ -1,0 +1,9 @@
+SSOT_AUDIT
+project_root: ai/projects/topru-ai
+track: resource-observability-topru
+time_utc: 2026-02-04T06:41:38Z
+pr_ready_status: true
+missing_must: []
+missing_should: []
+
+NOTE: Run with --patch to write pr_ready fields back into SSOT.

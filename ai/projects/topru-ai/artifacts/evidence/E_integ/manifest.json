@@ -1,15 +1,19 @@
 {
-  "evidence_id": "E_integ",
-  "status": "Planned",
-  "type": "integration_smoke",
-  "commit": "TODO_COMMIT",
-  "patch_id": "TODO_PATCH_ID",
-  "time": "TODO_TIME",
-  "env": "TODO_ENV",
-  "command": "TODO_CMD",
-  "artifacts": [
-    "run.log",
-    "manifest.json"
-  ]
+  "id": "E_integ",
+  "status": "Captured",
+  "type": "integ_smoke",
+  "commit": "84e430afa290a8600ad135cddb53ca854ce096d8",
+  "patch_id": "2147c245005248f594f7a6318f50c244bdabc678",
+  "time": "2026-02-04T04:46:42Z",
+  "env": "Darwin/arm64 gogo1.25.6 darwin/arm64",
+  "command": "bash ai/projects/topru-ai/verify/e_integ_smoke.sh (VERIFY_MODE=log, TIDB_LOG_PATH=/Users/xia/workspace/src/github.com/pingcap/tidb/tidb.log, subscriber=127.0.0.1:10080)",
+  "artifacts": {
+    "run_log": "ai/projects/topru-ai/artifacts/evidence/E_integ/run.log",
+    "subscriber_log": "ai/projects/topru-ai/artifacts/evidence/E_integ/subscriber.log",
+    "tidb_log": "/Users/xia/workspace/src/github.com/pingcap/tidb/tidb.log",
+    "manifest": "ai/projects/topru-ai/artifacts/evidence/E_integ/manifest.json"
+  },
+  "result": {
+    "smoke_rc": 0
+  }
 }
-

@@ -1,15 +1,14 @@
 {
-  "evidence_id": "E_perf",
-  "status": "Planned",
+  "id": "E_perf",
+  "status": "Captured",
   "type": "perf_sanity",
-  "commit": "TODO_COMMIT",
-  "patch_id": "TODO_PATCH_ID",
-  "time": "TODO_TIME",
-  "env": "TODO_ENV",
-  "command": "TODO_CMD",
-  "artifacts": [
-    "run.log",
-    "manifest.json"
-  ]
+  "commit": "84e430afa290a8600ad135cddb53ca854ce096d8",
+  "patch_id": "2147c245005248f594f7a6318f50c244bdabc678",
+  "time": "2026-02-04T06:22:39Z",
+  "env": "Darwin/arm64 go1.25.6 darwin/arm64",
+  "command": "bash ai/projects/topru-ai/verify/e_perf_sanity.sh (PERF_N=50, PERF_MIN_QPS=0)",
+  "artifacts": {
+    "run_log": "ai/projects/topru-ai/artifacts/evidence/E_perf/run.log",
+    "manifest": "ai/projects/topru-ai/artifacts/evidence/E_perf/manifest.json"
+  }
 }
-

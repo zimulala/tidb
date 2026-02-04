@@ -1,0 +1,14 @@
+{
+  "id": "E_func",
+  "status": "Captured",
+  "type": "test",
+  "commit": "84e430afa290a8600ad135cddb53ca854ce096d8",
+  "patch_id": "2147c245005248f594f7a6318f50c244bdabc678",
+  "time": "2026-02-04T06:41:37Z",
+  "env": "Darwin/arm64 go1.25.6 darwin/arm64",
+  "command": "bash ai/projects/topru-ai/verify/e_func_smoke.sh (VERIFY_MODE=log, TIDB_LOG_PATH=/Users/xia/workspace/src/github.com/pingcap/tidb/tidb.log)",
+  "artifacts": {
+    "run_log": "ai/projects/topru-ai/artifacts/evidence/E_func/run.log",
+    "manifest": "ai/projects/topru-ai/artifacts/evidence/E_func/manifest.json"
+  }
+}

@@ -70,32 +70,32 @@ evidence:
   - id: E_func
     status: Captured
     type: test
-    commit: TODO_COMMIT
-    patch_id: TODO_PATCH_ID
-    time: TODO_TIME
-    env: TODO_ENV
-    command: TODO_CMD
-    artifact: ai/projects/topru-ai/artifacts/evidence/E_func/run.log
+    commit: "84e430afa290a8600ad135cddb53ca854ce096d8"
+    patch_id: "2147c245005248f594f7a6318f50c244bdabc678"
+    time: "2026-02-04T06:41:37Z"
+    env: "Darwin/arm64 go1.25.6 darwin/arm64"
+    command: "bash ai/projects/topru-ai/verify/e_func_smoke.sh (VERIFY_MODE=log, TIDB_LOG_PATH=/Users/xia/workspace/src/github.com/pingcap/tidb/tidb.log)"
+    artifact: "ai/projects/topru-ai/artifacts/evidence/E_func/run.log"
   
   - id: E_integ
-    status: Planned
-    type: integration_smoke
-    commit: TODO_COMMIT
-    patch_id: TODO_PATCH_ID
-    time: TODO_TIME
-    env: TODO_ENV
-    command: TODO_CMD
-    artifact: ai/projects/topru-ai/artifacts/evidence/E_integ/run.log
+    status: Captured
+    type: integ_smoke
+    commit: "84e430afa290a8600ad135cddb53ca854ce096d8"
+    patch_id: "2147c245005248f594f7a6318f50c244bdabc678"
+    time: "2026-02-04T04:46:42Z"
+    env: "Darwin/arm64 gogo1.25.6 darwin/arm64"
+    command: "bash ai/projects/topru-ai/verify/e_integ_smoke.sh (VERIFY_MODE=log, TIDB_LOG_PATH=/Users/xia/workspace/src/github.com/pingcap/tidb/tidb.log, subscriber=127.0.0.1:10080)"
+    artifact: "ai/projects/topru-ai/artifacts/evidence/E_integ/run.log"
   
   - id: E_perf
-    status: Planned
+    status: Captured
     type: perf_sanity
-    commit: TODO_COMMIT
-    patch_id: TODO_PATCH_ID
-    time: TODO_TIME
-    env: TODO_ENV
-    command: TODO_CMD
-    artifact: ai/projects/topru-ai/artifacts/evidence/E_perf/run.log
+    commit: "84e430afa290a8600ad135cddb53ca854ce096d8"
+    patch_id: "2147c245005248f594f7a6318f50c244bdabc678"
+    time: "2026-02-04T06:22:39Z"
+    env: "Darwin/arm64 go1.25.6 darwin/arm64"
+    command: "bash ai/projects/topru-ai/verify/e_perf_sanity.sh (PERF_N=50, PERF_MIN_QPS=0)"
+    artifact: "ai/projects/topru-ai/artifacts/evidence/E_perf/run.log"
   
   - id: E_compat
     status: Planned
@@ -142,16 +142,13 @@ next_actions:
     produces: [E_compat]
 
 pr_ready:
-    from_track: true
-    status: false
-    must: []
-    should: []
-    conditional: []
-    missing_must: []
-    missing_should: []
-    notes: ""
-
+  from_track: true
+  status: true
+  must: [E_func,E_integ]
+  should: [E_perf]
+  conditional: [E_compat]
+  missing: []
+  missing_must: []
+  missing_should: []
+  notes: "auto-updated by audit_ssot.sh"
 <!-- NAVIGATOR:END SSOT_V2 -->
-
-## Notes (human)
-- TODO

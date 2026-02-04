@@ -30,9 +30,9 @@ fi
 # Extract SSOT_V2 block
 SSOT=$(
   awk '
-    /<!-- NAVIGATOR:BEGIN SSOT_V2 -->/ {in=1; next}
-    /<!-- NAVIGATOR:END SSOT_V2 -->/ {in=0}
-    in==1 {print}
+    /<!-- NAVIGATOR:BEGIN SSOT_V2 -->/ {inblk=1; next}
+    /<!-- NAVIGATOR:END SSOT_V2 -->/ {inblk=0}
+    inblk==1 {print}
   ' "${STATE_FILE}"
 )
 if [[ -z "${SSOT}" ]]; then
@@ -66,10 +66,16 @@ COND_LIST="$(to_lines "${COND_RAW}")"
 evidence_status() {
   local eid="$1"
   echo "${SSOT}" | awk -v id="${eid}" '
-    $0 ~ "^- id: "id"$" {found=1}
-    found==1 && $0 ~ "status:" {print $2; exit}
-  ' || true
+    $0 ~ "^[[:space:]]*-[[:space:]]*id:[[:space:]]*"id"([[:space:]]*$|[[:space:]]*#)" {found=1}
+    found==1 && $0 ~ "^[[:space:]]*status:" {
+      gsub(/^[[:space:]]*status:[[:space:]]*/, "", $0)
+      gsub(/"/, "", $0)
+      print $0
+      exit
+    }
+  ' 2>/dev/null || true
 }
+
 
 missing_must=()
 missing_should=()
@@ -100,8 +106,8 @@ fi
   echo "track: ${TRACK_ID}"
   echo "time_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "pr_ready_status: ${pr_status}"
-  echo "missing_must: [$(IFS=,; echo "${missing_must[*]}")]"
-  echo "missing_should: [$(IFS=,; echo "${missing_should[*]}")]"
+  echo "missing_must: [$(IFS=,; echo "${missing_must[*]-}")]"
+  echo "missing_should: [$(IFS=,; echo "${missing_should[*]-}")]"
   echo
   echo "NOTE: Run with --patch to write pr_ready fields back into SSOT."
 } | tee "${OUT_FILE}"
@@ -122,31 +128,47 @@ pr_ready:
   must: [$(IFS=,; echo "${MUST_RAW}")]
   should: [$(IFS=,; echo "${SHOULD_RAW}")]
   conditional: [$(IFS=,; echo "${COND_RAW}")]
-  missing: [$(IFS=,; echo "${missing_must[*]}")]
-  missing_must: [$(IFS=,; echo "${missing_must[*]}")]
-  missing_should: [$(IFS=,; echo "${missing_should[*]}")]
+  missing: [$(IFS=,; echo "${missing_must[*]-}")]
+  missing_must: [$(IFS=,; echo "${missing_must[*]-}")]
+  missing_should: [$(IFS=,; echo "${missing_should[*]-}")]
   notes: "auto-updated by audit_ssot.sh"
 EOF
 )
 
 tmp="$(mktemp)"
-awk -v nb="${new_pr_block}" '
-  BEGIN {inssot=0; inpr=0}
+nbf="$(mktemp)"
+
+# write block to a temp file (avoid awk -v multiline issues)
+printf "%s\n" "${new_pr_block}" > "${nbf}"
+
+awk -v nbf="${nbf}" '
+  function print_nb() {
+    while ((getline line < nbf) > 0) print line
+    close(nbf)
+  }
+
+  BEGIN {inssot=0; inpr=0; prfound=0}
+
   /<!-- NAVIGATOR:BEGIN SSOT_V2 -->/ {inssot=1; print; next}
   /<!-- NAVIGATOR:END SSOT_V2 -->/ {
-    if (inssot==1 && inpr==0 && prfound==0) { print nb; }
+    if (inssot==1 && prfound==0) { print_nb() }
     inssot=0; print; next
   }
+
   {
-    if (inssot==1 && $0 ~ /^pr_ready:/) { prfound=1; inpr=1; print nb; next }
+    if (inssot==1 && $0 ~ /^pr_ready:/) { prfound=1; inpr=1; print_nb(); next }
+
     if (inpr==1) {
-      # stop skipping when next top-level key starts (non-indented or ends ssot)
+      # stop skipping when next top-level key starts (non-indented) or end marker handled above
       if ($0 ~ /^[a-zA-Z0-9_]+:/ && $0 !~ /^pr_ready:/) { inpr=0; print; next }
       next
     }
+
     print
   }
 ' "${STATE_FILE}" > "${tmp}"
 
 mv "${tmp}" "${STATE_FILE}"
+rm -f "${nbf}"
 echo "Patched pr_ready in SSOT: ${STATE_FILE}"
+
