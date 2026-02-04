@@ -16,6 +16,7 @@ package reporter
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/pingcap/failpoint"
@@ -408,6 +409,9 @@ func (tsr *RemoteTopSQLReporter) trySend(data *ReportData, deadline time.Time) e
 	}
 	tsr.DefaultDataSinkRegisterer.Unlock()
 	for _, ds := range dataSinks {
+		if data != nil && len(data.RURecords) > 0 {
+			logutil.BgLogger().Info(fmt.Sprintf("[TopRU] sending data %v", data.RURecords))
+		}
 		if err := ds.TrySend(data, deadline); err != nil {
 			logutil.BgLogger().Warn("failed to send data to datasink", zap.String("category", "top-sql"), zap.Error(err))
 		}

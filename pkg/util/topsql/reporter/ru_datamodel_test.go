@@ -265,6 +265,41 @@ func TestRUItemsToProto(t *testing.T) {
 	require.Equal(t, uint64(1001), proto[1].TimestampSec)
 }
 
+func TestRUCollectingSameBucketSameKeyAccumulates(t *testing.T) {
+	collecting := newRUCollecting()
+	key := stmtstats.RUKey{
+		User:       "u1",
+		SQLDigest:  stmtstats.BinaryDigest("sql1"),
+		PlanDigest: stmtstats.BinaryDigest("plan1"),
+	}
+
+	collecting.addBatch(1000, stmtstats.RUIncrementMap{
+		key: {
+			TotalRU:      10,
+			ExecCount:    1,
+			ExecDuration: 100,
+		},
+	})
+	collecting.addBatch(1000, stmtstats.RUIncrementMap{
+		key: {
+			TotalRU:      7,
+			ExecCount:    0,
+			ExecDuration: 40,
+		},
+	})
+
+	records := collecting.getReportRecords([]byte("ks"))
+	require.Len(t, records, 1)
+	require.Equal(t, "u1", records[0].User)
+	require.Equal(t, []byte("sql1"), records[0].SqlDigest)
+	require.Equal(t, []byte("plan1"), records[0].PlanDigest)
+	require.Len(t, records[0].Items, 1)
+	require.Equal(t, uint64(1000), records[0].Items[0].TimestampSec)
+	require.InDelta(t, 17.0, records[0].Items[0].TotalRu, 1e-9)
+	require.Equal(t, uint64(1), records[0].Items[0].ExecCount)
+	require.Equal(t, uint64(140), records[0].Items[0].ExecDuration)
+}
+
 func TestEmptyRUCollecting(t *testing.T) {
 	collecting := newRUCollecting()
 	records := collecting.getReportRecords([]byte("keyspace"))
