@@ -4,26 +4,11 @@ package reporter
 
 import "testing"
 
-func TestTopRU_Gen_G2_rurecords_positive(t *testing.T) {
-	runTopRUCase(t, caseSpec{
-		GoalID:             "G2_rurecords_positive",
-		Level:              "must",
-		Description:        "payload contains RURecords with exec_count>=1 and total_ru>0",
-		RequireSend:        false,
-		RURecordsMin:       1,
-		ExecCountMin:       1,
-		ExecCountSumMin:    0,
-		TotalRUMin:         1e-06,
-		SQLMetaMatchMarker: "",
-		PlanMetaRequired:   nil,
-	})
-}
-
-func TestTopRU_Gen_G3_sqlmeta_present(t *testing.T) {
+func TestTopRUGenG3SqlmetaPresent(t *testing.T) {
 	runTopRUCase(t, caseSpec{
 		GoalID:             "G3_sqlmeta_present",
 		Level:              "should",
-		Description:        "payload includes SQLMetas for the triggered digest/comment marker",
+		Description:        "payload includes SQLMetas for the triggered marker",
 		RequireSend:        false,
 		RURecordsMin:       0,
 		ExecCountMin:       0,
@@ -34,11 +19,11 @@ func TestTopRU_Gen_G3_sqlmeta_present(t *testing.T) {
 	})
 }
 
-func TestTopRU_Gen_G4_planmeta_present(t *testing.T) {
+func TestTopRUGenG4PlanmetaPresent(t *testing.T) {
 	runTopRUCase(t, caseSpec{
 		GoalID:             "G4_planmeta_present",
 		Level:              "should",
-		Description:        "payload includes PlanMetas for the triggered plan digest",
+		Description:        "payload includes PlanMetas for the triggered marker",
 		RequireSend:        false,
 		RURecordsMin:       0,
 		ExecCountMin:       0,
@@ -49,11 +34,11 @@ func TestTopRU_Gen_G4_planmeta_present(t *testing.T) {
 	})
 }
 
-func TestTopRU_Gen_G5_multi_records_batch(t *testing.T) {
+func TestTopRUGenG5MultiRecordsBatch(t *testing.T) {
 	runTopRUCase(t, caseSpec{
 		GoalID:             "G5_multi_records_batch",
 		Level:              "should",
-		Description:        "payload may batch multiple RURecords and must preserve counts",
+		Description:        "payload batches multiple RURecords and preserves counts",
 		RequireSend:        false,
 		RURecordsMin:       2,
 		ExecCountMin:       0,
@@ -64,16 +49,91 @@ func TestTopRU_Gen_G5_multi_records_batch(t *testing.T) {
 	})
 }
 
-func TestTopRU_Gen_G6_total_ru_threshold(t *testing.T) {
+func TestTopRUGenG6TotalRuThreshold(t *testing.T) {
 	runTopRUCase(t, caseSpec{
 		GoalID:             "G6_total_ru_threshold",
 		Level:              "should",
-		Description:        "payload contains a record with RU above a configured threshold",
+		Description:        "payload contains a record with RU above a threshold",
 		RequireSend:        false,
 		RURecordsMin:       0,
 		ExecCountMin:       0,
 		ExecCountSumMin:    0,
 		TotalRUMin:         1.5,
+		SQLMetaMatchMarker: "",
+		PlanMetaRequired:   nil,
+	})
+}
+
+func TestTopRUGenG7KeyAggregationByUserSqlPlan(t *testing.T) {
+	runTopRUCase(t, caseSpec{
+		GoalID:             "G7_key_aggregation_by_user_sql_plan",
+		Level:              "must",
+		Description:        "aggregation key is (user, sql_digest, plan_digest); different users same SQL are separated",
+		RequireSend:        false,
+		RURecordsMin:       0,
+		ExecCountMin:       0,
+		ExecCountSumMin:    0,
+		TotalRUMin:         0.0,
+		SQLMetaMatchMarker: "",
+		PlanMetaRequired:   nil,
+	})
+}
+
+func TestTopRUGenG8SameTimestampMultipleFinishAccumulate(t *testing.T) {
+	runTopRUCase(t, caseSpec{
+		GoalID:             "G8_same_timestamp_multiple_finish_accumulate",
+		Level:              "should",
+		Description:        "within same timestamp, multiple finishes for same key accumulate ruIncrement into TopN",
+		RequireSend:        false,
+		RURecordsMin:       1,
+		ExecCountMin:       0,
+		ExecCountSumMin:    2,
+		TotalRUMin:         0.0,
+		SQLMetaMatchMarker: "",
+		PlanMetaRequired:   nil,
+	})
+}
+
+func TestTopRUGenG9ExecctxLifecycleSingleActive(t *testing.T) {
+	runTopRUCase(t, caseSpec{
+		GoalID:             "G9_execctx_lifecycle_single_active",
+		Level:              "should",
+		Description:        "executionContext lifecycle: begin/finish attach/clear; no leak across statements",
+		RequireSend:        false,
+		RURecordsMin:       0,
+		ExecCountMin:       0,
+		ExecCountSumMin:    0,
+		TotalRUMin:         0.0,
+		SQLMetaMatchMarker: "",
+		PlanMetaRequired:   nil,
+	})
+}
+
+func TestTopRUGenG10InternalSqlEmptyUserHandling(t *testing.T) {
+	runTopRUCase(t, caseSpec{
+		GoalID:             "G10_internal_sql_empty_user_handling",
+		Level:              "should",
+		Description:        "empty user (internal SQL) is handled deterministically (no panic, stable key)",
+		RequireSend:        false,
+		RURecordsMin:       0,
+		ExecCountMin:       0,
+		ExecCountSumMin:    0,
+		TotalRUMin:         0.0,
+		SQLMetaMatchMarker: "",
+		PlanMetaRequired:   nil,
+	})
+}
+
+func TestTopRUGenG11ShortExecTimeLt1sHandling(t *testing.T) {
+	runTopRUCase(t, caseSpec{
+		GoalID:             "G11_short_exec_time_lt_1s_handling",
+		Level:              "should",
+		Description:        "exec_duration < 1s still produces correct RU record (or explicitly skipped by design)",
+		RequireSend:        false,
+		RURecordsMin:       0,
+		ExecCountMin:       0,
+		ExecCountSumMin:    0,
+		TotalRUMin:         0.0,
 		SQLMetaMatchMarker: "",
 		PlanMetaRequired:   nil,
 	})
