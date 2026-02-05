@@ -1,7 +1,7 @@
 SSOT_AUDIT
 project_root: ai/projects/topru-ai
 track: resource-observability-topru
-time_utc: 2026-02-04T06:41:38Z
+time_utc: 2026-02-05T03:04:40Z
 pr_ready_status: true
 missing_must: []
 missing_should: []

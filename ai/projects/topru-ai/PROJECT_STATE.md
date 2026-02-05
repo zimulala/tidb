@@ -106,6 +106,16 @@ evidence:
     env: TODO_ENV
     command: TODO_CMD
     artifact: ai/projects/topru-ai/artifacts/evidence/E_compat/run.log
+
+  - id: E_testgen_topru
+    status: Captured
+    type: go_test_gen
+    commit: "2dafdd9e7d4b2b0dea212daeb1003b954fef10e6"
+    patch_id: "cc231ab79812629ab285f3494e700791e0fc6386"
+    time: "2026-02-05T03:19:17Z"
+    env: "Darwin/arm64 go1.25.6 darwin/arm64"
+    command: "BASE_REV=8c5df181ffc02e81133451433f7ebcbea0133a47; python3 ai/projects/topru-ai/testgen/generate_topru_cases.py --spec ai/projects/topru-ai/artifacts/evidence/E_testgen_topru/filtered_spec.yml --out pkg/util/topsql/reporter/topru_generated_cases_test.go; bash ai/projects/topru-ai/testgen/audit_goals.sh --spec ai/projects/topru-ai/artifacts/evidence/E_testgen_topru/filtered_spec.yml --gen pkg/util/topsql/reporter/topru_generated_cases_test.go --prefix TestTopRUGen --strict --no-extra; go test ./pkg/util/topsql/reporter -run 'TestTopRUGen' -count=1 -timeout 5m; flake_probe=0"
+    artifact: "ai/projects/topru-ai/artifacts/evidence/E_testgen_topru/summary.md"
   
   # Legacy evidence IDs (optional; keep for continuity)
   - id: E1

@@ -1,0 +1,194 @@
+feature: topru
+version: 2
+go_test:
+  package: "./pkg/util/topsql/reporter"
+  run_prefix: "TestTopRUGen"
+
+goals:
+  # -------------------------
+  # Unit/Structured (auto-gen)
+  # -------------------------
+  - id: G1_send_nonempty
+    auto: true
+    level: must
+    category: structured_unit
+    description: "reporter sends payload to DataSink"
+    expect:
+      require_send: true
+
+  - id: G2_rurecords_positive
+    auto: true
+    level: must
+    category: structured_unit
+    description: "payload contains RURecords with exec_count>=1 and total_ru>0"
+    expect:
+      ru_records_min: 1
+      exec_count_min: 1
+      total_ru_min: 0.000001
+
+  - id: G3_sqlmeta_present
+    auto: true
+    level: should
+    category: structured_unit
+    description: "payload includes SQLMetas for the triggered marker"
+    expect:
+      sql_meta_match_marker: "topru_gen_sqlmeta"
+
+  - id: G4_planmeta_present
+    auto: true
+    level: should
+    category: structured_unit
+    description: "payload includes PlanMetas for the triggered marker"
+    expect:
+      plan_meta_required: true
+
+  - id: G5_multi_records_batch
+    auto: true
+    level: should
+    category: structured_unit
+    description: "payload batches multiple RURecords and preserves counts"
+    expect:
+      ru_records_min: 2
+      exec_count_sum_min: 2
+
+  - id: G6_total_ru_threshold
+    auto: true
+    level: should
+    category: structured_unit
+    description: "payload contains a record with RU above a threshold"
+    expect:
+      total_ru_min: 1.5
+
+  - id: G7_key_aggregation_by_user_sql_plan
+    auto: true
+    level: must
+    category: aggregation
+    description: "aggregation key is (user, sql_digest, plan_digest); different users same SQL are separated"
+    expect:
+      require_multi_users: true
+      require_separate_user_buckets: true
+
+  - id: G8_same_timestamp_multiple_finish_accumulate
+    auto: true
+    level: should
+    category: aggregation
+    description: "within same timestamp, multiple finishes for same key accumulate ruIncrement into TopN"
+    expect:
+      require_accumulate_same_key: true
+      ru_records_min: 1
+      exec_count_sum_min: 2
+
+  - id: G9_execctx_lifecycle_single_active
+    auto: true
+    level: should
+    category: lifecycle
+    description: "executionContext lifecycle: begin/finish attach/clear; no leak across statements"
+    expect:
+      require_execctx_attach_clear: true
+
+  - id: G10_internal_sql_empty_user_handling
+    auto: true
+    level: should
+    category: boundary
+    description: "empty user (internal SQL) is handled deterministically (no panic, stable key)"
+    expect:
+      allow_empty_user: true
+      require_no_panic: true
+
+  - id: G11_short_exec_time_lt_1s_handling
+    auto: true
+    level: should
+    category: boundary
+    description: "exec_duration < 1s still produces correct RU record (or explicitly skipped by design)"
+    expect:
+      allow_short_duration: true
+
+  # -------------------------
+  # Compatibility / Integration / Perf (not auto-gen in unit runner)
+  # -------------------------
+  - id: G20_resource_control_disabled_ru_zero_or_skip
+    auto: false
+    level: must
+    category: compatibility
+    description: "when Resource Control disabled, TopRU should skip RU collection/report or report RU=0 (as designed)"
+    evidence_hint: "E_integ or E_compat"
+    expect:
+      resource_control_enabled: false
+      ru_behavior: "skip_or_zero"
+
+  - id: G21_resource_control_enabled_ru_nonzero
+    auto: false
+    level: must
+    category: compatibility
+    description: "when Resource Control enabled, RU data is collected and reported"
+    evidence_hint: "E_integ"
+    expect:
+      resource_control_enabled: true
+      total_ru_min: 0.000001
+
+  - id: G22_coexist_with_topsql_cpu_sorting
+    auto: false
+    level: should
+    category: compatibility
+    description: "TopRU coexists with existing TopSQL CPU stats; both rankings work"
+    evidence_hint: "E_integ"
+    expect:
+      require_cpu_and_ru_both_present: true
+
+  - id: G23_upgrade_no_extra_config
+    auto: false
+    level: should
+    category: upgrade
+    description: "TopRU available after upgrade without extra config (feature default behavior)"
+    evidence_hint: "E_compat"
+    expect:
+      upgrade_path: "old_to_new"
+      require_no_manual_config: true
+
+  - id: G24_proto_forward_compat_optional_fields
+    auto: false
+    level: must
+    category: upgrade
+    description: "protobuf RU fields are optional; old client ignores new fields"
+    evidence_hint: "E_compat"
+    expect:
+      proto_forward_compat: true
+
+  - id: G25_data_not_persistent_recollect_after_upgrade
+    auto: false
+    level: should
+    category: upgrade
+    description: "in-memory data not persisted; after upgrade metrics are recollected"
+    evidence_hint: "E_compat"
+    expect:
+      data_persistence: "none"
+      behavior: "recollect"
+
+  - id: G30_perf_overhead_baseline
+    auto: false
+    level: should
+    category: performance
+    description: "measure local sampling/report overhead; validate memory usage baseline"
+    evidence_hint: "E_perf"
+    expect:
+      perf_type: "baseline"
+      scale_hint: "1000_users_x_500_sql"
+
+  - id: G31_stress_high_qps_impact
+    auto: false
+    level: should
+    category: performance
+    description: "high QPS stress: evaluate CPU/memory impact"
+    evidence_hint: "E_perf"
+    expect:
+      perf_type: "stress"
+      observe: ["cpu", "memory"]
+
+  - id: G32_regression_topsql_perf_not_worse
+    auto: false
+    level: should
+    category: performance
+    description: "ensure existing TopSQL performance impact not significantly worse"
+    evidence_hint: "E_perf"
+    expect:
+      regression_target: "topsql"

@@ -1,0 +1,8 @@
+# Optional explicit goal -> hand-written test mapping.
+# Format:
+#   <GoalID> <TestFuncName>
+#
+# Example:
+# G1_send_nonempty TestTopRUReporter_MockDataSinkStructured
+G1_send_nonempty TestTopRUReporter_MockDataSinkStructured
+G2_rurecords_positive TestTopRUReporter_MockDataSinkStructured

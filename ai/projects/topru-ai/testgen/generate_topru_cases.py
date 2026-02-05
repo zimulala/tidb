@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Generate TopRU reporter test cases from a small YAML coverage-goal spec."""
+
+from __future__ import annotations
+
+import argparse
+import pathlib
+import re
+from typing import Any
+
+from goal_naming import goal_to_test_name
+
+def parse_scalar(raw: str) -> Any:
+    value = raw.strip()
+    if not value:
+        return ""
+    if value.startswith('"') and value.endswith('"'):
+        return value[1:-1]
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    if re.fullmatch(r"-?\d+", value):
+        return int(value)
+    if re.fullmatch(r"-?\d+\.\d+", value):
+        return float(value)
+    return value
+
+
+def parse_spec(path: pathlib.Path) -> dict[str, Any]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    i = 0
+    spec: dict[str, Any] = {"go_test": {}, "goals": []}
+
+    while i < len(lines):
+        line = lines[i].rstrip()
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+
+        if line.startswith("feature:"):
+            spec["feature"] = parse_scalar(line.split(":", 1)[1])
+            i += 1
+            continue
+        if line.startswith("version:"):
+            spec["version"] = parse_scalar(line.split(":", 1)[1])
+            i += 1
+            continue
+        if line.startswith("go_test:"):
+            i += 1
+            while i < len(lines):
+                sub = lines[i].rstrip()
+                if not sub.strip():
+                    i += 1
+                    continue
+                if not sub.startswith("  "):
+                    break
+                key, val = sub.strip().split(":", 1)
+                spec["go_test"][key] = parse_scalar(val)
+                i += 1
+            continue
+        if line.startswith("goals:"):
+            i += 1
+            while i < len(lines):
+                cur = lines[i].rstrip()
+                if not cur.strip():
+                    i += 1
+                    continue
+                if cur.strip().startswith("#"):
+                    i += 1
+                    continue
+                if not cur.startswith("  "):
+                    break
+                if not cur.startswith("  - id:"):
+                    i += 1
+                    continue
+                goal: dict[str, Any] = {"expect": {}}
+                goal["id"] = parse_scalar(cur.split(":", 1)[1])
+                i += 1
+                while i < len(lines):
+                    sub = lines[i].rstrip()
+                    if not sub.strip():
+                        i += 1
+                        continue
+                    if sub.startswith("  - id:") or not sub.startswith("    "):
+                        break
+                    if sub.strip().startswith("expect:"):
+                        i += 1
+                        while i < len(lines):
+                            exp = lines[i].rstrip()
+                            if not exp.strip():
+                                i += 1
+                                continue
+                            if not exp.startswith("      "):
+                                break
+                            key, val = exp.strip().split(":", 1)
+                            goal["expect"][key] = parse_scalar(val)
+                            i += 1
+                        continue
+                    key, val = sub.strip().split(":", 1)
+                    goal[key] = parse_scalar(val)
+                    i += 1
+                spec["goals"].append(goal)
+            continue
+
+        i += 1
+
+    if "goals" not in spec:
+        spec["goals"] = []
+    return spec
+
+
+def go_quote(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def build_case_literal(goal: dict[str, Any]) -> str:
+    exp = goal.get("expect", {})
+    plan_meta_required = "nil"
+    if "plan_meta_required" in exp:
+        plan_meta_required = f"boolPtr({str(bool(exp['plan_meta_required'])).lower()})"
+
+    fields = [
+        f"GoalID: {go_quote(str(goal.get('id', '')))}",
+        f"Level: {go_quote(str(goal.get('level', '')))}",
+        f"Description: {go_quote(str(goal.get('description', '')))}",
+        f"RequireSend: {str(bool(exp.get('require_send', False))).lower()}",
+        f"RURecordsMin: {int(exp.get('ru_records_min', 0))}",
+        f"ExecCountMin: {int(exp.get('exec_count_min', 0))}",
+        f"ExecCountSumMin: {int(exp.get('exec_count_sum_min', 0))}",
+        f"TotalRUMin: {float(exp.get('total_ru_min', 0.0))}",
+        f"SQLMetaMatchMarker: {go_quote(str(exp.get('sql_meta_match_marker', '')))}",
+        f"PlanMetaRequired: {plan_meta_required}",
+    ]
+    return "caseSpec{\n\t\t" + ",\n\t\t".join(fields) + ",\n\t}"
+
+
+def generate_go(spec: dict[str, Any]) -> str:
+    run_prefix = str(spec["go_test"].get("run_prefix", "TestTopRUGen"))
+    goals = [g for g in spec.get("goals", []) if bool(g.get("auto", True))]
+    parts: list[str] = [
+        "// Code generated by ai/projects/topru-ai/testgen/generate_topru_cases.py. DO NOT EDIT.",
+        "",
+        "package reporter",
+        "",
+    ]
+    if goals:
+        parts.extend(['import "testing"', ""])
+    for goal in goals:
+        gid = str(goal.get("id", ""))
+        test_name = goal_to_test_name(run_prefix, gid)
+        case_lit = build_case_literal(goal)
+        parts.append(f"func {test_name}(t *testing.T) {{")
+        parts.append(f"\trunTopRUCase(t, {case_lit})")
+        parts.append("}")
+        parts.append("")
+    return "\n".join(parts)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--spec", required=True)
+    ap.add_argument("--out", required=True)
+    args = ap.parse_args()
+
+    spec_path = pathlib.Path(args.spec)
+    out_path = pathlib.Path(args.out)
+
+    spec = parse_spec(spec_path)
+    generated = generate_go(spec)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(generated, encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()
