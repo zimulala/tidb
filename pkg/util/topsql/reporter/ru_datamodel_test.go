@@ -105,7 +105,7 @@ func TestUserRUCollectingTopNSQLs(t *testing.T) {
 	for i := 0; i < numSQLs; i++ {
 		sqlDigest := []byte(fmt.Sprintf("sql%d", i))
 		ru := float64(i + 1) // 1, 2, 3, ..., numSQLs
-		user.add(1000, sqlDigest, nil, ru, 1, 100)
+		user.add(1000, sqlDigest, nil, &stmtstats.RUIncrement{TotalRU: ru, ExecCount: 1, ExecDuration: 100})
 	}
 
 	require.Len(t, user.records, numSQLs)
@@ -139,7 +139,7 @@ func TestUserRUCollectingPreTopNSQLCap(t *testing.T) {
 	extra := 5
 	for i := 0; i < maxPreTopNSQLsPerUser+extra; i++ {
 		sqlDigest := []byte(fmt.Sprintf("sql%d", i))
-		user.add(1000, sqlDigest, nil, 1.0, 1, 10)
+		user.add(1000, sqlDigest, nil, &stmtstats.RUIncrement{TotalRU: 1.0, ExecCount: 1, ExecDuration: 10})
 	}
 
 	require.Len(t, user.records, maxPreTopNSQLsPerUser)

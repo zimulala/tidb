@@ -17,6 +17,7 @@ package reporter
 import (
 	"bytes"
 	"sort"
+	"sync"
 
 	"github.com/pingcap/tidb/pkg/util/topsql/stmtstats"
 	"github.com/pingcap/tipb/go-tipb"
@@ -117,6 +118,13 @@ func (r *ruRecord) add(timestamp uint64, totalRU float64, execCount, execDuratio
 	r.totalRU += totalRU
 }
 
+func (r *ruRecord) addIncr(timestamp uint64, incr *stmtstats.RUIncrement) {
+	if incr == nil {
+		return
+	}
+	r.add(timestamp, incr.TotalRU, incr.ExecCount, incr.ExecDuration)
+}
+
 // merge merges another ruRecord into this one.
 func (r *ruRecord) merge(other *ruRecord) {
 	if other == nil {
@@ -171,25 +179,48 @@ func newUserRUCollecting(user string) *userRUCollecting {
 // Phase 3: Pre-TopN memory bounding.
 // When the number of distinct SQLs exceeds maxPreTopNSQLsPerUser,
 // new SQLs are merged into "others SQL" to bound memory usage.
-func (u *userRUCollecting) add(timestamp uint64, sqlDigest, planDigest []byte, totalRU float64, execCount, execDuration uint64) {
+func (u *userRUCollecting) add(timestamp uint64, sqlDigest, planDigest []byte, incr *stmtstats.RUIncrement) {
+	if incr == nil {
+		return
+	}
+
 	key := encodeKey(u.keyBuf, sqlDigest, planDigest)
 	rec, ok := u.records[key]
-	if !ok {
-		// Phase 3: Check pre-TopN cap before adding new SQL
-		if len(u.records) >= maxPreTopNSQLsPerUser {
-			// At capacity - merge into "others SQL" instead
-			if u.othersRec == nil {
-				u.othersRec = newRURecord(nil, nil) // nil digests = "others SQL"
-			}
-			u.othersRec.add(timestamp, totalRU, execCount, execDuration)
-			u.totalRU += totalRU
-			return
-		}
-		rec = newRURecord(sqlDigest, planDigest)
-		u.records[key] = rec
+	if ok {
+		rec.addIncr(timestamp, incr)
+		u.totalRU += incr.TotalRU
+		return
 	}
-	rec.add(timestamp, totalRU, execCount, execDuration)
-	u.totalRU += totalRU
+
+	// Phase 3: Check pre-TopN cap before adding new SQL
+	if len(u.records) >= maxPreTopNSQLsPerUser {
+		// At capacity - merge into "others SQL" instead
+		if u.othersRec == nil {
+			u.othersRec = newRURecord(nil, nil) // nil digests = "others SQL"
+		}
+		u.othersRec.addIncr(timestamp, incr)
+		u.totalRU += incr.TotalRU
+		return
+	}
+
+	rec = newRURecord(sqlDigest, planDigest)
+	u.records[key] = rec
+	rec.addIncr(timestamp, incr)
+	u.totalRU += incr.TotalRU
+}
+
+// addOthers adds RU increment data into this user's aggregated "others SQL" bucket.
+func (u *userRUCollecting) addOthers(timestamp uint64, incr *stmtstats.RUIncrement) {
+	u.add(timestamp, nil, nil, incr)
+}
+
+// addItem converts a ruItem into RU increment and aggregates it into "others SQL".
+func (u *userRUCollecting) addItem(item ruItem) {
+	u.addOthers(item.timestamp, &stmtstats.RUIncrement{
+		TotalRU:      item.totalRU,
+		ExecCount:    item.execCount,
+		ExecDuration: item.execDuration,
+	})
 }
 
 // getReportRecords returns TopN SQL records for this user, with evicted SQLs merged into "others".
@@ -259,6 +290,7 @@ func (us userRUCollectings) topN(n int) (top, evicted userRUCollectings) {
 // When the number of users exceeds maxPreTopNUsers, new users are
 // merged directly into the "others user" bucket to prevent unbounded growth.
 type ruCollecting struct {
+	mu         sync.Mutex
 	users      map[string]*userRUCollecting // user => userRUCollecting
 	othersUser *userRUCollecting            // Phase 3: Pre-aggregated "others user"
 }
@@ -285,25 +317,32 @@ func (c *ruCollecting) add(timestamp uint64, key stmtstats.RUKey, incr *stmtstat
 				c.othersUser = newUserRUCollecting(keyRUOthersUser)
 			}
 			// Merge into "others user"'s "others SQL" (nil digests)
-			c.othersUser.add(timestamp, nil, nil, incr.TotalRU, incr.ExecCount, incr.ExecDuration)
+			c.othersUser.addOthers(timestamp, incr)
 			return
 		}
 		userCollecting = newUserRUCollecting(user)
 		c.users[user] = userCollecting
 	}
 	// Convert BinaryDigest (string) to []byte for storage
-	userCollecting.add(timestamp, []byte(key.SQLDigest), []byte(key.PlanDigest), incr.TotalRU, incr.ExecCount, incr.ExecDuration)
+	userCollecting.add(timestamp, []byte(key.SQLDigest), []byte(key.PlanDigest), incr)
 }
 
 // addBatch adds a batch of RU increments for a given timestamp.
+// addBatch is thread-safe: called from collectRUWorker goroutine.
 func (c *ruCollecting) addBatch(timestamp uint64, increments stmtstats.RUIncrementMap) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	for key, incr := range increments {
 		c.add(timestamp, key, incr)
 	}
 }
 
 // take takes all collected data and returns a new ruCollecting, resetting internal state.
+// take is thread-safe: called from collectWorker goroutine on report ticker.
 func (c *ruCollecting) take() *ruCollecting {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	result := &ruCollecting{
 		users:      c.users,
 		othersUser: c.othersUser,
@@ -366,13 +405,13 @@ func (c *ruCollecting) getReportRecords(keyspaceName []byte) []tipb.TopRURecord 
 			// Merge all SQLs from evicted user into others user's "others SQL"
 			for _, rec := range evictedUser.records {
 				for _, item := range rec.items {
-					othersUser.add(item.timestamp, nil, nil, item.totalRU, item.execCount, item.execDuration)
+					othersUser.addItem(item)
 				}
 			}
 			// Phase 3: Also merge evicted user's pre-aggregated "others SQL"
 			if evictedUser.othersRec != nil {
 				for _, item := range evictedUser.othersRec.items {
-					othersUser.add(item.timestamp, nil, nil, item.totalRU, item.execCount, item.execDuration)
+					othersUser.addItem(item)
 				}
 			}
 		}

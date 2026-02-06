@@ -126,21 +126,18 @@ func (m *aggregator) aggregateRU() {
 		// Phase 2 Decision E: Apply hard cap on distinct RU keys.
 		// When approaching the limit, stop merging new keys to protect hot paths.
 		for key, incr := range sessionRU {
+			// Under capacity - normal merge
+			if existing, ok := total[key]; ok {
+				existing.Merge(incr)
+				continue
+			}
+
 			if len(total) >= maxRUKeysPerAggregate {
 				// At capacity - only merge into existing keys
-				if existing, ok := total[key]; ok {
-					existing.Merge(incr)
-				} else {
-					droppedKeys++
-					droppedRU += incr.TotalRU
-				}
+				droppedKeys++
+				droppedRU += incr.TotalRU
 			} else {
-				// Under capacity - normal merge
-				if existing, ok := total[key]; ok {
-					existing.Merge(incr)
-				} else {
-					total[key] = incr
-				}
+				total[key] = incr
 			}
 		}
 		return true

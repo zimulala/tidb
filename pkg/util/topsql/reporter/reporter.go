@@ -128,6 +128,7 @@ func NewRemoteTopSQLReporter(decodePlan planBinaryDecodeFunc, compressPlan planB
 func (tsr *RemoteTopSQLReporter) Start() {
 	tsr.sqlCPUCollector.Start()
 	go tsr.collectWorker()
+	go tsr.collectRUWorker()
 	go tsr.reportWorker()
 }
 
@@ -179,7 +180,7 @@ func (tsr *RemoteTopSQLReporter) CollectStmtStatsMap(data stmtstats.StatementSta
 // Design Rationale:
 //   - Non-blocking push to channel (drops on full, logs metric)
 //   - Separate channel from TopSQL stmtstats for pipeline independence
-//   - collectWorker buffers RU increments into ruCollecting with Hybrid TopN
+//   - collectRUWorker buffers RU increments into ruCollecting with Hybrid TopN
 //
 // WARN: It will drop the data if the processing is not in time.
 // This function is thread-safe and efficient.
@@ -232,10 +233,6 @@ func (tsr *RemoteTopSQLReporter) collectWorker() {
 		case data := <-tsr.collectStmtStatsChan:
 			timestamp := uint64(nowFunc().Unix())
 			tsr.stmtStatsBuffer[timestamp] = data
-		case data := <-tsr.collectRUIncrementsChan:
-			// Phase 2: Buffer RU increments with Hybrid TopN (Decision A)
-			timestamp := uint64(nowFunc().Unix())
-			tsr.ruCollecting.addBatch(timestamp, data)
 		case <-reportTicker.C:
 			tsr.processStmtStatsData()
 			tsr.takeDataAndSendToReportChan()
@@ -244,6 +241,23 @@ func (tsr *RemoteTopSQLReporter) collectWorker() {
 				currentReportInterval = newInterval
 				reportTicker.Reset(time.Second * time.Duration(currentReportInterval))
 			}
+		}
+	}
+}
+
+// collectRUWorker consumes RU increment data from the collectRUIncrementsChan independently.
+// It runs in a separate goroutine from collectWorker to decouple TopRU from TopSQL data flow.
+// The ruCollecting.addBatch/take are protected by a mutex for concurrent access safety.
+func (tsr *RemoteTopSQLReporter) collectRUWorker() {
+	defer util.Recover("top-sql", "collectRUWorker", nil, false)
+
+	for {
+		select {
+		case <-tsr.ctx.Done():
+			return
+		case data := <-tsr.collectRUIncrementsChan:
+			timestamp := uint64(nowFunc().Unix())
+			tsr.ruCollecting.addBatch(timestamp, data)
 		}
 	}
 }
