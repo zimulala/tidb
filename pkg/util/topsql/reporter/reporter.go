@@ -190,8 +190,7 @@ func (tsr *RemoteTopSQLReporter) CollectRUIncrements(data stmtstats.RUIncrementM
 	select {
 	case tsr.collectRUIncrementsChan <- data:
 	default:
-		// ignore if chan blocked
-		reporter_metrics.IgnoreCollectChannelFullCounter.Inc()
+		reporter_metrics.IgnoreCollectRUChannelFullCounter.Inc()
 	}
 }
 

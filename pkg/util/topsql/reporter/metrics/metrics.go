@@ -27,6 +27,7 @@ var (
 	IgnoreExceedRUAmountCounter         prometheus.Counter
 	IgnoreCollectChannelFullCounter     prometheus.Counter
 	IgnoreCollectStmtChannelFullCounter prometheus.Counter
+	IgnoreCollectRUChannelFullCounter   prometheus.Counter
 	IgnoreReportChannelFullCounter      prometheus.Counter
 	ReportAllDurationSuccHistogram      prometheus.Observer
 	ReportAllDurationFailedHistogram    prometheus.Observer
@@ -53,6 +54,7 @@ func InitMetricsVars() {
 	IgnoreExceedRUAmountCounter = metrics.TopSQLIgnoredCounter.WithLabelValues("ignore_exceed_ru_amount")
 	IgnoreCollectChannelFullCounter = metrics.TopSQLIgnoredCounter.WithLabelValues("ignore_collect_channel_full")
 	IgnoreCollectStmtChannelFullCounter = metrics.TopSQLIgnoredCounter.WithLabelValues("ignore_collect_stmt_channel_full")
+	IgnoreCollectRUChannelFullCounter = metrics.TopSQLIgnoredCounter.WithLabelValues("ignore_collect_ru_channel_full")
 	IgnoreReportChannelFullCounter = metrics.TopSQLIgnoredCounter.WithLabelValues("ignore_report_channel_full")
 	ReportAllDurationSuccHistogram = metrics.TopSQLReportDurationHistogram.WithLabelValues("all", metrics.LblOK)
 	ReportAllDurationFailedHistogram = metrics.TopSQLReportDurationHistogram.WithLabelValues("all", metrics.LblError)

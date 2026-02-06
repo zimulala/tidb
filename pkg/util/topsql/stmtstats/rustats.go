@@ -86,10 +86,6 @@ type ExecutionContext struct {
 	// LastRUTotal stores the last observed cumulative RU total (RRU + WRU).
 	// Used to compute delta = currentTotal - LastRUTotal.
 	LastRUTotal float64
-
-	// PendingExecCount tracks begin-based execution count waiting to be attributed.
-	// PendingExecCount is consumed exactly once on first positive RU delta.
-	PendingExecCount uint64
 }
 
 // RUIncrement represents a delta RU consumption for a specific RUKey.

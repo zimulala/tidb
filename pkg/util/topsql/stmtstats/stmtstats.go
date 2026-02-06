@@ -119,10 +119,12 @@ func (s *StatementStats) addRUOnBeginLocked(user string, sqlDigest, planDigest [
 	}
 	// Replace any stale execution context defensively to avoid ghost sampling.
 	s.execCtx = &ExecutionContext{
-		RUDetails:        ruDetails,
-		Key:              key,
-		PendingExecCount: 1,
+		RUDetails: ruDetails,
+		Key:       key,
 	}
+	// Count ExecCount at begin time, consistent with TopSQL behavior.
+	incr := s.getOrCreateRUIncrementLocked(key)
+	incr.ExecCount++
 }
 
 // OnExecutionFinished implements StatementObserver.OnExecutionFinished.
@@ -186,7 +188,6 @@ func (s *StatementStats) addRUOnFinishLocked(user string, sqlDigest, planDigest 
 	}
 	incr := s.getOrCreateRUIncrementLocked(key)
 	incr.TotalRU += deltaRU
-	incr.ExecCount += consumePendingExecCountLocked(s.execCtx)
 	incr.ExecDuration += uint64(execDuration.Nanoseconds())
 }
 
@@ -199,17 +200,6 @@ func (s *StatementStats) getOrCreateRUIncrementLocked(key RUKey) *RUIncrement {
 	return incr
 }
 
-func consumePendingExecCountLocked(activeCtx *ExecutionContext) uint64 {
-	if activeCtx == nil || activeCtx.PendingExecCount == 0 {
-		return 0
-	}
-	count := activeCtx.PendingExecCount
-	// Invariant: pending begin-based count can be consumed only once per execution.
-	// PendingExecCount is consumed exactly once on first positive RU delta.
-	activeCtx.PendingExecCount = 0
-	return count
-}
-
 func (s *StatementStats) clearRUExecCtxLocked() {
 	s.execCtx = nil
 }
@@ -220,8 +210,7 @@ func (s *StatementStats) sampleActiveRUDeltaLocked(result RUIncrementMap) RUIncr
 	}
 
 	currentTotalRU := s.execCtx.RUDetails.RRU() + s.execCtx.RUDetails.WRU()
-	lastTotalRU := s.execCtx.LastRUTotal
-	deltaRU := currentTotalRU - lastTotalRU
+	deltaRU := currentTotalRU - s.execCtx.LastRUTotal
 	if deltaRU > 0 {
 		incr, ok := result[s.execCtx.Key]
 		if !ok {
@@ -229,7 +218,6 @@ func (s *StatementStats) sampleActiveRUDeltaLocked(result RUIncrementMap) RUIncr
 			result[s.execCtx.Key] = incr
 		}
 		incr.TotalRU += deltaRU
-		incr.ExecCount += consumePendingExecCountLocked(s.execCtx)
 	}
 	// Keep LastRUTotal in sync even when delta <= 0 (e.g. counter reset).
 	s.execCtx.LastRUTotal = currentTotalRU
