@@ -38,11 +38,7 @@
 //   - TODO(M4): Executor hooks (OnRUExecutionBegin/Finished calls)
 package stmtstats
 
-import (
-	"context"
-
-	"github.com/tikv/client-go/v2/util"
-)
+import "context"
 
 // RUKey uniquely identifies a SQL execution for RU aggregation.
 // Unlike TopSQL which aggregates by (sql_digest, plan_digest),
@@ -68,11 +64,11 @@ type RUKey struct {
 // Design Invariants:
 //   - At most 1 active ExecutionContext per session at any time
 //   - Created at SQL start (OnRUExecutionBegin), cleared at SQL finish (OnRUExecutionFinished)
-//   - LastRUSample is updated after each 1s tick sample to enable correct delta
+//   - LastRUTotal is updated after each sample/finish to enable correct delta
 //
 // Delta Calculation:
 //   - RUDetails contains cumulative RRU+WRU values from tikv/client-go
-//   - delta = (current.RRU + current.WRU) - (last.RRU + last.WRU)
+//   - delta = (current.RRU + current.WRU) - LastRUTotal
 //   - Negative or zero deltas are discarded (guards against reset/skew)
 type ExecutionContext struct {
 	// Ctx is the context.Context associated with this SQL execution.
@@ -82,9 +78,9 @@ type ExecutionContext struct {
 	// Key identifies this execution by (user, sql_digest, plan_digest).
 	Key RUKey
 
-	// LastRUSample stores the last sampled cumulative RU value.
-	// Used to compute delta = current - last on each tick.
-	LastRUSample *util.RUDetails
+	// LastRUTotal stores the last observed cumulative RU total (RRU + WRU).
+	// Used to compute delta = currentTotal - LastRUTotal.
+	LastRUTotal float64
 
 	// PendingExecCount tracks begin-based execution count waiting to be attributed.
 	// PendingExecCount is consumed exactly once on first positive RU delta.

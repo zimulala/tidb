@@ -145,15 +145,19 @@ func (s *StatementStats) OnExecutionFinished(sqlDigest, planDigest []byte, info 
 }
 
 func (s *StatementStats) addRUOnFinishLocked(user string, sqlDigest, planDigest []byte, ru *util.RUDetails, execDuration time.Duration) {
-	defer s.clearRUExecCtxLocked()
-	if ru == nil {
-		return
-	}
-
 	key := RUKey{
 		User:       user,
 		SQLDigest:  BinaryDigest(sqlDigest),
 		PlanDigest: BinaryDigest(planDigest),
+	}
+	if s.execCtx != nil && s.execCtx.Key != key {
+		// A newer execution has already replaced the active context.
+		// Ignore stale finish signal to avoid cross-key contamination.
+		return
+	}
+	defer s.clearRUExecCtxLocked()
+	if ru == nil {
+		return
 	}
 
 	currentTotalRU := ru.RRU() + ru.WRU()
@@ -162,24 +166,19 @@ func (s *StatementStats) addRUOnFinishLocked(user string, sqlDigest, planDigest 
 	}
 
 	lastTotalRU := 0.0
-	if s.execCtx != nil && s.execCtx.Key == key && s.execCtx.LastRUSample != nil {
-		lastTotalRU = s.execCtx.LastRUSample.RRU() + s.execCtx.LastRUSample.WRU()
+	if s.execCtx != nil {
+		lastTotalRU = s.execCtx.LastRUTotal
+		s.execCtx.LastRUTotal = currentTotalRU
 	}
 	deltaRU := currentTotalRU - lastTotalRU
 	if deltaRU <= 0 {
 		// Counter reset or already sampled by previous tick.
-		if s.execCtx != nil && s.execCtx.Key == key {
-			s.execCtx.LastRUSample = ru.Clone()
-		}
 		return
 	}
 	incr := s.getOrCreateRUIncrementLocked(key)
 	incr.TotalRU += deltaRU
-	incr.ExecCount += s.consumePendingExecCountLocked(key)
+	incr.ExecCount += consumePendingExecCountLocked(s.execCtx)
 	incr.ExecDuration += uint64(execDuration.Nanoseconds())
-	if s.execCtx != nil && s.execCtx.Key == key {
-		s.execCtx.LastRUSample = ru.Clone()
-	}
 }
 
 func (s *StatementStats) getOrCreateRUIncrementLocked(key RUKey) *RUIncrement {
@@ -191,22 +190,18 @@ func (s *StatementStats) getOrCreateRUIncrementLocked(key RUKey) *RUIncrement {
 	return incr
 }
 
-func (s *StatementStats) consumePendingExecCountLocked(key RUKey) uint64 {
-	if s.execCtx == nil || s.execCtx.Key != key || s.execCtx.PendingExecCount == 0 {
+func consumePendingExecCountLocked(activeCtx *ExecutionContext) uint64 {
+	if activeCtx == nil || activeCtx.PendingExecCount == 0 {
 		return 0
 	}
-	count := s.execCtx.PendingExecCount
+	count := activeCtx.PendingExecCount
 	// Invariant: pending begin-based count can be consumed only once per execution.
 	// PendingExecCount is consumed exactly once on first positive RU delta.
-	s.execCtx.PendingExecCount = 0
+	activeCtx.PendingExecCount = 0
 	return count
 }
 
 func (s *StatementStats) clearRUExecCtxLocked() {
-	if s.execCtx == nil {
-		return
-	}
-	// Single active execution per session is the invariant; always clear stale contexts.
 	s.execCtx = nil
 }
 
@@ -222,12 +217,8 @@ func (s *StatementStats) sampleActiveRUDeltaLocked(result RUIncrementMap) RUIncr
 	if !ok || currentRU == nil {
 		return result
 	}
-	currentSnapshot := currentRU.Clone()
-	currentTotalRU := currentSnapshot.RRU() + currentSnapshot.WRU()
-	lastTotalRU := 0.0
-	if s.execCtx.LastRUSample != nil {
-		lastTotalRU = s.execCtx.LastRUSample.RRU() + s.execCtx.LastRUSample.WRU()
-	}
+	currentTotalRU := currentRU.RRU() + currentRU.WRU()
+	lastTotalRU := s.execCtx.LastRUTotal
 	deltaRU := currentTotalRU - lastTotalRU
 	if deltaRU > 0 {
 		if result == nil {
@@ -239,10 +230,10 @@ func (s *StatementStats) sampleActiveRUDeltaLocked(result RUIncrementMap) RUIncr
 			result[s.execCtx.Key] = incr
 		}
 		incr.TotalRU += deltaRU
-		incr.ExecCount += s.consumePendingExecCountLocked(s.execCtx.Key)
+		incr.ExecCount += consumePendingExecCountLocked(s.execCtx)
 	}
-	// Keep LastRUSample in sync even when delta <= 0 (e.g. counter reset).
-	s.execCtx.LastRUSample = currentSnapshot
+	// Keep LastRUTotal in sync even when delta <= 0 (e.g. counter reset).
+	s.execCtx.LastRUTotal = currentTotalRU
 	return result
 }
 
