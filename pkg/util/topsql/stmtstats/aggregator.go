@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	reporter_metrics "github.com/pingcap/tidb/pkg/util/topsql/reporter/metrics"
 	"github.com/pingcap/tidb/pkg/util/topsql/state"
 	"go.uber.org/atomic"
 )
@@ -110,37 +111,33 @@ func (m *aggregator) aggregate() {
 //  2. Calls MergeRUInto() to drain RU increments from each session
 //  3. Merges all increments into single RUIncrementMap
 //  4. Applies hard cap on distinct keys (Phase 2 Decision E - backpressure)
-//  5. Gates on TopRUEnabled() - drops data if disabled
-//  6. Pushes to all registered RUCollectors
+//  5. Pushes to all registered RUCollectors (gated on TopRUEnabled())
 func (m *aggregator) aggregateRU() {
 	topRUEnabled := state.TopRUEnabled()
 	// Always drain RU increments to avoid keeping stale data when TopRU is disabled.
 	// Disabled means no RU output (no-op on reporting), while housekeeping drain is still allowed.
 	total := RUIncrementMap{}
+	var droppedKeys int64
+	var droppedRU float64
 	m.statsSet.Range(func(statsAny, _ any) bool {
 		stats := statsAny.(*StatementStats)
 		// No need to check Finished() again - already checked in aggregate()
 		sessionRU := stats.MergeRUInto()
-		if !topRUEnabled {
-			return true
-		}
 		// Phase 2 Decision E: Apply hard cap on distinct RU keys.
 		// When approaching the limit, stop merging new keys to protect hot paths.
 		for key, incr := range sessionRU {
 			if len(total) >= maxRUKeysPerAggregate {
 				// At capacity - only merge into existing keys
 				if existing, ok := total[key]; ok {
-					existing.TotalRU += incr.TotalRU
-					existing.ExecCount += incr.ExecCount
-					existing.ExecDuration += incr.ExecDuration
+					existing.Merge(incr)
+				} else {
+					droppedKeys++
+					droppedRU += incr.TotalRU
 				}
-				// Else: drop the key (backpressure)
 			} else {
 				// Under capacity - normal merge
 				if existing, ok := total[key]; ok {
-					existing.TotalRU += incr.TotalRU
-					existing.ExecCount += incr.ExecCount
-					existing.ExecDuration += incr.ExecDuration
+					existing.Merge(incr)
 				} else {
 					total[key] = incr
 				}
@@ -148,10 +145,14 @@ func (m *aggregator) aggregateRU() {
 		}
 		return true
 	})
-	if !topRUEnabled {
-		return
+
+	// Record backpressure metrics outside the hot loop.
+	if droppedKeys > 0 {
+		reporter_metrics.IgnoreExceedRUKeysCounter.Add(float64(droppedKeys))
+		reporter_metrics.IgnoreExceedRUAmountCounter.Add(droppedRU)
 	}
-	if len(total) > 0 {
+
+	if topRUEnabled && len(total) > 0 {
 		m.ruCollectors.Range(func(c, _ any) bool {
 			c.(RUCollector).CollectRUIncrements(total)
 			return true

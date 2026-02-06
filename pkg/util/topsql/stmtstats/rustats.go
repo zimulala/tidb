@@ -112,6 +112,13 @@ type RUIncrement struct {
 	ExecDuration uint64
 }
 
+// Merge merges other into this RUIncrement.
+func (r *RUIncrement) Merge(other *RUIncrement) {
+	r.TotalRU += other.TotalRU
+	r.ExecCount += other.ExecCount
+	r.ExecDuration += other.ExecDuration
+}
+
 // RUIncrementMap maps RUKey to aggregated RU increments.
 // This is the output type of StatementStats.MergeRUInto() and the input
 // type for RUCollector.CollectRUIncrements().
@@ -136,8 +143,6 @@ func (m RUIncrementMap) Merge(other RUIncrementMap) {
 			m[key] = otherIncr
 			continue
 		}
-		incr.TotalRU += otherIncr.TotalRU
-		incr.ExecCount += otherIncr.ExecCount
-		incr.ExecDuration += otherIncr.ExecDuration
+		incr.Merge(otherIncr)
 	}
 }
