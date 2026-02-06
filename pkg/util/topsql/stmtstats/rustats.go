@@ -38,7 +38,7 @@
 //   - TODO(M4): Executor hooks (OnRUExecutionBegin/Finished calls)
 package stmtstats
 
-import "context"
+import "github.com/tikv/client-go/v2/util"
 
 // RUKey uniquely identifies a SQL execution for RU aggregation.
 // Unlike TopSQL which aggregates by (sql_digest, plan_digest),
@@ -58,7 +58,7 @@ type RUKey struct {
 }
 
 // ExecutionContext tracks RU consumption for a single SQL execution.
-// It holds the execution context, identifying key, and the last sampled
+// It holds the cached RUDetails pointer, identifying key, and the last sampled
 // RU value to enable delta calculation on each tick.
 //
 // Design Invariants:
@@ -70,10 +70,15 @@ type RUKey struct {
 //   - RUDetails contains cumulative RRU+WRU values from tikv/client-go
 //   - delta = (current.RRU + current.WRU) - LastRUTotal
 //   - Negative or zero deltas are discarded (guards against reset/skew)
+//
+// Performance Note:
+//   - RUDetails pointer is cached at begin time to avoid per-tick context.Value()
+//     traversal. The pointer is stable for the execution lifetime; internal values
+//     (RRU/WRU) are updated atomically by tikv client-go.
 type ExecutionContext struct {
-	// Ctx is the context.Context associated with this SQL execution.
-	// Used to extract RUDetails via util.RUDetailsCtxKey.
-	Ctx context.Context
+	// RUDetails is the cached *util.RUDetails extracted from context at execution begin.
+	// Avoids repeated context.Value() lookups on every aggregator tick.
+	RUDetails *util.RUDetails
 
 	// Key identifies this execution by (user, sql_digest, plan_digest).
 	Key RUKey

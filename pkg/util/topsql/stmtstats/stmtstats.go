@@ -108,9 +108,18 @@ func (s *StatementStats) addRUOnBeginLocked(user string, sqlDigest, planDigest [
 		SQLDigest:  BinaryDigest(sqlDigest),
 		PlanDigest: BinaryDigest(planDigest),
 	}
+	// Extract and cache RUDetails pointer at begin time to avoid per-tick
+	// context.Value() traversal. The pointer is stable for the execution
+	// lifetime; internal values (RRU/WRU) are updated atomically by tikv client-go.
+	var ruDetails *util.RUDetails
+	if ctx != nil {
+		if raw := ctx.Value(util.RUDetailsCtxKey); raw != nil {
+			ruDetails, _ = raw.(*util.RUDetails)
+		}
+	}
 	// Replace any stale execution context defensively to avoid ghost sampling.
 	s.execCtx = &ExecutionContext{
-		Ctx:              ctx,
+		RUDetails:        ruDetails,
 		Key:              key,
 		PendingExecCount: 1,
 	}
@@ -206,24 +215,14 @@ func (s *StatementStats) clearRUExecCtxLocked() {
 }
 
 func (s *StatementStats) sampleActiveRUDeltaLocked(result RUIncrementMap) RUIncrementMap {
-	if s.execCtx == nil || s.execCtx.Ctx == nil {
+	if s.execCtx == nil || s.execCtx.RUDetails == nil {
 		return result
 	}
-	raw := s.execCtx.Ctx.Value(util.RUDetailsCtxKey)
-	if raw == nil {
-		return result
-	}
-	currentRU, ok := raw.(*util.RUDetails)
-	if !ok || currentRU == nil {
-		return result
-	}
-	currentTotalRU := currentRU.RRU() + currentRU.WRU()
+
+	currentTotalRU := s.execCtx.RUDetails.RRU() + s.execCtx.RUDetails.WRU()
 	lastTotalRU := s.execCtx.LastRUTotal
 	deltaRU := currentTotalRU - lastTotalRU
 	if deltaRU > 0 {
-		if result == nil {
-			result = RUIncrementMap{}
-		}
 		incr, ok := result[s.execCtx.Key]
 		if !ok {
 			incr = &RUIncrement{}
