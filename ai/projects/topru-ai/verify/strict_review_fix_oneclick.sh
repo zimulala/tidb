@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 usage() {
   cat <<'EOF'
@@ -31,17 +31,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"     # .../ai/projects/topru-ai
 REPO_DIR="$(cd "${PROJECT_DIR}/../../.." && pwd)" # repo root
 SSOT_FILE="${PROJECT_DIR}/PROJECT_STATE.md"
+LIB_ONECLICK="${PROJECT_DIR}/verify/lib_oneclick.sh"
 
 BASE=""
 HEAD=""
 MODE=""
 TARGET_IDS=""
 PATCH_SSOT="1"
+SSOT_PATCH_RESULT="skipped"
+FINAL_RC=0
+BASE_PROVIDED="0"
+HEAD_PROVIDED="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --base) BASE="$2"; shift 2;;
-    --head) HEAD="$2"; shift 2;;
+    --base) BASE="$2"; BASE_PROVIDED="1"; shift 2;;
+    --head) HEAD="$2"; HEAD_PROVIDED="1"; shift 2;;
     --mode) MODE="$2"; shift 2;;
     --target) TARGET_IDS="$2"; shift 2;;
     --no-patch-ssot) PATCH_SSOT="0"; shift;;
@@ -53,6 +58,92 @@ done
 if [[ -z "${HEAD}" ]]; then
   HEAD="$(git -C "${REPO_DIR}" rev-parse HEAD)"
 fi
+
+cd "${REPO_DIR}"
+
+TIME_UTC="$(date -u +%Y%m%dT%H%M%SZ)"
+HEAD_SHORT="$(echo "${HEAD}" | cut -c1-7)"
+if [[ -z "${MODE}" ]]; then
+  if [[ -f "${SSOT_FILE}" ]] && grep -Eq "^review:\\s*$" "${SSOT_FILE}" && grep -q "baseline_commit:" "${SSOT_FILE}"; then
+    MODE="incr"
+  else
+    MODE="first"
+  fi
+fi
+
+RUN_ID="${TIME_UTC}_${HEAD_SHORT}_${MODE}"
+OUT_DIR="${PROJECT_DIR}/artifacts/review/${RUN_ID}"
+mkdir -p "${OUT_DIR}"
+
+RUN_LOG="${OUT_DIR}/run.log"
+CHANGED_FILES="${OUT_DIR}/changed_files.txt"
+DIFF_PATCH="${OUT_DIR}/diff.patch"
+COMMITS_TXT="${OUT_DIR}/commits.txt"
+SUMMARY_TXT="${OUT_DIR}/summary.txt"
+REVIEW_MD="${OUT_DIR}/review.md"
+FINDINGS_YAML="${OUT_DIR}/findings.yaml"
+NEXT_ACTIONS_MD="${OUT_DIR}/next_actions.md"
+TRACE_JSONL="${OUT_DIR}/trace.jsonl"
+MANIFEST_JSON="${OUT_DIR}/manifest.json"
+
+# Create required files early (even if we fail later).
+: >"${RUN_LOG}"
+: >"${CHANGED_FILES}"
+: >"${DIFF_PATCH}"
+: >"${COMMITS_TXT}"
+: >"${SUMMARY_TXT}"
+: >"${REVIEW_MD}"
+: >"${FINDINGS_YAML}"
+: >"${NEXT_ACTIONS_MD}"
+: >"${TRACE_JSONL}"
+: >"${MANIFEST_JSON}"
+
+# Reuse oneclick stage/trace convention for debuggability.
+if [[ -f "${LIB_ONECLICK}" ]]; then
+  ONECLICK_DISABLE_ERR_TRAP=1
+  # shellcheck source=/dev/null
+  source "${LIB_ONECLICK}"
+  ONECLICK_DISABLE_ERR_TRAP=0
+  ART_DIR="${OUT_DIR}"
+  TRACE="${TRACE_JSONL}"
+  init_trace "${OUT_DIR}"
+else
+  echo "WARN: lib_oneclick.sh not found: ${LIB_ONECLICK} (trace disabled)" >&2
+fi
+
+# Fallback stage/trace if lib was not loaded (keep script functional).
+if ! command -v stage >/dev/null 2>&1; then
+  now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+  trace() {
+    local st="$1"; local msg="$2"; local status="$3"; local details="${4:-{}}"
+    local t; t="$(now_iso)"
+    msg="${msg//\"/\' }"
+    echo "{\"time\":\"${t}\",\"stage\":\"${st}\",\"status\":\"${status}\",\"msg\":\"${msg}\",\"details\":${details}}" >> "${TRACE_JSONL}" 2>/dev/null || true
+  }
+  stage() {
+    echo "[strict_review][stage $1] $2"
+    trace "$1" "$2" "ok" "{}"
+  }
+fi
+
+print_summary() {
+  {
+    echo
+    echo "=== strict-review summary ==="
+    echo "artifacts_dir: ${OUT_DIR}"
+    echo "  - review_md: ${REVIEW_MD}"
+    echo "  - findings_yaml: ${FINDINGS_YAML}"
+    echo "  - next_actions: ${NEXT_ACTIONS_MD}"
+    echo "  - changed_files: ${CHANGED_FILES}"
+    echo "  - diff_patch: ${DIFF_PATCH}"
+    echo "  - commits: ${COMMITS_TXT}"
+    echo "  - summary: ${SUMMARY_TXT}"
+    echo "  - trace: ${TRACE_JSONL}"
+    echo "range: ${BASE:-<unset>}..${HEAD}"
+    echo "ssot_patch: ${SSOT_PATCH_RESULT}"
+    echo "exit_code: ${FINAL_RC}"
+  } | tee -a "${RUN_LOG}"
+}
 
 best_effort_base() {
   local head="$1"
@@ -66,45 +157,99 @@ best_effort_base() {
   return 0
 }
 
+if [[ ! -f "${SSOT_FILE}" ]]; then
+  stage 0 "preflight failed: SSOT missing"
+  echo "ERROR: SSOT not found: ${SSOT_FILE}" >&2
+  FINAL_RC=2
+  print_summary
+  exit "${FINAL_RC}"
+fi
+
+stage 0 "preflight ok"
+
+ssot_review_value() {
+  # ssot_review_value <key>
+  # reads key under review: block inside SSOT_V2 (2-space indent), best-effort.
+  local key="$1"
+  awk -v k="${key}" '
+    /<!-- NAVIGATOR:BEGIN SSOT_V2 -->/ {inssot=1; next}
+    /<!-- NAVIGATOR:END SSOT_V2 -->/ {inssot=0}
+    inssot && /^review:\s*$/ {inrev=1; next}
+    inssot && inrev && /^[A-Za-z0-9_]+:\s*$/ {inrev=0}
+    inssot && inrev && $0 ~ "^  "k":" {
+      sub("^  "k":[[:space:]]*", "", $0)
+      gsub(/"/, "", $0)
+      print $0
+      exit
+    }
+  ' "${SSOT_FILE}" 2>/dev/null || true
+}
+
+ssot_review_list_csv() {
+  # ssot_review_list_csv <key>
+  # parses `  open: [R1, R2]` to `R1,R2`
+  local key="$1"
+  local line
+  line="$(awk -v k="${key}" '
+    /<!-- NAVIGATOR:BEGIN SSOT_V2 -->/ {inssot=1; next}
+    /<!-- NAVIGATOR:END SSOT_V2 -->/ {inssot=0}
+    inssot && /^review:\s*$/ {inrev=1; next}
+    inssot && inrev && /^[A-Za-z0-9_]+:\s*$/ {inrev=0}
+    inssot && inrev && $0 ~ "^  "k":" {print; exit}
+  ' "${SSOT_FILE}" 2>/dev/null || true)"
+  # Extract bracket content (including empty list) and remove whitespace.
+  echo "${line}" | awk '
+    match($0, /\\[[^]]*\\]/) {
+      s=substr($0, RSTART+1, RLENGTH-2)
+      gsub(/[[:space:]]/, "", s)
+      print s
+    }
+  ' 2>/dev/null || true
+}
+
+SSOT_REVIEW_BASELINE_COMMIT="$(ssot_review_value baseline_commit)"
+SSOT_REVIEW_OPEN_CSV="$(ssot_review_list_csv open)"
+SSOT_REVIEW_FIXED_CSV="$(ssot_review_list_csv fixed)"
+SSOT_REVIEW_PARTIAL_CSV="$(ssot_review_list_csv partially_fixed)"
+
+ssot_review_last_run_value() {
+  # ssot_review_last_run_value <key>
+  # reads key under review.last_run: block inside SSOT_V2 (4-space indent), best-effort.
+  local key="$1"
+  awk -v k="${key}" '
+    /<!-- NAVIGATOR:BEGIN SSOT_V2 -->/ {inssot=1; next}
+    /<!-- NAVIGATOR:END SSOT_V2 -->/ {inssot=0}
+    inssot && /^review:\s*$/ {inrev=1; next}
+    inssot && inrev && /^[A-Za-z0-9_]+:\s*$/ {inrev=0}
+    inssot && inrev && /^  last_run:\s*$/ {inlast=1; next}
+    inssot && inrev && inlast && /^[A-Za-z0-9_]+:\s*$/ {inlast=0}
+    inssot && inrev && inlast && $0 ~ "^    "k":" {
+      sub("^    "k":[[:space:]]*", "", $0)
+      gsub(/"/, "", $0)
+      print $0
+      exit
+    }
+  ' "${SSOT_FILE}" 2>/dev/null || true
+}
+
+SSOT_REVIEW_LAST_ART_DIR="$(ssot_review_last_run_value artifacts_dir)"
+SSOT_REVIEW_LAST_FINDINGS_YAML="$(ssot_review_last_run_value findings_yaml)"
+
+# If incremental and --base not provided, use SSOT baseline_commit as base.
+if [[ "${MODE}" == "incr" && "${BASE_PROVIDED}" != "1" && -n "${SSOT_REVIEW_BASELINE_COMMIT}" ]]; then
+  BASE="${SSOT_REVIEW_BASELINE_COMMIT}"
+fi
+
 if [[ -z "${BASE}" ]]; then
   BASE="$(best_effort_base "${HEAD}")"
 fi
 if [[ -z "${BASE}" ]]; then
+  stage 0 "preflight failed: could not determine base"
   echo "ERROR: could not determine --base (please provide --base <hash>)" >&2
-  exit 2
+  FINAL_RC=2
+  print_summary
+  exit "${FINAL_RC}"
 fi
-
-if [[ ! -f "${SSOT_FILE}" ]]; then
-  echo "ERROR: SSOT not found: ${SSOT_FILE}" >&2
-  exit 2
-fi
-
-if [[ -z "${MODE}" ]]; then
-  if grep -Eq "^review:\\s*$" "${SSOT_FILE}" && grep -q "baseline_commit:" "${SSOT_FILE}"; then
-    MODE="incr"
-  else
-    MODE="first"
-  fi
-fi
-
-TIME_UTC="$(date -u +%Y%m%dT%H%M%SZ)"
-HEAD_SHORT="$(echo "${HEAD}" | cut -c1-7)"
-RUN_ID="${TIME_UTC}_${HEAD_SHORT}_${MODE}"
-OUT_DIR="${PROJECT_DIR}/artifacts/review/${RUN_ID}"
-mkdir -p "${OUT_DIR}"
-
-RUN_LOG="${OUT_DIR}/run.log"
-CHANGED_FILES="${OUT_DIR}/changed_files.txt"
-DIFF_PATCH="${OUT_DIR}/diff.patch"
-COMMITS_TXT="${OUT_DIR}/commits.txt"
-SUMMARY_TXT="${OUT_DIR}/summary.txt"
-REVIEW_MD="${OUT_DIR}/review.md"
-FINDINGS_YAML="${OUT_DIR}/findings.yaml"
-NEXT_ACTIONS_MD="${OUT_DIR}/next_actions.md"
-MANIFEST_JSON="${OUT_DIR}/manifest.json"
-
-# Log everything (including stderr) into run.log while still echoing to terminal.
-exec > >(tee "${RUN_LOG}") 2>&1
 
 echo "STRICT_REVIEW_FIX_ONECLICK"
 echo "time_utc: ${TIME_UTC}"
@@ -114,11 +259,14 @@ echo "head: ${HEAD}"
 echo "range: ${BASE}..${HEAD}"
 echo "out_dir: ${OUT_DIR}"
 echo "target: ${TARGET_IDS:-<none>}"
+echo "trace: ${TRACE_JSONL}"
 echo
 
-git -C "${REPO_DIR}" diff --name-only "${BASE}..${HEAD}" >"${CHANGED_FILES}"
-git -C "${REPO_DIR}" diff "${BASE}..${HEAD}" >"${DIFF_PATCH}"
+stage 1 "collect evidence: changed_files/diff/commits"
+git -C "${REPO_DIR}" diff --name-only "${BASE}..${HEAD}" >"${CHANGED_FILES}" || true
+git -C "${REPO_DIR}" diff "${BASE}..${HEAD}" >"${DIFF_PATCH}" || true
 git -C "${REPO_DIR}" log --oneline --decorate "${BASE}..${HEAD}" >"${COMMITS_TXT}" || true
+trace 1 "evidence collected" "ok" "{\"changed_files\":\"${CHANGED_FILES}\",\"diff_patch\":\"${DIFF_PATCH}\"}"
 
 CHANGED_COUNT="$(wc -l <"${CHANGED_FILES}" | tr -d ' ')"
 COMMIT_COUNT="$(wc -l <"${COMMITS_TXT}" | tr -d ' ' || echo 0)"
@@ -143,8 +291,37 @@ COMMIT_COUNT="$(wc -l <"${COMMITS_TXT}" | tr -d ' ' || echo 0)"
 # Step 2: findings + review
 # -------------------------
 
-# Best-effort auto findings:
-# - R_fmt: gofmt drift on changed .go files (must-fix)
+stage 2 "generate findings.yaml + review.md + next_actions.md"
+
+sha1_of() {
+  # sha1_of <string>
+  if command -v shasum >/dev/null 2>&1; then
+    printf "%s" "$1" | shasum -a 1 | awk '{print $1}'
+    return 0
+  fi
+  if command -v sha1sum >/dev/null 2>&1; then
+    printf "%s" "$1" | sha1sum | awk '{print $1}'
+    return 0
+  fi
+  echo "UNKNOWN"
+}
+
+abs_path() {
+  # abs_path <path>
+  # Treat repo-relative paths as relative to $REPO_DIR.
+  local p="$1"
+  if [[ -z "${p}" ]]; then
+    echo ""
+    return 0
+  fi
+  if [[ "${p}" == /* ]]; then
+    echo "${p}"
+    return 0
+  fi
+  echo "${REPO_DIR}/${p}"
+}
+
+# Best-effort auto finding: gofmt drift on changed .go files (must-fix).
 CHANGED_GO_FILES="$(grep -E "\\.go$" "${CHANGED_FILES}" || true)"
 GOFMT_BAD=""
 if [[ -n "${CHANGED_GO_FILES}" ]] && command -v gofmt >/dev/null 2>&1; then
@@ -152,152 +329,299 @@ if [[ -n "${CHANGED_GO_FILES}" ]] && command -v gofmt >/dev/null 2>&1; then
   GOFMT_BAD="$(cd "${REPO_DIR}" && echo "${CHANGED_GO_FILES}" | xargs -n 50 gofmt -l 2>/dev/null || true)"
 fi
 
-ssot_review_open_ids() {
-  # Extract review.open from SSOT_V2 if present: `open: [R1, R2]` -> `R1,R2`
-  awk '
-    /<!-- NAVIGATOR:BEGIN SSOT_V2 -->/ {in=1; next}
-    /<!-- NAVIGATOR:END SSOT_V2 -->/ {in=0}
-    in && /^review:\s*$/ {rev=1; next}
-    in && rev && /^[A-Za-z0-9_]+:\s*$/ {rev=0}
-    in && rev && /^  open:\s*/ {print; exit}
-  ' "${SSOT_FILE}" | sed -E 's/.*\\[([^\\]]*)\\].*/\\1/; s/[[:space:]]//g' || true
+csv_to_ids() {
+  # Normalize items to `R<number>` tokens (best-effort) to keep incremental workflow stable.
+  echo "$1" | tr ',' '\n' | sed 's/[[:space:]]//g' | awk '
+    match($0, /R[0-9]+/) { print substr($0, RSTART, RLENGTH) }
+  ' | sed '/^$/d'
 }
 
-contains_id() {
-  local hay="$1"
-  local needle="$2"
-  [[ ",${hay}," == *",${needle},"* ]]
-}
-
-OPEN_IDS_CSV=""
-case "${MODE}" in
-  first)
-    OPEN_IDS_CSV="R_manual"
-    ;;
-  incr)
-    OPEN_IDS_CSV="$(ssot_review_open_ids)"
-    if [[ -z "${OPEN_IDS_CSV}" ]]; then
-      OPEN_IDS_CSV="R_manual"
+max_r_num_from_ids() {
+  local max=0
+  local id
+  for id in "$@"; do
+    if [[ "${id}" =~ ^R([0-9]+)$ ]]; then
+      n="${BASH_REMATCH[1]}"
+      if (( n > max )); then max="${n}"; fi
     fi
-    ;;
+  done
+  echo "${max}"
+}
+
+prev_finding_field() {
+  # prev_finding_field <file> <id> <key>
+  local f="$1"
+  local id="$2"
+  local key="$3"
+  [[ -f "${f}" ]] || return 0
+  awk -v id="${id}" -v k="${key}" '
+    $0 ~ "^  - id: "id"$" {in=1; next}
+    in==1 && $0 ~ "^  - id: " && $0 !~ "^  - id: "id"$" {exit}
+    in==1 && $0 ~ "^    "k":" {
+      sub("^    "k":[[:space:]]*", "", $0)
+      gsub(/"/, "", $0)
+      print $0
+      exit
+    }
+  ' "${f}" 2>/dev/null || true
+}
+
+prev_finding_list() {
+  # prev_finding_list <file> <id> <key>  (prints each list item on its own line)
+  local f="$1"
+  local id="$2"
+  local key="$3"
+  [[ -f "${f}" ]] || return 0
+  awk -v id="${id}" -v k="${key}" '
+    $0 ~ "^  - id: "id"$" {in=1; next}
+    in==1 && $0 ~ "^  - id: " && $0 !~ "^  - id: "id"$" {exit}
+    in==1 && $0 ~ "^    "k":\\s*$" {inlist=1; next}
+    in==1 && inlist==1 && $0 ~ "^    [A-Za-z0-9_]+:" {exit}
+    in==1 && inlist==1 && $0 ~ "^      - " {
+      sub("^      -[[:space:]]*", "", $0)
+      gsub(/"/, "", $0)
+      print $0
+    }
+  ' "${f}" 2>/dev/null || true
+}
+
+first_changed="$(sed -n '1p' "${CHANGED_FILES}" | tr -d '\r' || true)"
+changed_loc="${first_changed:-<none>}"
+if [[ "${CHANGED_COUNT}" != "0" && "${CHANGED_COUNT}" != "1" && -n "${first_changed}" ]]; then
+  changed_loc="${first_changed} (+$((CHANGED_COUNT-1)) more)"
+fi
+
+# Incremental enforcement: default only process SSOT.review.open.
+PROCESS_IDS_CSV=""
+case "${MODE}" in
+  first) PROCESS_IDS_CSV="" ;;
+  incr) PROCESS_IDS_CSV="${SSOT_REVIEW_OPEN_CSV}" ;;
   targeted)
     if [[ -z "${TARGET_IDS}" ]]; then
       echo "ERROR: --mode targeted requires --target R1,R2,..." >&2
-      exit 2
+      FINAL_RC=2
+      print_summary
+      exit "${FINAL_RC}"
     fi
-    OPEN_IDS_CSV="${TARGET_IDS}"
+    PROCESS_IDS_CSV="${TARGET_IDS}"
     ;;
-  *)
-    echo "ERROR: unknown mode: ${MODE}" >&2
-    exit 2
-    ;;
+  *) echo "ERROR: unknown mode: ${MODE}" >&2; exit 2 ;;
 esac
 
-# If gofmt issues exist in current diff, ensure R_fmt is included.
-if [[ -n "${GOFMT_BAD}" ]] && ! contains_id "${OPEN_IDS_CSV}" "R_fmt"; then
-  if [[ -z "${OPEN_IDS_CSV}" ]]; then
-    OPEN_IDS_CSV="R_fmt"
+# Determine whether new areas are touched since last review (file-level heuristic).
+TOUCHED_NEW_FILES=""
+TOUCHED_NEW_FILES_COUNT="0"
+ALLOW_NEW_FINDINGS="1"
+if [[ "${MODE}" == "incr" || "${MODE}" == "targeted" ]]; then
+  ALLOW_NEW_FINDINGS="0"
+  prev_art_dir_abs="$(abs_path "${SSOT_REVIEW_LAST_ART_DIR}")"
+  prev_changed="${prev_art_dir_abs}/changed_files.txt"
+  if [[ -f "${prev_changed}" ]]; then
+    tmp_prev="$(mktemp)"; tmp_curr="$(mktemp)"; tmp_new="$(mktemp)"
+    sort -u "${prev_changed}" >"${tmp_prev}" || true
+    sort -u "${CHANGED_FILES}" >"${tmp_curr}" || true
+    comm -13 "${tmp_prev}" "${tmp_curr}" >"${tmp_new}" || true
+    TOUCHED_NEW_FILES_COUNT="$(wc -l <"${tmp_new}" | tr -d ' ')"
+    TOUCHED_NEW_FILES="$(sed -n '1,20p' "${tmp_new}" | paste -sd ',' -)"
+    rm -f "${tmp_prev}" "${tmp_curr}" "${tmp_new}"
+    if [[ "${TOUCHED_NEW_FILES_COUNT}" != "0" ]]; then
+      ALLOW_NEW_FINDINGS="1"
+    fi
   else
-    OPEN_IDS_CSV="${OPEN_IDS_CSV},R_fmt"
+    # Enforce: without baseline evidence, do not add new findings automatically.
+    TOUCHED_NEW_FILES_COUNT="0"
+    TOUCHED_NEW_FILES="(missing baseline changed_files.txt under last_run.artifacts_dir)"
   fi
 fi
 
+prev_findings_abs="$(abs_path "${SSOT_REVIEW_LAST_FINDINGS_YAML}")"
+
+# Build findings.yaml. In incremental/targeted mode, we only carry forward the open IDs by default.
 {
   echo "baseline: \"${BASE}\""
   echo "head: \"${HEAD}\""
+  echo "range: \"${BASE}..${HEAD}\""
   echo "mode: \"${MODE}\""
   echo "findings:"
-  IFS=',' read -r -a OPEN_IDS_ARR <<<"${OPEN_IDS_CSV}"
-  for rid in "${OPEN_IDS_ARR[@]}"; do
-    [[ -z "${rid}" ]] && continue
-    case "${rid}" in
-      R_fmt)
-        if [[ -n "${GOFMT_BAD}" ]]; then
-          cat <<EOF
-  - id: R_fmt
-    must_fix: true
-    type: "Style"
-    impact: "DeveloperExperience"
-    scope: "formatting"
-    likelihood: "High"
-    location: "$(echo "${GOFMT_BAD}" | head -n 1)"
-    title: "Changed Go files are not gofmt'ed"
-    advice: "Run gofmt on the listed files (do not change semantics)."
-    verify_min:
-      - "gofmt -l <files> (expect empty)"
-    verify_opt: []
-    cleanup: []
-    status: open
-EOF
+
+  included_ids=()
+  if [[ -n "${PROCESS_IDS_CSV}" ]]; then
+    while IFS= read -r rid; do
+      [[ -z "${rid}" ]] && continue
+
+      # Load previous fields (best-effort). Fill defaults if missing.
+      prev_status="$(prev_finding_field "${prev_findings_abs}" "${rid}" "status")"
+      prev_type="$(prev_finding_field "${prev_findings_abs}" "${rid}" "type")"
+      prev_must_fix="$(prev_finding_field "${prev_findings_abs}" "${rid}" "must_fix")"
+      prev_impact="$(prev_finding_field "${prev_findings_abs}" "${rid}" "impact")"
+      prev_scope="$(prev_finding_field "${prev_findings_abs}" "${rid}" "scope")"
+      prev_likelihood="$(prev_finding_field "${prev_findings_abs}" "${rid}" "likelihood")"
+      prev_location="$(prev_finding_field "${prev_findings_abs}" "${rid}" "location")"
+      prev_title="$(prev_finding_field "${prev_findings_abs}" "${rid}" "title")"
+      prev_advice="$(prev_finding_field "${prev_findings_abs}" "${rid}" "advice")"
+      prev_fp="$(prev_finding_field "${prev_findings_abs}" "${rid}" "fingerprint")"
+
+      st="${prev_status:-open}"
+      typ="${prev_type:-Risk}"
+      must_fix="${prev_must_fix:-true}"
+      impact="${prev_impact:-Compatibility}"
+      scope="${prev_scope:-local}"
+      likelihood="${prev_likelihood:-Med}"
+      location="${prev_location:-${changed_loc}}"
+      title="${prev_title:-TODO}"
+      advice="${prev_advice:-TODO}"
+      fp="${prev_fp}"
+      if [[ -z "${fp}" || "${fp}" == "UNKNOWN" ]]; then
+        fp="$(sha1_of "${typ}|${location}|${title}")"
+      fi
+
+      # Normalize status to allowed set: open|fixed|partially_fixed.
+      case "${st}" in
+        open|fixed|partially_fixed) ;;
+        closed) st="fixed" ;;
+        partial) st="partially_fixed" ;;
+        *) st="open" ;;
+      esac
+
+      # Targeted status verification (best-effort):
+      # - If it looks like a gofmt drift finding, we can auto-verify it.
+      if [[ "${typ}" == "Style" ]] && echo "${title}" | grep -q "gofmt" 2>/dev/null; then
+        if [[ -z "${GOFMT_BAD}" ]]; then
+          st="fixed"
         else
-          cat <<'EOF'
-  - id: R_fmt
-    must_fix: true
-    type: "Style"
-    impact: "DeveloperExperience"
-    scope: "formatting"
-    likelihood: "High"
-    location: "(no gofmt drift detected)"
-    title: "gofmt drift fixed"
-    advice: "N/A"
-    verify_min:
-      - "gofmt -l <files> (expect empty)"
-    verify_opt: []
-    cleanup: []
-    status: fixed
-EOF
+          st="open"
+          location="${GOFMT_BAD}"
         fi
-        ;;
-      R_manual)
-        cat <<'EOF'
-  - id: R_manual
-    must_fix: true
-    type: "Risk"
-    impact: "Correctness"
-    scope: "TopRU-path"
-    likelihood: "Med"
-    location: "TODO: fill from diff review"
-    title: "Manual strict review required for TopRU changes"
-    advice: "Review key correctness/concurrency/perf/compat aspects; add/adjust tests as needed."
-    verify_min:
-      - "bash ai/projects/topru-ai/verify/e_integ_smoke.sh (log-based smoke)"
-    verify_opt:
-      - "bash ai/projects/topru-ai/verify/e_perf_sanity.sh"
-      - "bash ai/projects/topru-ai/verify/e_compat_matrix.sh"
-    cleanup: []
-    status: open
-EOF
-        ;;
-      *)
-        cat <<EOF
-  - id: ${rid}
-    must_fix: true
-    type: "TODO"
-    impact: "TODO"
-    scope: "TODO"
-    likelihood: "TODO"
-    location: "TODO"
-    title: "TODO: fill finding ${rid}"
-    advice: "TODO"
-    verify_min: []
-    verify_opt: []
-    cleanup: []
-    status: open
-EOF
-        ;;
-    esac
+      fi
+
+      echo "  - id: ${rid}"
+      echo "    fingerprint: \"${fp}\""
+      echo "    status: ${st}"
+      echo "    type: \"${typ}\""
+      echo "    must_fix: ${must_fix}"
+      echo "    impact: \"${impact}\""
+      echo "    scope: \"${scope}\""
+      echo "    likelihood: \"${likelihood}\""
+      echo "    location: \"${location}\""
+      echo "    title: \"${title}\""
+      echo "    advice: \"${advice}\""
+      vmin_lines="$(prev_finding_list "${prev_findings_abs}" "${rid}" "verify_min" || true)"
+      if [[ -n "${vmin_lines}" ]]; then
+        echo "    verify_min:"
+        echo "${vmin_lines}" | sed 's/^/      - "/; s/$/"/'
+      else
+        echo "    verify_min: []"
+      fi
+
+      vopt_lines="$(prev_finding_list "${prev_findings_abs}" "${rid}" "verify_opt" || true)"
+      if [[ -n "${vopt_lines}" ]]; then
+        echo "    verify_opt:"
+        echo "${vopt_lines}" | sed 's/^/      - "/; s/$/"/'
+      else
+        echo "    verify_opt: []"
+      fi
+
+      cln_lines="$(prev_finding_list "${prev_findings_abs}" "${rid}" "cleanup" || true)"
+      if [[ -n "${cln_lines}" ]]; then
+        echo "    cleanup:"
+        echo "${cln_lines}" | sed 's/^/      - "/; s/$/"/'
+      else
+        echo "    cleanup: []"
+      fi
+      included_ids+=("${rid}")
+    done < <(csv_to_ids "${PROCESS_IDS_CSV}")
+  fi
+
+  # New findings (allowed in first, or in incr only if touched new files).
+  # Heuristic: gofmt drift on changed Go files.
+  has_gofmt="0"
+  for x in "${included_ids[@]-}"; do
+    t="$(prev_finding_field "${prev_findings_abs}" "${x}" "type")"
+    ttl="$(prev_finding_field "${prev_findings_abs}" "${x}" "title")"
+    if [[ "${t}" == "Style" ]] && echo "${ttl}" | grep -q "gofmt" 2>/dev/null; then
+      has_gofmt="1"
+      break
+    fi
   done
+
+  if [[ "${MODE}" == "first" ]]; then
+    ALLOW_NEW_FINDINGS="1"
+  fi
+  if [[ "${ALLOW_NEW_FINDINGS}" == "1" && -n "${GOFMT_BAD}" && "${has_gofmt}" != "1" ]]; then
+    maxn="$(max_r_num_from_ids "${included_ids[@]-}")"
+    nid="R$((maxn+1))"
+    fp="$(sha1_of "Style|${GOFMT_BAD}|Changed Go files are not gofmt'ed")"
+    echo "  - id: ${nid}"
+    echo "    fingerprint: \"${fp}\""
+    echo "    status: open"
+    echo "    type: \"Style\""
+    echo "    must_fix: true"
+    echo "    impact: \"Noise\""
+    echo "    scope: \"local\""
+    echo "    likelihood: \"High\""
+    echo "    location: \"${GOFMT_BAD}\""
+    echo "    title: \"Changed Go files are not gofmt'ed\""
+    echo "    advice: \"Run gofmt on the listed files (do not change semantics).\""
+    echo "    verify_min:"
+    echo "      - \"gofmt -l <files> (expect empty)\""
+    echo "    verify_opt: []"
+    echo "    cleanup: []"
+    included_ids+=("${nid}")
+  fi
 } >"${FINDINGS_YAML}"
 
-# Human-readable review.md (Chinese) that mirrors findings.yaml.
+all_ids_csv="$(awk '/^  - id: /{print $3}' "${FINDINGS_YAML}" | paste -sd ',' - 2>/dev/null || true)"
+new_ids_csv=""
+if [[ -n "${all_ids_csv}" ]]; then
+  while IFS= read -r id; do
+    [[ -z "${id}" ]] && continue
+    if [[ -z "${PROCESS_IDS_CSV}" ]]; then
+      # first review: all findings are "new"
+      if [[ -z "${new_ids_csv}" ]]; then new_ids_csv="${id}"; else new_ids_csv="${new_ids_csv},${id}"; fi
+      continue
+    fi
+    if [[ ",${PROCESS_IDS_CSV}," != *",${id},"* ]]; then
+      if [[ -z "${new_ids_csv}" ]]; then new_ids_csv="${id}"; else new_ids_csv="${new_ids_csv},${id}"; fi
+    fi
+  done < <(echo "${all_ids_csv}" | tr ',' '\n')
+fi
+
+new_reason="(none)"
+if [[ "${MODE}" == "incr" && -n "${new_ids_csv}" ]]; then
+  if [[ "${TOUCHED_NEW_FILES_COUNT}" != "0" ]]; then
+    new_reason="touched new files since baseline: [${TOUCHED_NEW_FILES}]"
+  else
+    new_reason="unexpected: new findings added but touched_new_files_count=0 (check enforcement logic)"
+  fi
+fi
+
 {
   echo "# STRICT_REVIEW — TopRU (auto-generated)"
   echo
   echo "## Snapshot"
   echo "- mode: ${MODE}"
+  echo "- base: ${BASE}"
+  echo "- head: ${HEAD}"
   echo "- range: ${BASE}..${HEAD}"
   echo "- changed_files_count: ${CHANGED_COUNT}"
   echo "- artifacts_dir: ${OUT_DIR}"
+  echo "- trace: ${TRACE_JSONL}"
+  echo
+  if [[ "${MODE}" == "incr" ]]; then
+    echo "## Incremental Review Summary"
+    echo "- baseline_commit: ${SSOT_REVIEW_BASELINE_COMMIT:-<none>}"
+    echo "- new_range: ${SSOT_REVIEW_BASELINE_COMMIT:-<none>}..${HEAD}"
+    echo "- previous_open: [${SSOT_REVIEW_OPEN_CSV}]"
+    echo "- previous_fixed: [${SSOT_REVIEW_FIXED_CSV}]"
+    echo "- previous_partially_fixed: [${SSOT_REVIEW_PARTIAL_CSV}]"
+    echo "- enforce: only process SSOT.review.open unless touched new files"
+    echo "- processed_open: [${PROCESS_IDS_CSV}]"
+    echo "- touched_new_files_count: ${TOUCHED_NEW_FILES_COUNT}"
+    echo "- touched_new_files: [${TOUCHED_NEW_FILES}]"
+    echo "- new_findings: [${new_ids_csv}]"
+    echo "- new_reason: ${new_reason}"
+    echo
+  fi
   echo
   echo "## Evidence Collected"
   echo "- changed_files: ${CHANGED_FILES}"
@@ -305,55 +629,62 @@ EOF
   echo "- commits: ${COMMITS_TXT}"
   echo "- summary: ${SUMMARY_TXT}"
   echo
-  echo "## Findings (machine source: findings.yaml)"
+  echo "## Findings"
   echo
-  echo "说明：本文件是严格 review 的中文输出；机读来源为 findings.yaml。"
-  echo
-  IFS=',' read -r -a REVIEW_IDS_ARR <<<"${OPEN_IDS_CSV}"
-  for rid in "${REVIEW_IDS_ARR[@]}"; do
-    [[ -z "${rid}" ]] && continue
-    echo "### ${rid}"
-    case "${rid}" in
-      R_fmt)
-        if [[ -n "${GOFMT_BAD}" ]]; then
-          echo "- 类型: Style"
-          echo "- Must fix: Yes"
-          echo "- 影响面: DeveloperExperience"
-          echo "- 范围: formatting"
-          echo "- 概率: High"
-          echo "- 位置: ${GOFMT_BAD}"
-          echo "- 建议: 对以上文件执行 gofmt（不改语义）。"
-          echo "- 最小验证: gofmt -l <files> (expect empty)"
-          echo "- 推荐验证: (none)"
-          echo "- 清理: (none)"
-        else
-          echo "- 状态: fixed（本次 diff 未检测到 gofmt drift）"
-        fi
-        ;;
-      R_manual)
-        echo "- 类型: Risk"
-        echo "- Must fix: Yes"
-        echo "- 影响面: Correctness"
-        echo "- 范围: TopRU-path"
-        echo "- 概率: Med"
-        echo "- 位置: TODO（请从 diff.patch 中补充具体 hunk/file）"
-        echo "- 建议: 做一次严格 review：并发/边界条件/兼容性/性能；必要时补 UT/集成证据。"
-        echo "- 最小验证:"
-        echo "  - bash ai/projects/topru-ai/verify/e_integ_smoke.sh"
-        echo "- 推荐验证:"
-        echo "  - bash ai/projects/topru-ai/verify/e_perf_sanity.sh"
-        echo "  - bash ai/projects/topru-ai/verify/e_compat_matrix.sh"
-        echo "- 清理: (none)"
-        ;;
-      *)
-        echo "- TODO: fill ${rid} details"
-        ;;
-    esac
-    echo
-  done
+  awk '
+    function q(s) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
+    function stripq(s) { gsub(/^"/, "", s); gsub(/"$/, "", s); return s }
+    function join_cmd(x, cmd) {
+      cmd=stripq(cmd)
+      if (cmd == "") return x
+      if (x == "") return "`" cmd "`"
+      return x "; `" cmd "`"
+    }
+    function flush() {
+      if (id == "") return
+      idx++
+      must=(must_fix=="true"?"Yes":"No")
+      min=(vmin==""?"(none)":vmin)
+      opt=(vopt==""?"(none)":vopt)
+      cln=(cleanup==""?"(none)":cleanup)
+      print "- [" idx "] (" id ") **类型**: " type "  **Must fix**: " must
+      print "  - **影响面**: " impact
+      print "  - **范围**: " scope
+      print "  - **概率**: " likelihood
+      print "  - **位置**: `" location "`"
+      print "  - **问题**: " title
+      print "  - **建议动作**: " advice
+      print "  - **验证（最小，必须）**: " min
+      print "  - **验证（推荐，可选）**: " opt
+      print "  - **清理**: " cln
+      print ""
+      id=""; status=""; type=""; must_fix=""; impact=""; scope=""; likelihood=""; location=""; title=""; advice=""
+      vmin=""; vopt=""; cleanup=""; sec=""
+    }
 
-  echo "## Notes"
-  echo "- TODO: 将 R_manual 拆分为更细的 R#（带明确 location/verify_min）。"
+    /^  - id: / { flush(); id=$3; next }
+    /^    status: / { status=$2; next }
+    /^    type: / { sub(/^    type: /, "", $0); type=stripq(q($0)); next }
+    /^    must_fix: / { must_fix=$2; next }
+    /^    impact: / { sub(/^    impact: /, "", $0); impact=stripq(q($0)); next }
+    /^    scope: / { sub(/^    scope: /, "", $0); scope=stripq(q($0)); next }
+    /^    likelihood: / { sub(/^    likelihood: /, "", $0); likelihood=stripq(q($0)); next }
+    /^    location: / { sub(/^    location: /, "", $0); location=stripq(q($0)); next }
+    /^    title: / { sub(/^    title: /, "", $0); title=stripq(q($0)); next }
+    /^    advice: / { sub(/^    advice: /, "", $0); advice=stripq(q($0)); next }
+    /^    verify_min:/ { sec="vmin"; next }
+    /^    verify_opt:/ { sec="vopt"; next }
+    /^    cleanup:/ { sec="cleanup"; next }
+    /^    [A-Za-z0-9_]+:/ { sec=""; next }
+    /^      - / {
+      sub(/^      - /, "", $0)
+      if (sec=="vmin") vmin=join_cmd(vmin, $0)
+      else if (sec=="vopt") vopt=join_cmd(vopt, $0)
+      else if (sec=="cleanup") cleanup=join_cmd(cleanup, $0)
+      next
+    }
+    END { flush() }
+  ' "${FINDINGS_YAML}"
 } >"${REVIEW_MD}"
 
 # next_actions.md (must-fix first)
@@ -364,16 +695,66 @@ EOF
   echo
   echo "1) Fix open must-fix findings first:"
   awk '
-    /^\s*-\s+id:\s*/ {id=$3}
-    /^\s*must_fix:\s*true\s*$/ {must=1}
-    /^\s*status:\s*open\s*$/ { if (id != "" && must == 1) { print "   - " id }; id=""; must=0 }
-  ' "${FINDINGS_YAML}" | sed -n '1,10p'
+    /^  - id: /{id=$3}
+    /^    must_fix: true$/{must=1}
+    /^    status: open$/{ if (id != "" && must == 1) { print "   - " id }; id=""; must=0 }
+  ' "${FINDINGS_YAML}" | sed -n '1,50p'
   echo
   echo "2) Re-run (incremental re-review):"
   echo "   bash ai/projects/topru-ai/verify/strict_review_fix_oneclick.sh --base ${BASE} --head ${HEAD} --mode incr"
 } >"${NEXT_ACTIONS_MD}"
 
+trace 2 "findings+docs written" "ok" "{\"findings_yaml\":\"${FINDINGS_YAML}\",\"review_md\":\"${REVIEW_MD}\",\"next_actions\":\"${NEXT_ACTIONS_MD}\"}"
+
+# Findings stats (UX): print to stdout and persist in summary.txt.
+list_ids_by_status() {
+  # list_ids_by_status <status> (prints IDs, one per line)
+  local st="$1"
+  awk -v st="${st}" '
+    /^  - id: /{id=$3}
+    /^    status: /{
+      if (id != "" && $2 == st) print id
+      id=""
+    }
+  ' "${FINDINGS_YAML}" 2>/dev/null || true
+}
+
+findings_total="$(awk '/^  - id: /{c++} END{print c+0}' "${FINDINGS_YAML}" 2>/dev/null || echo 0)"
+open_ids="$(list_ids_by_status open)"
+fixed_ids="$(list_ids_by_status fixed)"
+partial_ids="$(list_ids_by_status partially_fixed)"
+
+open_count="$(echo "${open_ids}" | sed '/^$/d' | wc -l | tr -d ' ')"
+fixed_count="$(echo "${fixed_ids}" | sed '/^$/d' | wc -l | tr -d ' ')"
+partial_count="$(echo "${partial_ids}" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+open_list="$(echo "${open_ids}" | sed '/^$/d' | head -n 10 | paste -sd ',' - 2>/dev/null || true)"
+fixed_list="$(echo "${fixed_ids}" | sed '/^$/d' | head -n 10 | paste -sd ',' - 2>/dev/null || true)"
+partial_list="$(echo "${partial_ids}" | sed '/^$/d' | head -n 10 | paste -sd ',' - 2>/dev/null || true)"
+
+result="FAIL"
+if [[ "${open_count}" == "0" ]]; then
+  result="PASS"
+fi
+
+{
+  echo
+  echo "FINDINGS_STATS"
+  echo "findings_total=${findings_total}"
+  echo "open_count=${open_count} open=[${open_list}]"
+  echo "fixed_count=${fixed_count} fixed=[${fixed_list}]"
+  echo "partially_fixed_count=${partial_count} partially_fixed=[${partial_list}]"
+  echo "result=${result}"
+  echo "review_md=${REVIEW_MD}"
+  echo "findings_yaml=${FINDINGS_YAML}"
+} | tee -a "${SUMMARY_TXT}"
+
+if [[ "${BASE}" == "${HEAD}" && "${CHANGED_COUNT}" == "0" && "${open_count}" == "0" ]]; then
+  echo "no diff and no open findings; skipping review work" | tee -a "${SUMMARY_TXT}"
+fi
+
 # review run manifest (commit-bound)
+stage 3 "write manifest.json"
 cat >"${MANIFEST_JSON}" <<EOF
 {
   "run_id": "${RUN_ID}",
@@ -393,6 +774,7 @@ cat >"${MANIFEST_JSON}" <<EOF
     "review.md",
     "findings.yaml",
     "next_actions.md",
+    "trace.jsonl",
     "manifest.json"
   ]
 }
@@ -402,17 +784,41 @@ EOF
 # Step 3: patch SSOT review
 # -------------------------
 if [[ "${PATCH_SSOT}" == "1" ]]; then
+  stage 4 "patch SSOT review block"
+  ART_DIR_REL="ai/projects/topru-ai/artifacts/review/${RUN_ID}"
+  set +e
   python3 "${PROJECT_DIR}/verify/ssot_patch_review.py" \
+    --op ensure \
     --ssot "${SSOT_FILE}" \
     --base "${BASE}" \
     --head "${HEAD}" \
     --run-range "${BASE}..${HEAD}" \
-    --findings-yaml "${FINDINGS_YAML}" \
-    --review-md "ai/projects/topru-ai/artifacts/review/${RUN_ID}/review.md" \
-    --run-log "ai/projects/topru-ai/artifacts/review/${RUN_ID}/run.log" \
-    --changed-files "ai/projects/topru-ai/artifacts/review/${RUN_ID}/changed_files.txt" \
-    --diff-patch "ai/projects/topru-ai/artifacts/review/${RUN_ID}/diff.patch" \
-    --mode "${MODE}"
+    --artifacts-dir "${ART_DIR_REL}" \
+    --review-md "${ART_DIR_REL}/review.md" \
+    --findings-yaml "${ART_DIR_REL}/findings.yaml" \
+    --next-actions "${ART_DIR_REL}/next_actions.md"
+  rc_ensure=$?
+  python3 "${PROJECT_DIR}/verify/ssot_patch_review.py" \
+    --op update \
+    --ssot "${SSOT_FILE}" \
+    --base "${BASE}" \
+    --head "${HEAD}" \
+    --run-range "${BASE}..${HEAD}" \
+    --artifacts-dir "${ART_DIR_REL}" \
+    --review-md "${ART_DIR_REL}/review.md" \
+    --findings-yaml "${ART_DIR_REL}/findings.yaml" \
+    --next-actions "${ART_DIR_REL}/next_actions.md"
+  rc_update=$?
+  set -e
+
+  if [[ "${rc_ensure}" == "0" && "${rc_update}" == "0" ]]; then
+    SSOT_PATCH_RESULT="ok"
+    trace 4 "ssot patched" "ok" "{\"op\":\"ensure+update\",\"ssot\":\"${SSOT_FILE}\"}"
+  else
+    SSOT_PATCH_RESULT="fail(ensure=${rc_ensure},update=${rc_update})"
+    trace 4 "ssot patch failed" "fail" "{\"ensure\":${rc_ensure},\"update\":${rc_update}}"
+    FINAL_RC=3
+  fi
 else
   echo "SSOT patch disabled (--no-patch-ssot)"
 fi
@@ -422,19 +828,26 @@ fi
 # -------------------------
 echo
 echo "=== PR-ready check (best-effort) ==="
-AUDIT_FILE="${PROJECT_DIR}/artifacts/audit/last_audit.txt"
+stage 5 "audit SSOT pr_ready + compute PR_READY"
+AUDIT_FILE="${OUT_DIR}/audit.txt"
 if [[ -x "${PROJECT_DIR}/verify/audit_ssot.sh" ]]; then
-  bash "${PROJECT_DIR}/verify/audit_ssot.sh" --project "ai/projects/topru-ai" --track "resource-observability-topru" --protocol-root "ai/ai-change-gates" || true
+  AUDIT_OUT_FILE="${AUDIT_FILE}" bash "${PROJECT_DIR}/verify/audit_ssot.sh" \
+    --project "ai/projects/topru-ai" \
+    --track "resource-observability-topru" \
+    --protocol-root "ai/ai-change-gates" || true
 else
   echo "NOTE: audit_ssot.sh not found/executable; skipped"
 fi
 
-OPEN_COUNT="$(grep -E '^[[:space:]]*status:[[:space:]]*open[[:space:]]*$' "${FINDINGS_YAML}" | wc -l | tr -d ' ')"
+OPEN_COUNT="$( (grep -E '^[[:space:]]*status:[[:space:]]*open[[:space:]]*$' "${FINDINGS_YAML}" || true) | wc -l | tr -d ' ' )"
 if [[ "${OPEN_COUNT}" == "0" ]]; then
   echo "REVIEW_OPEN=0"
 else
   echo "REVIEW_OPEN=${OPEN_COUNT}"
 fi
+
+# Also print PASS/FAIL per Stage2 rule (PASS when open is empty).
+echo "RESULT=${result}"
 
 AUDIT_STATUS="unknown"
 if [[ -f "${AUDIT_FILE}" ]]; then
@@ -449,7 +862,19 @@ fi
 echo "PR_READY=${PR_READY}"
 echo "Artifacts: ${OUT_DIR}"
 
-if [[ "${PR_READY}" == "true" ]]; then
-  exit 0
+trace 5 "pr_ready computed" "ok" "{\"review_open\":${OPEN_COUNT},\"audit_pr_ready\":\"${AUDIT_STATUS}\",\"pr_ready\":\"${PR_READY}\"}"
+
+# Exit code policy:
+# - 0: script ran + SSOT patch ok + PR_READY=true
+# - 3: script ran + SSOT patch ok but PR_READY=false (or patch failed)
+if [[ "${PR_READY}" == "true" && "${SSOT_PATCH_RESULT}" == "ok" ]]; then
+  FINAL_RC=0
+else
+  FINAL_RC="${FINAL_RC:-3}"
+  if [[ "${FINAL_RC}" == "0" ]]; then
+    FINAL_RC=3
+  fi
 fi
-exit 3
+
+print_summary
+exit "${FINAL_RC}"

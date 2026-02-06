@@ -12,7 +12,10 @@ on_err() {
   echo "[$(ts)][oneclick][ERR] exit_code=$ec line=${BASH_LINENO[0]} cmd=${BASH_COMMAND}" >&2
   exit $ec
 }
-trap on_err ERR
+# Allow callers (e.g. run_pr_ready_oneclick.sh) to manage error handling for rc capture.
+if [[ "${ONECLICK_DISABLE_ERR_TRAP:-0}" != "1" ]]; then
+  trap on_err ERR
+fi
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
@@ -35,6 +38,52 @@ env_string() {
 
 patch_id_of_head() {
   (git show HEAD | git patch-id --stable | awk '{print $1}') 2>/dev/null || echo "UNKNOWN"
+}
+
+init_trace() {
+  # init_trace <art_dir_optional>
+  #
+  # Default TRACE path is: ${ART_DIR}/trace.jsonl
+  # Behavior:
+  # - sets TRACE if unset
+  # - truncates TRACE (best-effort)
+  local art_dir="${1:-${ART_DIR:-}}"
+  if [[ -z "${art_dir}" ]]; then
+    return 0
+  fi
+  if [[ -z "${TRACE:-}" ]]; then
+    TRACE="${art_dir}/trace.jsonl"
+  fi
+  mkdir -p "${art_dir}" >/dev/null 2>&1 || true
+  : > "${TRACE}" 2>/dev/null || true
+}
+
+trace() {
+  # trace <stage> <msg> <status> <json_details_raw_or_empty>
+  local st="$1"
+  local msg="$2"
+  local status="$3"
+  local details="${4:-}"
+  local t
+
+  if [[ -z "${TRACE:-}" ]]; then
+    return 0
+  fi
+
+  t="$(now_iso)"
+  # details should be JSON object string like {"k":"v"} or empty
+  if [[ -z "${details}" ]]; then
+    details="{}"
+  fi
+  # msg is best kept short; avoid unescaped quotes
+  msg="${msg//\"/\' }"
+  echo "{\"time\":\"${t}\",\"stage\":\"${st}\",\"status\":\"${status}\",\"msg\":\"${msg}\",\"details\":${details}}" >> "${TRACE}" 2>/dev/null || true
+}
+
+stage() {
+  # stage <num> <message>
+  echo "[oneclick][stage $1] $2"
+  trace "$1" "$2" "ok" ""
 }
 
 kill_listen_port() {
@@ -129,4 +178,3 @@ ssot_patch_evidence() {
     --command "${cmd}" \
     --artifact "${artifact}"
 }
-

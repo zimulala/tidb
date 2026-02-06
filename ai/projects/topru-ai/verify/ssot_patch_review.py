@@ -2,7 +2,6 @@
 
 import argparse
 import datetime as _dt
-import os
 import re
 import sys
 
@@ -72,11 +71,12 @@ def _parse_findings_ids(findings_yaml_path: str):
 def _make_review_block(
     *,
     baseline_commit: str,
-    base: str,
-    head: str,
     run_time: str,
     run_range: str,
-    artifacts: dict,
+    artifacts_dir: str,
+    review_md: str,
+    findings_yaml: str,
+    next_actions: str,
     open_ids,
     fixed_ids,
     partial_ids,
@@ -88,22 +88,21 @@ def _make_review_block(
     lines = []
     lines.append("review:")
     lines.append(f'  baseline_commit: "{baseline_commit}"')
-    lines.append(f"  base: \"{base}\"")
-    lines.append(f"  head: \"{head}\"")
     lines.append(f"  open: {fmt_list(open_ids)}")
     lines.append(f"  fixed: {fmt_list(fixed_ids)}")
     lines.append(f"  partially_fixed: {fmt_list(partial_ids)}")
     lines.append("  last_run:")
     lines.append(f'    time: "{run_time}"')
     lines.append(f'    range: "{run_range}"')
-    lines.append("    artifacts:")
-    for k, v in artifacts.items():
-        lines.append(f'      {k}: "{v}"')
+    lines.append(f'    artifacts_dir: "{artifacts_dir}"')
+    lines.append(f'    review_md: "{review_md}"')
+    lines.append(f'    findings_yaml: "{findings_yaml}"')
+    lines.append(f'    next_actions: "{next_actions}"')
     lines.append("")
     return "\n".join(lines)
 
 
-def _patch_ssot_block(ssot_text: str, review_block: str) -> str:
+def _patch_ssot_block(ssot_text: str, review_block: str, op: str) -> str:
     # Replace existing review: ... block if present, else insert before SSOT_END.
     lines = ssot_text.splitlines(keepends=True)
 
@@ -126,6 +125,8 @@ def _patch_ssot_block(ssot_text: str, review_block: str) -> str:
             break
 
     if review_start is None:
+        if op == "update":
+            raise RuntimeError("review block not found (op=update)")
         # Insert near the end, but before pr_ready if present.
         insert_at = len(ssot_lines)
         for i, l in enumerate(ssot_lines):
@@ -134,6 +135,10 @@ def _patch_ssot_block(ssot_text: str, review_block: str) -> str:
                 break
         new_ssot = ssot_lines[:insert_at] + [review_block] + ssot_lines[insert_at:]
         return "".join(before + new_ssot + after)
+
+    if op == "ensure":
+        # ensure == "insert if missing"; do not overwrite existing review block.
+        return ssot_text
 
     # Find end of review block (next top-level key).
     review_end = len(ssot_lines)
@@ -147,17 +152,16 @@ def _patch_ssot_block(ssot_text: str, review_block: str) -> str:
 
 
 def main(argv) -> int:
-    ap = argparse.ArgumentParser(description="Patch SSOT_V2 with review status + last_run artifacts")
+    ap = argparse.ArgumentParser(description="Patch SSOT_V2 with review status + last_run pointers")
     ap.add_argument("--ssot", required=True, help="Path to PROJECT_STATE.md")
+    ap.add_argument("--op", required=True, choices=["ensure", "update"], help="ensure inserts review if missing; update overwrites existing")
     ap.add_argument("--base", required=True)
     ap.add_argument("--head", required=True)
     ap.add_argument("--run-range", required=True, help="<base>..<head>")
     ap.add_argument("--findings-yaml", required=True)
     ap.add_argument("--review-md", required=True)
-    ap.add_argument("--run-log", required=True)
-    ap.add_argument("--changed-files", required=True)
-    ap.add_argument("--diff-patch", required=True)
-    ap.add_argument("--mode", required=True, choices=["first", "incr", "targeted"])
+    ap.add_argument("--next-actions", required=True)
+    ap.add_argument("--artifacts-dir", required=True)
     ap.add_argument("--baseline-commit", default=None, help="If unset, baseline_commit=head")
     args = ap.parse_args(argv)
 
@@ -165,39 +169,33 @@ def main(argv) -> int:
     baseline_commit = args.baseline_commit or args.head
     run_time = _iso_utc_now()
 
-    artifacts = {
-        "review_md": args.review_md,
-        "findings_yaml": args.findings_yaml,
-        "run_log": args.run_log,
-        "changed_files": args.changed_files,
-        "diff_patch": args.diff_patch,
-        "mode": args.mode,
-    }
-
     review_block = _make_review_block(
         baseline_commit=baseline_commit,
-        base=args.base,
-        head=args.head,
         run_time=run_time,
         run_range=args.run_range,
-        artifacts=artifacts,
+        artifacts_dir=args.artifacts_dir,
+        review_md=args.review_md,
+        findings_yaml=args.findings_yaml,
+        next_actions=args.next_actions,
         open_ids=open_ids,
         fixed_ids=fixed_ids,
         partial_ids=partial_ids,
     )
 
     doc = _read_text(args.ssot)
-    patched = _patch_ssot_block(doc, review_block)
+    patched = _patch_ssot_block(doc, review_block, args.op)
 
     if patched == doc:
+        if args.op == "ensure":
+            print(f"review block already exists; ensure is a no-op: {args.ssot}")
+            return 0
         print("no changes to SSOT (unexpected); refusing to overwrite", file=sys.stderr)
         return 4
 
     _write_text(args.ssot, patched)
-    print(f"patched SSOT review section: {args.ssot}")
+    print(f"patched SSOT review section ({args.op}): {args.ssot}")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-

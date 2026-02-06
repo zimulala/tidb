@@ -16,11 +16,27 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "${ROOT}" ]]; then
+  cd "${ROOT}"
+fi
+
 STATE_FILE="${PROJECT_ROOT}/PROJECT_STATE.md"
 TRACK_FILE="${PROTOCOL_ROOT}/tracks/${TRACK_ID}/TRACK.md"
 OUT_DIR="${PROJECT_ROOT}/artifacts/audit"
-OUT_FILE="${OUT_DIR}/last_audit.txt"
-mkdir -p "${OUT_DIR}"
+DEFAULT_OUT_FILE="${OUT_DIR}/last_audit.txt"
+OUT_FILE="${AUDIT_OUT_FILE:-${DEFAULT_OUT_FILE}}"
+
+# Avoid overwriting tracked artifacts by default.
+# If the default output is tracked, write to a run-specific file instead.
+if [[ -z "${AUDIT_OUT_FILE:-}" ]]; then
+  if git ls-files --error-unmatch "${DEFAULT_OUT_FILE}" >/dev/null 2>&1; then
+    RUN_ID="${AUDIT_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+    OUT_FILE="${OUT_DIR}/runs/${RUN_ID}/audit.txt"
+  fi
+fi
+
+mkdir -p "$(dirname "${OUT_FILE}")"
 
 if [[ ! -f "${STATE_FILE}" ]]; then
   echo "ERROR: ${STATE_FILE} not found" | tee "${OUT_FILE}"
@@ -171,4 +187,3 @@ awk -v nbf="${nbf}" '
 mv "${tmp}" "${STATE_FILE}"
 rm -f "${nbf}"
 echo "Patched pr_ready in SSOT: ${STATE_FILE}"
-

@@ -21,33 +21,9 @@ RUN_LOG="${ART_DIR}/run.log"
 SUB_LOG="${ART_DIR}/subscriber.log"
 MANIFEST="${ART_DIR}/manifest.json"
 TIDB_LOG_PATH="${TIDB_LOG_PATH:-$ROOT/tidb.log}"
-TRACE="${ART_DIR}/trace.jsonl"
-
-stage() {
-  # stage <num> <message>
-  echo "[oneclick][stage $1] $2"
-  trace "$1" "$2" "ok" ""
-}
-
-trace() {
-  # trace <stage> <msg> <status> <json_details_raw_or_empty>
-  local st="$1"
-  local msg="$2"
-  local status="$3"
-  local details="${4:-}"
-  local t
-  t="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  # details should be JSON object string like {"k":"v"} or empty
-  if [[ -z "${details}" ]]; then
-    details="{}"
-  fi
-  # msg is best kept short; avoid unescaped quotes
-  msg="${msg//\"/\' }"
-  echo "{\"time\":\"${t}\",\"stage\":\"${st}\",\"status\":\"${status}\",\"msg\":\"${msg}\",\"details\":${details}}" >> "${TRACE}"
-}
 
 mkdir -p "$ART_DIR"
-: > "${TRACE}"
+init_trace "$ART_DIR"
 
 TIDB_PID=""
 SUB_PID=""
