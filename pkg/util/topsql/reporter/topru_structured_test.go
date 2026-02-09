@@ -47,7 +47,7 @@ func TestTopRUReporter_MockDataSinkStructured(t *testing.T) {
 	tsr.RegisterPlan(planDigest, "point_get", false)
 
 	ts := uint64(1700000000)
-	tsr.ruCollecting.addBatch(ts, stmtstats.RUIncrementMap{
+	tsr.ruAggregator.addSecondBatch(ts, stmtstats.RUIncrementMap{
 		{
 			User:       "root",
 			SQLDigest:  stmtstats.BinaryDigest(sqlDigest),
@@ -59,8 +59,9 @@ func TestTopRUReporter_MockDataSinkStructured(t *testing.T) {
 		},
 	})
 
+	reportTs := alignToInterval(ts, ruReportWindowSeconds) + ruReportWindowSeconds
 	tsr.doReport(&ReportData{
-		RURecords: tsr.ruCollecting.take().getReportRecords(keyspace),
+		RURecords: tsr.ruAggregator.takeReportRecords(reportTs, 60, keyspace),
 		SQLMetas:  tsr.normalizedSQLMap.take().toProto(keyspace),
 		PlanMetas: tsr.normalizedPlanMap.take().toProto(
 			keyspace, tsr.decodePlan, tsr.compressPlan,

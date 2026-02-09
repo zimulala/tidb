@@ -106,9 +106,11 @@ func runTopRUCase(t *testing.T, cs caseSpec) {
 		}
 	}
 
-	tsr.ruCollecting.addBatch(1700000000, batch)
+	const sampleTs = uint64(1700000000)
+	tsr.ruAggregator.addSecondBatch(sampleTs, batch)
+	reportTs := alignToInterval(sampleTs, ruReportWindowSeconds) + ruReportWindowSeconds
 	tsr.doReport(&ReportData{
-		RURecords: tsr.ruCollecting.take().getReportRecords([]byte("topru-gen-keyspace")),
+		RURecords: tsr.ruAggregator.takeReportRecords(reportTs, 60, []byte("topru-gen-keyspace")),
 		SQLMetas:  tsr.normalizedSQLMap.take().toProto([]byte("topru-gen-keyspace")),
 		PlanMetas: tsr.normalizedPlanMap.take().toProto(
 			[]byte("topru-gen-keyspace"), tsr.decodePlan, tsr.compressPlan,

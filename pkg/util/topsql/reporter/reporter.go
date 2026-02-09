@@ -25,6 +25,7 @@ import (
 	reporter_metrics "github.com/pingcap/tidb/pkg/util/topsql/reporter/metrics"
 	topsqlstate "github.com/pingcap/tidb/pkg/util/topsql/state"
 	"github.com/pingcap/tidb/pkg/util/topsql/stmtstats"
+	"github.com/pingcap/tipb/go-tipb"
 	"github.com/wangjohn/quickselect"
 	"go.uber.org/zap"
 )
@@ -40,6 +41,10 @@ func effectiveReportIntervalSeconds() int64 {
 	// TopSQL cadence is independent from TopRU cadence.
 	// TopRU reporting should use its own ticker/interval path.
 	return topsqlstate.GlobalState.ReportIntervalSeconds.Load()
+}
+
+func effectiveRUGranularitySeconds() uint64 {
+	return uint64(topsqlstate.GetTopRUReportInterval())
 }
 
 // TopSQLReporter collects Top SQL metrics.
@@ -87,7 +92,7 @@ type RemoteTopSQLReporter struct {
 	collectStmtStatsChan    chan stmtstats.StatementStatsMap
 	collectRUIncrementsChan chan stmtstats.RUIncrementMap
 	collecting              *collecting
-	ruCollecting            *ruCollecting // Phase 2: RU data collection with Hybrid TopN
+	ruAggregator            *ruWindowAggregator // Online 15s RU aggregation (400->200->100 pipeline)
 	normalizedSQLMap        *normalizedSQLMap
 	normalizedPlanMap       *normalizedPlanMap
 	stmtStatsBuffer         map[uint64]stmtstats.StatementStatsMap // timestamp => stmtstats.StatementStatsMap
@@ -113,7 +118,7 @@ func NewRemoteTopSQLReporter(decodePlan planBinaryDecodeFunc, compressPlan planB
 		collectRUIncrementsChan:   make(chan stmtstats.RUIncrementMap, collectChanBufferSize),
 		reportCollectedDataChan:   make(chan collectedData, 1),
 		collecting:                newCollecting(),
-		ruCollecting:              newRUCollecting(),
+		ruAggregator:              newRUWindowAggregator(),
 		normalizedSQLMap:          newNormalizedSQLMap(),
 		normalizedPlanMap:         newNormalizedPlanMap(),
 		stmtStatsBuffer:           map[uint64]stmtstats.StatementStatsMap{},
@@ -180,7 +185,7 @@ func (tsr *RemoteTopSQLReporter) CollectStmtStatsMap(data stmtstats.StatementSta
 // Design Rationale:
 //   - Non-blocking push to channel (drops on full, logs metric)
 //   - Separate channel from TopSQL stmtstats for pipeline independence
-//   - collectRUWorker buffers RU increments into ruCollecting with Hybrid TopN
+//   - collectRUWorker writes RU increments into online 15s buckets
 //
 // WARN: It will drop the data if the processing is not in time.
 // This function is thread-safe and efficient.
@@ -234,8 +239,9 @@ func (tsr *RemoteTopSQLReporter) collectWorker() {
 			timestamp := uint64(nowFunc().Unix())
 			tsr.stmtStatsBuffer[timestamp] = data
 		case <-reportTicker.C:
+			timestamp := uint64(nowFunc().Unix())
 			tsr.processStmtStatsData()
-			tsr.takeDataAndSendToReportChan()
+			tsr.takeDataAndSendToReportChan(timestamp)
 			// Update `reportTicker` if report interval changed.
 			if newInterval := effectiveReportIntervalSeconds(); newInterval != currentReportInterval {
 				currentReportInterval = newInterval
@@ -247,7 +253,7 @@ func (tsr *RemoteTopSQLReporter) collectWorker() {
 
 // collectRUWorker consumes RU increment data from the collectRUIncrementsChan independently.
 // It runs in a separate goroutine from collectWorker to decouple TopRU from TopSQL data flow.
-// The ruCollecting.addBatch/take are protected by a mutex for concurrent access safety.
+// ruWindowAggregator is protected by an internal mutex for concurrent access safety.
 func (tsr *RemoteTopSQLReporter) collectRUWorker() {
 	defer util.Recover("top-sql", "collectRUWorker", nil, false)
 
@@ -257,7 +263,7 @@ func (tsr *RemoteTopSQLReporter) collectRUWorker() {
 			return
 		case data := <-tsr.collectRUIncrementsChan:
 			timestamp := uint64(nowFunc().Unix())
-			tsr.ruCollecting.addBatch(timestamp, data)
+			tsr.ruAggregator.addSecondBatch(timestamp, data)
 		}
 	}
 }
@@ -350,12 +356,17 @@ func findKthNetworkBytes(data stmtstats.StatementStatsMap, k int, u64Slice []uin
 }
 
 // takeDataAndSendToReportChan takes records data and then send to the report channel for reporting.
-func (tsr *RemoteTopSQLReporter) takeDataAndSendToReportChan() {
+func (tsr *RemoteTopSQLReporter) takeDataAndSendToReportChan(timestamp uint64) {
+	ruRecords := tsr.ruAggregator.takeReportRecords(
+		timestamp,
+		effectiveRUGranularitySeconds(),
+		tsr.keyspaceName,
+	)
 	// Send to report channel. When channel is full, data will be dropped.
 	select {
 	case tsr.reportCollectedDataChan <- collectedData{
 		collected:         tsr.collecting.take(),
-		ruCollected:       tsr.ruCollecting.take(),
+		ruRecords:         ruRecords,
 		normalizedSQLMap:  tsr.normalizedSQLMap.take(),
 		normalizedPlanMap: tsr.normalizedPlanMap.take(),
 	}:
@@ -378,12 +389,10 @@ func (tsr *RemoteTopSQLReporter) reportWorker() {
 			// are finished.
 			time.Sleep(time.Millisecond * 100)
 			rs := data.collected.getReportRecords()
-			// Phase 2: Get RU records with Hybrid TopN filtering
-			ruRecords := data.ruCollected.getReportRecords(tsr.keyspaceName)
 			// Convert to protobuf data and do report.
 			tsr.doReport(&ReportData{
 				DataRecords: rs.toProto(tsr.keyspaceName),
-				RURecords:   ruRecords,
+				RURecords:   data.ruRecords,
 				SQLMetas:    data.normalizedSQLMap.toProto(tsr.keyspaceName),
 				PlanMetas:   data.normalizedPlanMap.toProto(tsr.keyspaceName, tsr.decodePlan, tsr.compressPlan),
 			})
@@ -442,7 +451,7 @@ func (tsr *RemoteTopSQLReporter) onReporterClosing() {
 // collectedData is used for transmission in the channel.
 type collectedData struct {
 	collected         *collecting
-	ruCollected       *ruCollecting // Phase 2: RU data with Hybrid TopN
+	ruRecords         []tipb.TopRURecord
 	normalizedSQLMap  *normalizedSQLMap
 	normalizedPlanMap *normalizedPlanMap
 }
