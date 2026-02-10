@@ -53,9 +53,7 @@ func (ps *TopSQLPubSubService) Subscribe(req *tipb.TopSQLSubRequest, stream tipb
 	}
 	if ds.enableTopRU {
 		topsqlstate.EnableTopRU()
-		if ds.reportInterval != tipb.ReportInterval_REPORT_INTERVAL_UNSPECIFIED {
-			topsqlstate.SetTopRUReportInterval(int64(ds.reportInterval))
-		}
+		topsqlstate.SetTopRUItemInterval(ds.itemInterval)
 	}
 	return ds.run()
 }
@@ -71,18 +69,18 @@ type pubSubDataSink struct {
 	registerer DataSinkRegisterer
 
 	// TopRU subscription config
-	enableTopRU    bool
-	reportInterval tipb.ReportInterval
+	enableTopRU  bool
+	itemInterval tipb.ItemInterval
 }
 
-func parseTopRUSubscription(req *tipb.TopSQLSubRequest) (bool, tipb.ReportInterval) {
+func parseTopRUSubscription(req *tipb.TopSQLSubRequest) (bool, tipb.ItemInterval) {
 	if req == nil {
-		return false, tipb.ReportInterval_REPORT_INTERVAL_UNSPECIFIED
+		return false, tipb.ItemInterval_ITEM_INTERVAL_UNSPECIFIED
 	}
 
 	cfg := req.GetTopru()
 	if cfg == nil {
-		return false, tipb.ReportInterval_REPORT_INTERVAL_UNSPECIFIED
+		return false, tipb.ItemInterval_ITEM_INTERVAL_UNSPECIFIED
 	}
 
 	enabled := false
@@ -93,25 +91,27 @@ func parseTopRUSubscription(req *tipb.TopSQLSubRequest) (bool, tipb.ReportInterv
 		}
 	}
 	if !enabled {
-		return false, tipb.ReportInterval_REPORT_INTERVAL_UNSPECIFIED
+		return false, tipb.ItemInterval_ITEM_INTERVAL_UNSPECIFIED
 	}
 
-	return true, normalizeTopRUReportInterval(cfg.GetReportIntervalSeconds())
+	return true, normalizeTopRUItemInterval(cfg.GetItemIntervalSeconds())
 }
 
 // newPubSubDataSink creates a DataSink for PubSub subscription.
 //
 // Design: Subscription Lifecycle Management
-//   - Parses TopRU config from subscription request (enable_top_ru, report_interval)
+//   - Parses TopRU config from subscription request (collectors includes TOPRU, item_interval_seconds)
 //   - Enables global TopRU state if requested (activates collection)
 //   - State is disabled in run() defer when subscription ends
+//   - item_interval_seconds controls TopRURecordItem.timestamp_sec aggregation granularity (15s/30s/60s)
+//     and does not guarantee stream push cadence; push cadence is driven by reporter report tick.
 //
 // Protocol Compatibility:
-//   - Old clients without enable_top_ru field: GetEnableTopRu() returns false
-//   - TopRU data only sent if enableTopRU is true (backward compatible)
+//   - Old clients without TopRU collector entry will not enable TopRU (backward compatible)
+//   - TopRU data is sent only when collectors include TOPRU
 func newPubSubDataSink(req *tipb.TopSQLSubRequest, stream tipb.TopSQLPubSub_SubscribeServer, registerer DataSinkRegisterer) *pubSubDataSink {
 	ctx, cancel := context.WithCancel(stream.Context())
-	enableTopRU, reportInterval := parseTopRUSubscription(req)
+	enableTopRU, itemInterval := parseTopRUSubscription(req)
 
 	ds := &pubSubDataSink{
 		ctx:    ctx,
@@ -122,15 +122,15 @@ func newPubSubDataSink(req *tipb.TopSQLSubRequest, stream tipb.TopSQLPubSub_Subs
 
 		registerer: registerer,
 
-		enableTopRU:    enableTopRU,
-		reportInterval: normalizeTopRUReportInterval(reportInterval),
+		enableTopRU:  enableTopRU,
+		itemInterval: normalizeTopRUItemInterval(itemInterval),
 	}
 
 	return ds
 }
 
-func normalizeTopRUReportInterval(interval tipb.ReportInterval) tipb.ReportInterval {
-	if interval == tipb.ReportInterval_REPORT_INTERVAL_UNSPECIFIED {
+func normalizeTopRUItemInterval(interval tipb.ItemInterval) tipb.ItemInterval {
+	if interval == tipb.ItemInterval_ITEM_INTERVAL_UNSPECIFIED {
 		return interval
 	}
 	switch int32(interval) {
@@ -138,10 +138,10 @@ func normalizeTopRUReportInterval(interval tipb.ReportInterval) tipb.ReportInter
 		return interval
 	default:
 		logutil.BgLogger().Warn(
-			"[top-sql] invalid top ru report interval, fallback to default",
-			zap.Int32("report_interval", int32(interval)),
+			"[top-sql] invalid top ru item interval, fallback to default",
+			zap.Int32("item_interval", int32(interval)),
 		)
-		return tipb.ReportInterval_REPORT_INTERVAL_UNSPECIFIED
+		return tipb.ItemInterval_ITEM_INTERVAL_UNSPECIFIED
 	}
 }
 

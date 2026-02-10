@@ -106,7 +106,7 @@ require (
 	github.com/pingcap/metering_sdk v0.0.0-20251110022152-dac449ac5389
 	github.com/pingcap/sysutil v1.0.1-0.20240311050922-ae81ee01f3a5
 	github.com/pingcap/tidb/pkg/parser v0.0.0-20211011031125-9b13dc409c5e
-	github.com/pingcap/tipb v0.0.0-20251230094608-1374320b4bd8
+	github.com/pingcap/tipb v0.0.0-20260210113932-1447c9d7e9fe
 	github.com/prometheus/client_golang v1.23.0
 	github.com/prometheus/client_model v0.6.2
 	github.com/prometheus/common v0.65.0
@@ -371,9 +371,6 @@ replace (
 	github.com/apache/arrow-go/v18 => github.com/joechenrh/arrow-go/v18 v18.0.0-20250911101656-62c34c9a3b82
 	github.com/go-ldap/ldap/v3 => github.com/YangKeao/ldap/v3 v3.4.5-0.20230421065457-369a3bab1117
 	github.com/pingcap/tidb/pkg/parser => ./pkg/parser
-	// Use tipb PR#388 branch (c25bfdca69f9) for TopRU support
-	// After PR#388 is merged, update to the merged version and remove this replace
-	github.com/pingcap/tipb => ../tipb
 
 	// TODO: `sourcegraph.com/sourcegraph/appdash` has been archived
 	// Please remove these dependencies.

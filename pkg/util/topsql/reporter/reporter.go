@@ -37,16 +37,6 @@ const (
 
 var nowFunc = time.Now
 
-func effectiveReportIntervalSeconds() int64 {
-	// TopSQL cadence is independent from TopRU cadence.
-	// TopRU reporting should use its own ticker/interval path.
-	return topsqlstate.GlobalState.ReportIntervalSeconds.Load()
-}
-
-func effectiveRUGranularitySeconds() uint64 {
-	return uint64(topsqlstate.GetTopRUReportInterval())
-}
-
 // TopSQLReporter collects Top SQL metrics.
 type TopSQLReporter interface {
 	collector.Collector
@@ -225,7 +215,7 @@ func (tsr *RemoteTopSQLReporter) Close() {
 func (tsr *RemoteTopSQLReporter) collectWorker() {
 	defer util.Recover("top-sql", "collectWorker", nil, false)
 
-	currentReportInterval := effectiveReportIntervalSeconds()
+	currentReportInterval := topsqlstate.GlobalState.ReportIntervalSeconds.Load()
 	reportTicker := time.NewTicker(time.Second * time.Duration(currentReportInterval))
 	defer reportTicker.Stop()
 	for {
@@ -243,7 +233,7 @@ func (tsr *RemoteTopSQLReporter) collectWorker() {
 			tsr.processStmtStatsData()
 			tsr.takeDataAndSendToReportChan(timestamp)
 			// Update `reportTicker` if report interval changed.
-			if newInterval := effectiveReportIntervalSeconds(); newInterval != currentReportInterval {
+			if newInterval := topsqlstate.GlobalState.ReportIntervalSeconds.Load(); newInterval != currentReportInterval {
 				currentReportInterval = newInterval
 				reportTicker.Reset(time.Second * time.Duration(currentReportInterval))
 			}
@@ -356,10 +346,12 @@ func findKthNetworkBytes(data stmtstats.StatementStatsMap, k int, u64Slice []uin
 }
 
 // takeDataAndSendToReportChan takes records data and then send to the report channel for reporting.
+// TopRU extraction is triggered only on this TopSQL report-tick path (no independent RU report ticker).
+// Each call attempts to emit at most one aligned closed 60s RU window; missed older windows are dropped.
 func (tsr *RemoteTopSQLReporter) takeDataAndSendToReportChan(timestamp uint64) {
 	ruRecords := tsr.ruAggregator.takeReportRecords(
 		timestamp,
-		effectiveRUGranularitySeconds(),
+		uint64(topsqlstate.GetTopRUItemInterval()),
 		tsr.keyspaceName,
 	)
 	// Send to report channel. When channel is full, data will be dropped.

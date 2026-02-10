@@ -14,7 +14,10 @@
 
 package state
 
-import "go.uber.org/atomic"
+import (
+	"github.com/pingcap/tipb/go-tipb"
+	"go.uber.org/atomic"
+)
 
 // Default Top-SQL state values.
 const (
@@ -26,26 +29,20 @@ const (
 )
 
 // Default Top-RU state values.
-//
-// Design Notes:
-//   - TopRU defaults to disabled (enable via subscription with enable_top_ru=true)
-//   - Default 60s report interval aligns with TopSQL; can be 15s/30s/60s via subscription
-//   - TopRU enable/disable is independent from TopSQL enable/disable
-//   - Phase 3: Reference-counted subscriber tracking ensures subscriber isolation
 const (
-	DefTiDBTopRUEnable                = false
-	DefTiDBTopRUReportIntervalSeconds = 60
+	// DefTiDBTopRUItemIntervalSeconds is the default value of item interval; can be 15s/30s/60s via subscription.
+	DefTiDBTopRUItemIntervalSeconds = 60
 )
 
 // GlobalState is the global Top-SQL state.
 var GlobalState = State{
-	enable:                     atomic.NewBool(false),
-	PrecisionSeconds:           atomic.NewInt64(DefTiDBTopSQLPrecisionSeconds),
-	MaxStatementCount:          atomic.NewInt64(DefTiDBTopSQLMaxTimeSeriesCount),
-	MaxCollect:                 atomic.NewInt64(DefTiDBTopSQLMaxMetaCount),
-	ReportIntervalSeconds:      atomic.NewInt64(DefTiDBTopSQLReportIntervalSeconds),
-	ruConsumerCount:            atomic.NewInt64(0),
-	TopRUReportIntervalSeconds: atomic.NewInt64(DefTiDBTopRUReportIntervalSeconds),
+	enable:                   atomic.NewBool(false),
+	PrecisionSeconds:         atomic.NewInt64(DefTiDBTopSQLPrecisionSeconds),
+	MaxStatementCount:        atomic.NewInt64(DefTiDBTopSQLMaxTimeSeriesCount),
+	MaxCollect:               atomic.NewInt64(DefTiDBTopSQLMaxMetaCount),
+	ReportIntervalSeconds:    atomic.NewInt64(DefTiDBTopSQLReportIntervalSeconds),
+	ruConsumerCount:          atomic.NewInt64(0),
+	TopRUItemIntervalSeconds: atomic.NewInt64(DefTiDBTopRUItemIntervalSeconds),
 }
 
 // State is the state for control top sql feature.
@@ -71,7 +68,7 @@ type State struct {
 	// The report data interval of top-ru.
 	// Set from subscription request (15s/30s/60s); defaults to 60s.
 	// Phase 3: Smaller interval prevails when multiple subscribers set different values.
-	TopRUReportIntervalSeconds *atomic.Int64
+	TopRUItemIntervalSeconds *atomic.Int64
 }
 
 // EnableTopSQL enables the top SQL feature.
@@ -99,7 +96,7 @@ func TopProfilingEnabled() bool {
 }
 
 // EnableTopRU increments the TopRU consumer count.
-// Called by pubSubDataSink when agent subscribes with enable_top_ru=true.
+// Called by pubSubDataSink when subscription collectors include TOPRU.
 // This activates RU collection in aggregator.aggregateRU() when count becomes > 0.
 //
 // Phase 3 Design: Reference-counted subscriber tracking.
@@ -125,7 +122,7 @@ func DisableTopRU() {
 		if GlobalState.ruConsumerCount.CAS(current, current-1) {
 			// If this was the last subscriber, reset report interval to default
 			if current == 1 {
-				ResetTopRUReportInterval()
+				ResetTopRUItemInterval()
 			}
 			return
 		}
@@ -141,38 +138,51 @@ func TopRUEnabled() bool {
 	return GlobalState.ruConsumerCount.Load() > 0
 }
 
-// SetTopRUReportInterval sets the report interval for TopRU (in seconds).
+func normalizeTopRUItemIntervalSeconds(intervalSeconds tipb.ItemInterval) int64 {
+	switch intervalSeconds {
+	case tipb.ItemInterval_ITEM_INTERVAL_15S, tipb.ItemInterval_ITEM_INTERVAL_30S, tipb.ItemInterval_ITEM_INTERVAL_60S:
+		return int64(intervalSeconds)
+	default:
+		return DefTiDBTopRUItemIntervalSeconds
+	}
+}
+
+// SetTopRUItemInterval sets the report interval for TopRU (in seconds).
 // Called from pubSubDataSink when processing subscription request.
-// Valid values: 15, 30, 60 (from tipb.ReportInterval enum).
+// Valid values: 15, 30, 60 (from tipb.ItemInterval enum).
+// This value controls TopRURecordItem.timestamp_sec aggregation granularity only.
+// It does not define stream push cadence, which is driven by reporter report tick.
+// Invalid values are normalized to the default 60s before applying "smaller prevails".
 //
 // Phase 3 Design: When multiple subscribers set different intervals,
 // the smaller interval prevails. This ensures all subscribers receive
 // data at least as frequently as they requested.
-func SetTopRUReportInterval(intervalSeconds int64) {
+func SetTopRUItemInterval(itemIntervalSeconds tipb.ItemInterval) {
+	intervalSeconds := normalizeTopRUItemIntervalSeconds(itemIntervalSeconds)
 	for {
-		current := GlobalState.TopRUReportIntervalSeconds.Load()
+		current := GlobalState.TopRUItemIntervalSeconds.Load()
 		// Smaller interval prevails
 		if intervalSeconds >= current {
 			// Current interval is already smaller or equal, no change needed
 			return
 		}
-		if GlobalState.TopRUReportIntervalSeconds.CAS(current, intervalSeconds) {
+		if GlobalState.TopRUItemIntervalSeconds.CAS(current, intervalSeconds) {
 			return
 		}
 		// CAS failed, retry
 	}
 }
 
-// GetTopRUReportInterval returns the report interval for TopRU (in seconds).
+// GetTopRUItemInterval returns the report interval for TopRU (in seconds).
 // Used by reporter to determine effective report interval.
-func GetTopRUReportInterval() int64 {
-	return GlobalState.TopRUReportIntervalSeconds.Load()
+func GetTopRUItemInterval() int64 {
+	return GlobalState.TopRUItemIntervalSeconds.Load()
 }
 
-// ResetTopRUReportInterval resets the report interval to the default value.
+// ResetTopRUItemInterval resets the report interval to the default value.
 // Called when the last TopRU subscriber unsubscribes.
 // This allows the next subscriber to set their preferred interval without
 // being constrained by a previous subscriber's smaller interval.
-func ResetTopRUReportInterval() {
-	GlobalState.TopRUReportIntervalSeconds.Store(DefTiDBTopRUReportIntervalSeconds)
+func ResetTopRUItemInterval() {
+	GlobalState.TopRUItemIntervalSeconds.Store(DefTiDBTopRUItemIntervalSeconds)
 }

@@ -209,31 +209,31 @@ func TestEffectiveReportIntervalSeconds_TopSQLIndependentFromTopRU(t *testing.T)
 		for topsqlstate.TopRUEnabled() {
 			topsqlstate.DisableTopRU()
 		}
-		topsqlstate.ResetTopRUReportInterval()
+		topsqlstate.ResetTopRUItemInterval()
 	})
 
 	topsqlstate.GlobalState.ReportIntervalSeconds.Store(60)
-	topsqlstate.ResetTopRUReportInterval()
-	topsqlstate.SetTopRUReportInterval(15)
+	topsqlstate.ResetTopRUItemInterval()
+	topsqlstate.SetTopRUItemInterval(15)
 
-	require.Equal(t, int64(60), effectiveReportIntervalSeconds())
+	require.Equal(t, int64(60), topsqlstate.GlobalState.ReportIntervalSeconds.Load())
 
 	topsqlstate.EnableTopRU()
-	require.Equal(t, int64(60), effectiveReportIntervalSeconds())
+	require.Equal(t, int64(60), topsqlstate.GlobalState.ReportIntervalSeconds.Load())
 
 	topsqlstate.GlobalState.ReportIntervalSeconds.Store(10)
-	topsqlstate.SetTopRUReportInterval(1)
-	require.Equal(t, int64(10), effectiveReportIntervalSeconds())
+	topsqlstate.SetTopRUItemInterval(1)
+	require.Equal(t, int64(10), topsqlstate.GlobalState.ReportIntervalSeconds.Load())
 
 	topsqlstate.GlobalState.ReportIntervalSeconds.Store(30)
-	topsqlstate.ResetTopRUReportInterval()
-	topsqlstate.SetTopRUReportInterval(0)
-	require.Equal(t, int64(30), effectiveReportIntervalSeconds())
+	topsqlstate.ResetTopRUItemInterval()
+	topsqlstate.SetTopRUItemInterval(0)
+	require.Equal(t, int64(30), topsqlstate.GlobalState.ReportIntervalSeconds.Load())
 
 	for topsqlstate.TopRUEnabled() {
 		topsqlstate.DisableTopRU()
 	}
-	require.Equal(t, int64(30), effectiveReportIntervalSeconds())
+	require.Equal(t, int64(30), topsqlstate.GlobalState.ReportIntervalSeconds.Load())
 }
 
 func newSQLCPUTimeRecord(tsr *RemoteTopSQLReporter, sqlID int, cpuTimeMs uint32) collector.SQLCPUTimeRecord {
