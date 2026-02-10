@@ -76,6 +76,41 @@
         "pr_requires_gh": true
       },
       "offline": true
+    },
+    {
+      "name": "pr_followup",
+      "entry": "ai/ai-change-gates/tools/pr_followup.sh",
+      "inputs": [
+        "--pr <number>",
+        "--mode <plan|exec>",
+        "--reviewer <user> (optional)",
+        "--out <dir> (optional)",
+        "--include-resolved=1 (optional)",
+        "--apply (exec only)"
+      ],
+      "outputs": [
+        "ai/artifacts/pr_followup/<RUN_ID>/comments.raw.json",
+        "ai/artifacts/pr_followup/<RUN_ID>/comments.json",
+        "ai/artifacts/pr_followup/<RUN_ID>/comments.md",
+        "ai/artifacts/pr_followup/<RUN_ID>/comment_actions.yaml",
+        "ai/artifacts/pr_followup/<RUN_ID>/reply_draft.md",
+        "ai/artifacts/pr_followup/<RUN_ID>/trace.jsonl",
+        "ai/artifacts/pr_followup/<RUN_ID>/manifest.json",
+        "ai/artifacts/pr_followup/<RUN_ID>/result.json",
+        "ai/artifacts/pr_followup/<RUN_ID>/patch.diff (exec)",
+        "ai/artifacts/pr_followup/<RUN_ID>/verify.log (exec)",
+        "ai/artifacts/pr_followup/<RUN_ID>/touched_files.txt (exec)"
+      ],
+      "safety": {
+        "forbidden": [
+          "git push",
+          "git config mutation",
+          "curl|bash",
+          "rm -rf /"
+        ],
+        "default_apply": false
+      },
+      "offline": false
     }
   ]
 }
