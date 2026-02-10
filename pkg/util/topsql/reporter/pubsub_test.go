@@ -155,7 +155,7 @@ func TestPubSubDataSinkEnableTopRU(t *testing.T) {
 			tipb.CollectorType_COLLECTOR_TYPE_TOPRU,
 		},
 		Topru: &tipb.TopRUConfig{
-			ReportIntervalSeconds: tipb.ReportInterval_REPORT_INTERVAL_15S,
+			ItemIntervalSeconds: tipb.ItemInterval_ITEM_INTERVAL_15S,
 		},
 	}
 	ds := newPubSubDataSink(req, mockStream, &mockPubSubDataSinkRegisterer{})
@@ -188,7 +188,7 @@ func TestPubSubMultiSubscriberIsolation(t *testing.T) {
 	for topsqlstate.TopRUEnabled() {
 		topsqlstate.DisableTopRU()
 	}
-	topsqlstate.ResetTopRUReportInterval()
+	topsqlstate.ResetTopRUItemInterval()
 
 	svc := NewTopSQLPubSubService(&mockPubSubDataSinkRegisterer{})
 
@@ -208,7 +208,7 @@ func TestPubSubMultiSubscriberIsolation(t *testing.T) {
 			tipb.CollectorType_COLLECTOR_TYPE_TOPRU,
 		},
 		Topru: &tipb.TopRUConfig{
-			ReportIntervalSeconds: tipb.ReportInterval(30),
+			ItemIntervalSeconds: tipb.ItemInterval(30),
 		},
 	}
 	req2 := &tipb.TopSQLSubRequest{
@@ -217,7 +217,7 @@ func TestPubSubMultiSubscriberIsolation(t *testing.T) {
 			tipb.CollectorType_COLLECTOR_TYPE_TOPRU,
 		},
 		Topru: &tipb.TopRUConfig{
-			ReportIntervalSeconds: tipb.ReportInterval(15),
+			ItemIntervalSeconds: tipb.ItemInterval(15),
 		},
 	}
 
@@ -225,17 +225,17 @@ func TestPubSubMultiSubscriberIsolation(t *testing.T) {
 	go func() { _ = svc.Subscribe(req2, stream2) }()
 
 	require.Eventually(t, func() bool {
-		return topsqlstate.TopRUEnabled() && topsqlstate.GetTopRUReportInterval() == 15
+		return topsqlstate.TopRUEnabled() && topsqlstate.GetTopRUItemInterval() == 15
 	}, time.Second, 10*time.Millisecond)
 
 	cancel1()
 	require.Eventually(t, func() bool {
-		return topsqlstate.TopRUEnabled() && topsqlstate.GetTopRUReportInterval() == 15
+		return topsqlstate.TopRUEnabled() && topsqlstate.GetTopRUItemInterval() == 15
 	}, time.Second, 10*time.Millisecond)
 
 	cancel2()
 	require.Eventually(t, func() bool {
-		return !topsqlstate.TopRUEnabled() && topsqlstate.GetTopRUReportInterval() == int64(topsqlstate.DefTiDBTopRUReportIntervalSeconds)
+		return !topsqlstate.TopRUEnabled() && topsqlstate.GetTopRUItemInterval() == int64(topsqlstate.DefTiDBTopRUItemIntervalSeconds)
 	}, time.Second, 10*time.Millisecond)
 }
 
@@ -256,7 +256,7 @@ func TestSubscribeRegisterFailDoesNotEnableTopRU(t *testing.T) {
 			tipb.CollectorType_COLLECTOR_TYPE_TOPRU,
 		},
 		Topru: &tipb.TopRUConfig{
-			ReportIntervalSeconds: tipb.ReportInterval_REPORT_INTERVAL_15S,
+			ItemIntervalSeconds: tipb.ItemInterval_ITEM_INTERVAL_15S,
 		},
 	}
 	svc := NewTopSQLPubSubService(&errPubSubDataSinkRegisterer{})
@@ -265,16 +265,16 @@ func TestSubscribeRegisterFailDoesNotEnableTopRU(t *testing.T) {
 	require.False(t, topsqlstate.TopRUEnabled())
 }
 
-func TestNormalizeTopRUReportIntervalInvalid(t *testing.T) {
+func TestNormalizeTopRUItemIntervalInvalid(t *testing.T) {
 	req := &tipb.TopSQLSubRequest{
 		Collectors: []tipb.CollectorType{
 			tipb.CollectorType_COLLECTOR_TYPE_TOPSQL,
 			tipb.CollectorType_COLLECTOR_TYPE_TOPRU,
 		},
 		Topru: &tipb.TopRUConfig{
-			ReportIntervalSeconds: tipb.ReportInterval(99),
+			ItemIntervalSeconds: tipb.ItemInterval(99),
 		},
 	}
 	ds := newPubSubDataSink(req, &mockPubSubDataSinkStream{}, &mockPubSubDataSinkRegisterer{})
-	require.Equal(t, tipb.ReportInterval_REPORT_INTERVAL_UNSPECIFIED, ds.reportInterval)
+	require.Equal(t, tipb.ItemInterval_ITEM_INTERVAL_UNSPECIFIED, ds.itemInterval)
 }

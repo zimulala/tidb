@@ -47,7 +47,7 @@ Next-gen TiDB Cloud charges by RU (Request Unit). When cluster RU consumption is
 
 1. **Sort by RU Consumption**: Support sorting and querying by cumulative RU consumption, identifying high RU SQLs (including SQLs with short execution time but high RU consumption)
 2. **User-Dimension Aggregation**: Aggregate by `(user, sql_digest, plan_digest)` tuple, support viewing RU consumption distribution by user
-3. **Near Real-Time Statistics**: Local 1-second sampling, batch reporting to downstream (e.g., Vector) every `report_interval` (default 60s, configurable 15s/30s/60s); end-to-end latency approximately 60~120s
+3. **Near Real-Time Statistics**: Local 1-second sampling; RU output is attempted on each TopSQL report tick (default 60s). `item_interval_seconds` controls TopRU item granularity (15s/30s/60s) within each emitted 60s window; end-to-end latency approximately 60~120s
 4. **Compatible with Existing Capabilities**: Coexists with TopSQL's existing CPU time statistics without interference
 
 ### Non-Goals
@@ -60,7 +60,7 @@ Next-gen TiDB Cloud charges by RU (Request Unit). When cluster RU consumption is
 
 ### Architecture Overview
 
-TopRU reuses TopSQL's reporting pipeline and adds RU-specific **bounded window aggregation** (producing 1 data point per `report_interval`), controlling memory and CPU while ensuring near real-time capabilities.
+TopRU reuses TopSQL's reporting pipeline and adds RU-specific **bounded window aggregation** (producing at most one aligned 60s window per TopSQL report tick), controlling memory and CPU while ensuring near real-time capabilities.
 
 **Architecture Diagram** (`[NEW]` marks TopRU new pipelines):
 
@@ -170,11 +170,13 @@ TopRU is controlled through **subscription configuration** (pushed from downstre
 
 | Config Item | Type | Default | Description |
 |-------------|------|---------|-------------|
-| `enable_top_ru` | bool | false | TopRU toggle, controls collection and reporting |
-| `report_interval` | enum | 60s | Reporting interval, options: 15s/30s/60s |
+| `collectors` includes `COLLECTOR_TYPE_TOPRU` | repeated enum | empty | TopRU toggle, controls RU collection and RU data sending |
+| `item_interval_seconds` | enum | 60s | TopRURecordItem aggregation granularity, options: 15s/30s/60s |
 
 **Design Considerations**:
-- TopRU as an independent feature, decoupled from TopSQL
+- TopRU enable/disable is independent from TopSQL CPU collection
+- TopRU report triggering currently reuses TopSQL report ticker
+- `item_interval_seconds` controls item granularity only, not stream push cadence
 - Configuration pushed by subscriber, no manual configuration needed on TiDB side
 - Configuration changes take effect dynamically, no restart required
 
@@ -356,11 +358,12 @@ func (b *ruPointBucket) TakeAll() map[uint64]*timestampBuffer
 func (tsr *RemoteTopSQLReporter) processRUIncrementBuffer()
 ```
 
-**60s Reporting**: Every `report_interval` (default 60s) takes out `ruPointBucket`, merges and applies 100×100 TopN + others final filtering and reports.
+**60s Reporting**: On each TopSQL report tick (default 60s), TopRU attempts to take out one aligned complete 60s window from `ruPointBucket`, merges and applies 100×100 TopN + others final filtering, and reports. If one or more windows are missed, only the latest complete window is emitted; older windows are dropped (no catch-up).
 
 ```go
-// RemoteTopSQLReporter.reportRUData: triggered every report_interval,
-// takes out ruPointBucket, applies 100×100 TopN + others final filtering, generates TopRURecord and reports.
+// RemoteTopSQLReporter.reportRUData: triggered on TopSQL report tick,
+// takes out one aligned complete 60s window from ruPointBucket, applies
+// 100×100 TopN + others final filtering, and reports (no catch-up for missed windows).
 func (tsr *RemoteTopSQLReporter) reportRUData()
 ```
 
@@ -473,7 +476,7 @@ For detailed protocol discussion, refer to: TiDB TopRU Protocol Discussion Docum
 |----------|---------|
 | Memory | Three-tier buffer design, 1s writes to lightweight buffer (200×200), 15s re-filters and merges to point bucket |
 | CPU | RU collection reuses aggregator's 1s tick, no additional collection cycles |
-| Network | 60s batch reporting, reuses TopSQL's existing reporting pipeline |
+| Network | Batches on TopSQL report tick (default 60s), reuses TopSQL's existing reporting pipeline |
 
 **Optional Optimizations**:
 

@@ -85,6 +85,8 @@ func alignToInterval(ts, interval uint64) uint64 {
 }
 
 func normalizeRUGranularitySeconds(v uint64) uint64 {
+	// Only 15s/30s/60s are valid item granularities; all other values,
+	// including 0, are treated as 60s for stable reporting semantics.
 	switch v {
 	case 15, 30, 60:
 		return v
@@ -127,6 +129,9 @@ func (a *ruWindowAggregator) addSecondBatch(ts uint64, increments stmtstats.RUIn
 	bucket.collecting.addBatch(bucketStart, increments)
 }
 
+// takeReportRecords attempts to emit one aligned closed 60s window for nowTs.
+// It does not catch up multiple missed windows: if called late, only the latest
+// complete window is emitted and older windows are dropped.
 func (a *ruWindowAggregator) takeReportRecords(nowTs, granularitySec uint64, keyspaceName []byte) []tipb.TopRURecord {
 	granularitySec = normalizeRUGranularitySeconds(granularitySec)
 	windowEnd := alignToInterval(nowTs, ruReportWindowSeconds)

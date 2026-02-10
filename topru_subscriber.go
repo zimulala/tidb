@@ -21,7 +21,7 @@ func main() {
 	interval := flag.String("interval", "15s", "TopRU report interval: 15s|30s|60s")
 	flag.Parse()
 
-	reportInterval := parseInterval(*interval)
+	itemInterval := parseInterval(*interval)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -44,14 +44,14 @@ func main() {
 	stream, err := client.Subscribe(ctx, &tipb.TopSQLSubRequest{
 		Collectors: []tipb.CollectorType{tipb.CollectorType_COLLECTOR_TYPE_TOPRU},
 		Topru: &tipb.TopRUConfig{
-			ReportIntervalSeconds: reportInterval,
+			ItemIntervalSeconds: itemInterval,
 		},
 	})
 	if err != nil {
 		log.Fatalf("subscribe failed: %v", err)
 	}
 
-	log.Printf("subscribed to %s, enable_top_ru=true, interval=%s", *addr, *interval)
+	log.Printf("subscribed to %s, collectors include TOPRU, item_interval=%s", *addr, *interval)
 
 	for {
 		resp, err := stream.Recv()
@@ -83,16 +83,16 @@ func main() {
 	}
 }
 
-func parseInterval(s string) tipb.ReportInterval {
+func parseInterval(s string) tipb.ItemInterval {
 	switch s {
 	case "15s":
-		return tipb.ReportInterval_REPORT_INTERVAL_15S
+		return tipb.ItemInterval_ITEM_INTERVAL_15S
 	case "30s":
-		return tipb.ReportInterval_REPORT_INTERVAL_30S
+		return tipb.ItemInterval_ITEM_INTERVAL_30S
 	case "60s":
-		return tipb.ReportInterval_REPORT_INTERVAL_60S
+		return tipb.ItemInterval_ITEM_INTERVAL_60S
 	default:
 		log.Printf("unknown interval %q, fallback to 15s", s)
-		return tipb.ReportInterval_REPORT_INTERVAL_15S
+		return tipb.ItemInterval_ITEM_INTERVAL_15S
 	}
 }
