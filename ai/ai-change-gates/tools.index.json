@@ -1,0 +1,81 @@
+{
+  "schema_version": "v1",
+  "tools": [
+    {
+      "name": "sync_skills",
+      "entry": "ai/ai-change-gates/tools/sync_skills.sh",
+      "inputs": [
+        "ai/skills_src/*/SPEC.yaml",
+        "ai/skills_src/*/BODY.md"
+      ],
+      "outputs": [
+        "~/.codex/skills/<skill>/SKILL.md",
+        "~/.cursor/skills/<skill>/skill.md"
+      ],
+      "offline": true
+    },
+    {
+      "name": "check_trust",
+      "entry": "ai/ai-change-gates/tools/check_trust.sh",
+      "inputs": [
+        "repo-root ai.trust or .ai/trust",
+        "~/.config/ai-change-gates/trusted_roots",
+        "~/.config/ai-change-gates/trust.json"
+      ],
+      "outputs": [
+        "stdout trust decision"
+      ],
+      "offline": true
+    },
+    {
+      "name": "install_wt",
+      "entry": "ai/ai-change-gates/tools/install_wt.sh",
+      "inputs": [
+        "ai/ai-change-gates/tools/wt/wt"
+      ],
+      "outputs": [
+        "~/workspace/bin/wt symlink"
+      ],
+      "offline": true
+    },
+    {
+      "name": "quick_gatecheck",
+      "entry": "ai/ai-change-gates/gatecheck/quick.sh",
+      "inputs": [
+        "ai/projects/topru-ai/PROJECT_STATE.md",
+        "ai/ai-change-gates/tools.index.json",
+        "ai/ai-change-gates/skills.index.json"
+      ],
+      "outputs": [
+        "stdout gate summary"
+      ],
+      "offline": true
+    },
+    {
+      "name": "wt",
+      "entry": "ai/ai-change-gates/tools/wt/wt",
+      "inputs": [
+        "~/.config/wt/config",
+        "command: open <branch> | pr <prNum>",
+        "flags: --codex --cursor --dry-run -v"
+      ],
+      "outputs": [
+        "git worktree created/updated under WT_ROOT",
+        "optional codex/cursor launch",
+        "dry-run command preview"
+      ],
+      "safety": {
+        "requires_config": [
+          "REPO_ROOT",
+          "DEFAULT_REMOTE",
+          "BASE_BRANCH",
+          "CURSOR_CMD",
+          "CODEX_CMD"
+        ],
+        "dry_run_supported": true,
+        "pr_requires_gh": true
+      },
+      "offline": true
+    }
+  ]
+}

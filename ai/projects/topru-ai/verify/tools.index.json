@@ -1,0 +1,164 @@
+{
+  "schema_version": "v1",
+  "tools": [
+    {
+      "name": "oneclick",
+      "entry": "ai/projects/topru-ai/verify/oneclick.sh",
+      "description": "Unified top-level entry for pr-ready/impl/fix/self-check with normalized footer and marker fallback.",
+      "recommended": true,
+      "inputs": {
+        "subcommands": [
+          "pr-ready (default)",
+          "impl",
+          "fix",
+          "self-check"
+        ],
+        "args": [
+          "--include-review (pr-ready only)",
+          "--base <sha> --head <sha> (bridged where supported)",
+          "[downstream args passthrough]"
+        ]
+      },
+      "outputs": {
+        "stdout": "Always prints normalized RESULT/NEXT/DETAILS footer; passes through downstream logs.",
+        "machine_output": "Pass-through ONECLICK markers when downstream provides them, otherwise emits minimal marker JSON.",
+        "files": [
+          "ai/projects/topru-ai/artifacts/oneclick/runs/<RUN_ID>/result.json (fallback only)"
+        ]
+      },
+      "compatibility": {
+        "legacy_entries_kept": [
+          "run_pr_ready_oneclick.sh",
+          "run_impl_oneclick.sh",
+          "run_fix_one_finding_oneclick.sh"
+        ]
+      }
+    },
+    {
+      "name": "run_pr_ready_oneclick",
+      "entry": "ai/projects/topru-ai/verify/run_pr_ready_oneclick.sh",
+      "description": "One-click PR-ready orchestration for evidence, optional review, and SSOT audit patch.",
+      "inputs": {
+        "args": [
+          "--project <path>",
+          "--track <track_id>",
+          "--protocol-root <path>"
+        ],
+        "env": {
+          "PR_READY_INCLUDE_REVIEW": "0|1 (default 0)",
+          "ONECLICK_BASE_SHA": "optional explicit base commit for base/head/range fields"
+        }
+      },
+      "outputs": {
+        "stdout": "Human summary + machine JSON block wrapped by markers.",
+        "files": [
+          "ai/projects/topru-ai/artifacts/pr_ready/runs/<RUN_ID>/result.json",
+          "ai/projects/topru-ai/artifacts/audit/runs/<RUN_ID>/audit.txt"
+        ]
+      },
+      "machine_output": {
+        "marker_begin": "===ONECLICK_JSON_BEGIN===",
+        "marker_end": "===ONECLICK_JSON_END===",
+        "schema": "ai/projects/topru-ai/verify/schemas/oneclick_result.schema.json"
+      }
+    },
+    {
+      "name": "run_impl_oneclick",
+      "entry": "ai/projects/topru-ai/verify/run_impl_oneclick.sh",
+      "description": "Controlled implementation execution with auditable patch/manifest/trace artifacts.",
+      "inputs": {
+        "args": [
+          "--cmd <command>",
+          "--label <name>",
+          "--allow-empty-patch"
+        ]
+      },
+      "outputs": {
+        "stdout": "Conclusion line + detail path lines.",
+        "files": [
+          "ai/projects/topru-ai/artifacts/impl/<RUN_ID>/result.json",
+          "ai/projects/topru-ai/artifacts/impl/<RUN_ID>/manifest.json",
+          "ai/projects/topru-ai/artifacts/impl/<RUN_ID>/patch.diff",
+          "ai/projects/topru-ai/artifacts/impl/<RUN_ID>/trace.jsonl"
+        ]
+      }
+    },
+    {
+      "name": "implement_oneclick",
+      "entry": "ai/projects/topru-ai/verify/implement_oneclick.sh",
+      "description": "Two-phase implementation wrapper with auditable plan/patch artifacts.",
+      "inputs": {
+        "args": [
+          "--plan --base <hash> --head <hash>",
+          "--exec --cmd <command>",
+          "--exec --apply --patch-file <path>"
+        ]
+      },
+      "outputs": {
+        "stdout": "base/head/range, touched_files_count, patch path (if any), next command, RESULT line, detail paths.",
+        "files": [
+          "ai/projects/topru-ai/artifacts/impl/<RUN_ID>/IMPLEMENT_PLAN.md",
+          "ai/projects/topru-ai/artifacts/impl/<RUN_ID>/patch.diff",
+          "ai/projects/topru-ai/artifacts/impl/<RUN_ID>/trace.jsonl",
+          "ai/projects/topru-ai/artifacts/impl/<RUN_ID>/manifest.json",
+          "ai/projects/topru-ai/artifacts/impl/<RUN_ID>/changed_files.txt",
+          "ai/projects/topru-ai/artifacts/impl/<RUN_ID>/result.json"
+        ]
+      },
+      "safety": {
+        "default_apply": false,
+        "forbidden": [
+          "git push",
+          "git config mutation",
+          "curl|bash",
+          "rm -rf /"
+        ],
+        "patch_file_must_be_inside_repo": true
+      }
+    },
+    {
+      "name": "run_fix_one_finding_oneclick",
+      "entry": "ai/projects/topru-ai/verify/run_fix_one_finding_oneclick.sh",
+      "description": "Review-driven one-finding fix closure with SSOT update and auditable artifacts.",
+      "inputs": {
+        "args": [
+          "--finding <R_ID>",
+          "--impl-cmd <command>"
+        ]
+      },
+      "outputs": {
+        "stdout": "Conclusion line + detail path lines.",
+        "files": [
+          "ai/projects/topru-ai/artifacts/fix/<RUN_ID>/result.json",
+          "ai/projects/topru-ai/artifacts/fix/<RUN_ID>/manifest.json",
+          "ai/projects/topru-ai/artifacts/fix/<RUN_ID>/patch.diff",
+          "ai/projects/topru-ai/artifacts/fix/<RUN_ID>/trace.jsonl"
+        ]
+      }
+    },
+    {
+      "name": "fix_one_by_one",
+      "entry": "ai/projects/topru-ai/verify/fix_one_by_one.sh",
+      "description": "Fix one structured review finding with minimal patch, verify_min, and SSOT review update.",
+      "inputs": {
+        "args": [
+          "--id R#",
+          "--base <commit> --head <commit>",
+          "--apply",
+          "--no-verify"
+        ]
+      },
+      "outputs": {
+        "stdout": "RESULT/UPDATED/NEXT and detail paths; prints NEED_HUMAN steps when auto-fix is not possible.",
+        "files": [
+          "ai/projects/topru-ai/artifacts/fix/<RUN_ID>/fix_plan.md",
+          "ai/projects/topru-ai/artifacts/fix/<RUN_ID>/patch.diff",
+          "ai/projects/topru-ai/artifacts/fix/<RUN_ID>/verify.log",
+          "ai/projects/topru-ai/artifacts/fix/<RUN_ID>/trace.jsonl",
+          "ai/projects/topru-ai/artifacts/fix/<RUN_ID>/manifest.json",
+          "ai/projects/topru-ai/artifacts/fix/<RUN_ID>/result.json"
+        ]
+      }
+    }
+  ]
+}

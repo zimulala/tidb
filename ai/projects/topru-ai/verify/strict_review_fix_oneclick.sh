@@ -78,25 +78,33 @@ mkdir -p "${OUT_DIR}"
 RUN_LOG="${OUT_DIR}/run.log"
 CHANGED_FILES="${OUT_DIR}/changed_files.txt"
 DIFF_PATCH="${OUT_DIR}/diff.patch"
+PATCH_DIFF="${OUT_DIR}/patch.diff"
 COMMITS_TXT="${OUT_DIR}/commits.txt"
 SUMMARY_TXT="${OUT_DIR}/summary.txt"
 REVIEW_MD="${OUT_DIR}/review.md"
 FINDINGS_YAML="${OUT_DIR}/findings.yaml"
 NEXT_ACTIONS_MD="${OUT_DIR}/next_actions.md"
+FIX_QUEUE_MD="${OUT_DIR}/fix_queue.md"
 TRACE_JSONL="${OUT_DIR}/trace.jsonl"
 MANIFEST_JSON="${OUT_DIR}/manifest.json"
+FIX_QUEUE_JSON="${OUT_DIR}/fix_queue.json"
+RESULT_JSON="${OUT_DIR}/result.json"
 
 # Create required files early (even if we fail later).
 : >"${RUN_LOG}"
 : >"${CHANGED_FILES}"
 : >"${DIFF_PATCH}"
+: >"${PATCH_DIFF}"
 : >"${COMMITS_TXT}"
 : >"${SUMMARY_TXT}"
 : >"${REVIEW_MD}"
 : >"${FINDINGS_YAML}"
 : >"${NEXT_ACTIONS_MD}"
+: >"${FIX_QUEUE_MD}"
 : >"${TRACE_JSONL}"
 : >"${MANIFEST_JSON}"
+: >"${FIX_QUEUE_JSON}"
+: >"${RESULT_JSON}"
 
 # Reuse oneclick stage/trace convention for debuggability.
 if [[ -f "${LIB_ONECLICK}" ]]; then
@@ -126,6 +134,20 @@ if ! command -v stage >/dev/null 2>&1; then
   }
 fi
 
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "${s}"
+}
+
+json_quote() {
+  printf '"%s"' "$(json_escape "$1")"
+}
+
 print_summary() {
   {
     echo
@@ -134,6 +156,7 @@ print_summary() {
     echo "  - review_md: ${REVIEW_MD}"
     echo "  - findings_yaml: ${FINDINGS_YAML}"
     echo "  - next_actions: ${NEXT_ACTIONS_MD}"
+    echo "  - fix_queue: ${FIX_QUEUE_MD}"
     echo "  - changed_files: ${CHANGED_FILES}"
     echo "  - diff_patch: ${DIFF_PATCH}"
     echo "  - commits: ${COMMITS_TXT}"
@@ -265,6 +288,7 @@ echo
 stage 1 "collect evidence: changed_files/diff/commits"
 git -C "${REPO_DIR}" diff --name-only "${BASE}..${HEAD}" >"${CHANGED_FILES}" || true
 git -C "${REPO_DIR}" diff "${BASE}..${HEAD}" >"${DIFF_PATCH}" || true
+cp "${DIFF_PATCH}" "${PATCH_DIFF}" 2>/dev/null || true
 git -C "${REPO_DIR}" log --oneline --decorate "${BASE}..${HEAD}" >"${COMMITS_TXT}" || true
 trace 1 "evidence collected" "ok" "{\"changed_files\":\"${CHANGED_FILES}\",\"diff_patch\":\"${DIFF_PATCH}\"}"
 
@@ -719,6 +743,74 @@ list_ids_by_status() {
   ' "${FINDINGS_YAML}" 2>/dev/null || true
 }
 
+finding_field() {
+  # finding_field <id> <field>
+  local id="$1"
+  local key="$2"
+  awk -v id="${id}" -v k="${key}" '
+    $0 ~ "^  - id: "id"$" {inside=1; next}
+    inside==1 && $0 ~ "^  - id: " && $0 !~ "^  - id: "id"$" {exit}
+    inside==1 && $0 ~ "^    "k":" {
+      sub("^    "k":[[:space:]]*", "", $0)
+      gsub(/"/, "", $0)
+      print $0
+      exit
+    }
+  ' "${FINDINGS_YAML}" 2>/dev/null || true
+}
+
+finding_list_inline() {
+  # finding_list_inline <id> <key>
+  local id="$1"
+  local key="$2"
+  awk -v id="${id}" -v k="${key}" '
+    $0 ~ "^  - id: "id"$" {inside=1; next}
+    inside==1 && $0 ~ "^  - id: " && $0 !~ "^  - id: "id"$" {exit}
+    inside==1 && $0 ~ "^    "k":\\s*$" {inlist=1; next}
+    inside==1 && inlist==1 && $0 ~ "^    [A-Za-z0-9_]+:" {exit}
+    inside==1 && inlist==1 && $0 ~ "^      - " {
+      sub("^      -[[:space:]]*", "", $0)
+      gsub(/"/, "", $0)
+      if (out == "") out=$0
+      else out=out"; "$0
+      next
+    }
+    END { print out }
+  ' "${FINDINGS_YAML}" 2>/dev/null || true
+}
+
+write_fix_queue_item() {
+  # write_fix_queue_item <id>
+  local id="$1"
+  local must_fix_raw must_fix location advice verify_min cleanup
+  must_fix_raw="$(finding_field "${id}" "must_fix")"
+  if [[ "${must_fix_raw}" == "true" ]]; then
+    must_fix="Yes"
+  else
+    must_fix="No"
+  fi
+  location="$(finding_field "${id}" "location")"
+  advice="$(finding_field "${id}" "advice")"
+  verify_min="$(finding_list_inline "${id}" "verify_min")"
+  cleanup="$(finding_list_inline "${id}" "cleanup")"
+  if [[ -z "${verify_min}" ]]; then
+    verify_min="(none)"
+  fi
+  if [[ -z "${cleanup}" ]]; then
+    cleanup="(none)"
+  fi
+
+  {
+    echo "- finding_id: ${id}"
+    echo "  must_fix: ${must_fix}"
+    echo "  location: ${location:-<unknown>}"
+    echo "  recommended_fix: ${advice:-TODO}"
+    echo "  verify_min: ${verify_min}"
+    echo "  cleanup: ${cleanup}"
+    echo "  next_cmd: bash ai/projects/topru-ai/verify/fix_one_by_one.sh --id ${id} --base ${BASE} --head ${HEAD}"
+  } >> "${FIX_QUEUE_MD}"
+}
+
 findings_total="$(awk '/^  - id: /{c++} END{print c+0}' "${FINDINGS_YAML}" 2>/dev/null || echo 0)"
 open_ids="$(list_ids_by_status open)"
 fixed_ids="$(list_ids_by_status fixed)"
@@ -732,9 +824,64 @@ open_list="$(echo "${open_ids}" | sed '/^$/d' | head -n 10 | paste -sd ',' - 2>/
 fixed_list="$(echo "${fixed_ids}" | sed '/^$/d' | head -n 10 | paste -sd ',' - 2>/dev/null || true)"
 partial_list="$(echo "${partial_ids}" | sed '/^$/d' | head -n 10 | paste -sd ',' - 2>/dev/null || true)"
 
+first_open_id="$(echo "${open_ids}" | sed '/^$/d' | head -n 1 || true)"
+
 result="FAIL"
 if [[ "${open_count}" == "0" ]]; then
   result="PASS"
+fi
+
+{
+  echo "# Fix Queue"
+  echo
+  echo "- run_id: ${RUN_ID}"
+  echo "- range: ${BASE}..${HEAD}"
+  echo "- open: [${open_list}]"
+  echo
+} > "${FIX_QUEUE_MD}"
+
+open_must_ids="$(
+  awk '
+    /^  - id: / {id=$3; next}
+    /^    must_fix: true$/ {must=1; next}
+    /^    status: open$/ {
+      if (id != "" && must == 1) print id
+      id=""; must=0
+      next
+    }
+    /^    status: / {
+      id=""; must=0
+      next
+    }
+  ' "${FINDINGS_YAML}" 2>/dev/null || true
+)"
+open_non_must_ids="$(
+  awk '
+    /^  - id: / {id=$3; must=0; next}
+    /^    must_fix: true$/ {must=1; next}
+    /^    status: open$/ {
+      if (id != "" && must != 1) print id
+      id=""; must=0
+      next
+    }
+    /^    status: / {
+      id=""; must=0
+      next
+    }
+  ' "${FINDINGS_YAML}" 2>/dev/null || true
+)"
+
+if [[ "${open_count}" == "0" ]]; then
+  echo "no open findings" >> "${FIX_QUEUE_MD}"
+else
+  while IFS= read -r rid; do
+    [[ -n "${rid}" ]] || continue
+    write_fix_queue_item "${rid}"
+  done <<< "${open_must_ids}"
+  while IFS= read -r rid; do
+    [[ -n "${rid}" ]] || continue
+    write_fix_queue_item "${rid}"
+  done <<< "${open_non_must_ids}"
 fi
 
 {
@@ -745,6 +892,8 @@ fi
   echo "fixed_count=${fixed_count} fixed=[${fixed_list}]"
   echo "partially_fixed_count=${partial_count} partially_fixed=[${partial_list}]"
   echo "result=${result}"
+  echo "open=[${open_list}]"
+  echo "fix_queue=${FIX_QUEUE_MD}"
   echo "review_md=${REVIEW_MD}"
   echo "findings_yaml=${FINDINGS_YAML}"
 } | tee -a "${SUMMARY_TXT}"
@@ -769,13 +918,17 @@ cat >"${MANIFEST_JSON}" <<EOF
     "run.log",
     "changed_files.txt",
     "diff.patch",
+    "patch.diff",
     "commits.txt",
     "summary.txt",
     "review.md",
     "findings.yaml",
     "next_actions.md",
+    "fix_queue.md",
+    "fix_queue.json",
     "trace.jsonl",
-    "manifest.json"
+    "manifest.json",
+    "result.json"
   ]
 }
 EOF
@@ -876,5 +1029,72 @@ else
   fi
 fi
 
+NEXT_CMD="NONE"
+if [[ "${OPEN_COUNT}" != "0" ]]; then
+  NEXT_CMD="bash ai/projects/topru-ai/verify/fix_one_by_one.sh --id ${first_open_id} --base ${BASE} --head ${HEAD}"
+elif [[ "${PR_READY}" != "true" ]]; then
+  NEXT_CMD="PR_READY_INCLUDE_REVIEW=1 bash ai/projects/topru-ai/verify/run_pr_ready_oneclick.sh"
+fi
+
+if [[ "${FINAL_RC}" == "0" ]]; then
+  final_result="PASS"
+else
+  final_result="FAIL"
+fi
+
+{
+  echo "{"
+  echo "  \"schema_version\": \"v1\","
+  echo "  \"run_id\": $(json_quote "${RUN_ID}"),"
+  echo "  \"mode\": $(json_quote "${MODE}"),"
+  echo "  \"base\": $(json_quote "${BASE}"),"
+  echo "  \"head\": $(json_quote "${HEAD}"),"
+  echo "  \"range\": $(json_quote "${BASE}..${HEAD}"),"
+  echo "  \"result\": $(json_quote "${final_result}"),"
+  echo "  \"pr_ready\": $(json_quote "${PR_READY}"),"
+  echo "  \"open_count\": ${OPEN_COUNT},"
+  echo "  \"open_list\": $(json_quote "${open_list}"),"
+  echo "  \"next\": $(json_quote "${NEXT_CMD}"),"
+  echo "  \"art_dir\": $(json_quote "${OUT_DIR}"),"
+  echo "  \"paths\": {"
+  echo "    \"trace\": $(json_quote "${TRACE_JSONL}"),"
+  echo "    \"manifest\": $(json_quote "${MANIFEST_JSON}"),"
+  echo "    \"patch\": $(json_quote "${PATCH_DIFF}"),"
+  echo "    \"review_md\": $(json_quote "${REVIEW_MD}"),"
+  echo "    \"findings_yaml\": $(json_quote "${FINDINGS_YAML}"),"
+  echo "    \"fix_queue_md\": $(json_quote "${FIX_QUEUE_MD}"),"
+  echo "    \"fix_queue\": $(json_quote "${FIX_QUEUE_JSON}"),"
+  echo "    \"result_json\": $(json_quote "${RESULT_JSON}")"
+  echo "  }"
+  echo "}"
+} > "${RESULT_JSON}"
+
+{
+  echo "{"
+  echo "  \"schema_version\": \"v1\","
+  echo "  \"run_id\": $(json_quote "${RUN_ID}"),"
+  echo "  \"open_count\": ${OPEN_COUNT},"
+  echo "  \"items\": ["
+  idx=0
+  while IFS= read -r rid; do
+    [[ -n "${rid}" ]] || continue
+    if [[ "${idx}" != "0" ]]; then
+      echo "    ,"
+    fi
+    echo "    {\"id\": $(json_quote "${rid}"), \"next\": $(json_quote "bash ai/projects/topru-ai/verify/fix_one_by_one.sh --id ${rid} --base ${BASE} --head ${HEAD}")}"
+    idx=$((idx+1))
+  done <<< "$(echo "${open_ids}" | sed '/^$/d')"
+  echo "  ]"
+  echo "}"
+} > "${FIX_QUEUE_JSON}"
+
 print_summary
+echo "RESULT=${final_result} RUN_ID=${RUN_ID} ART_DIR=${OUT_DIR} NEXT=\"${NEXT_CMD}\""
+echo "DETAIL trace.jsonl=${TRACE_JSONL}"
+echo "DETAIL manifest.json=${MANIFEST_JSON}"
+echo "DETAIL patch.diff=${PATCH_DIFF}"
+echo "DETAIL review.md=${REVIEW_MD}"
+echo "DETAIL findings.yaml=${FINDINGS_YAML}"
+echo "DETAIL fix_queue.md=${FIX_QUEUE_MD}"
+echo "DETAIL result.json=${RESULT_JSON}"
 exit "${FINAL_RC}"

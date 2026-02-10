@@ -152,17 +152,17 @@ next_actions:
     produces: [E_compat]
 
 review:
-  baseline_commit: "7601e077ca3b8e573414bfb5ccb82b34bad981db"
+  baseline_commit: "ba8b3d80cf7d5afecc821023a32e9e0363ad1faa"
   open: []
   fixed: []
   partially_fixed: []
   last_run:
-    time: "2026-02-06T06:59:51Z"
-    range: "02529dc4f79af2682dd5a05103fb4a8aa94aa0e3..7601e077ca3b8e573414bfb5ccb82b34bad981db"
-    artifacts_dir: "ai/projects/topru-ai/artifacts/review/20260206T065950Z_7601e07_incr"
-    review_md: "ai/projects/topru-ai/artifacts/review/20260206T065950Z_7601e07_incr/review.md"
-    findings_yaml: "ai/projects/topru-ai/artifacts/review/20260206T065950Z_7601e07_incr/findings.yaml"
-    next_actions: "ai/projects/topru-ai/artifacts/review/20260206T065950Z_7601e07_incr/next_actions.md"
+    time: "2026-02-10T05:27:08Z"
+    range: "ba8b3d80cf7d5afecc821023a32e9e0363ad1faa..ba8b3d80cf7d5afecc821023a32e9e0363ad1faa"
+    artifacts_dir: "ai/projects/topru-ai/artifacts/review/20260210T052708Z_ba8b3d8_incr"
+    review_md: "ai/projects/topru-ai/artifacts/review/20260210T052708Z_ba8b3d8_incr/review.md"
+    findings_yaml: "ai/projects/topru-ai/artifacts/review/20260210T052708Z_ba8b3d8_incr/findings.yaml"
+    next_actions: "ai/projects/topru-ai/artifacts/review/20260210T052708Z_ba8b3d8_incr/next_actions.md"
 pr_ready:
   from_track: true
   status: true

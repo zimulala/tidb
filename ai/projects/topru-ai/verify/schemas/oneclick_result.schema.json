@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ai/projects/topru-ai/verify/schemas/oneclick_result.schema.json",
+  "title": "run_pr_ready_oneclick result",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "track_id",
+    "base",
+    "head",
+    "range",
+    "include_review",
+    "pr_ready",
+    "review",
+    "evidence",
+    "audit_file",
+    "ssot_file",
+    "patched"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "v1"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "track_id": {
+      "type": "string"
+    },
+    "base": {
+      "type": "string"
+    },
+    "head": {
+      "type": "string"
+    },
+    "range": {
+      "type": "string"
+    },
+    "include_review": {
+      "type": "boolean"
+    },
+    "pr_ready": {
+      "type": "boolean"
+    },
+    "review": {
+      "type": "object",
+      "required": [
+        "result",
+        "open",
+        "findings_total",
+        "artifacts",
+        "trace"
+      ],
+      "properties": {
+        "result": {
+          "type": "string"
+        },
+        "open": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "findings_total": {
+          "type": "integer"
+        },
+        "artifacts": {
+          "type": "object"
+        },
+        "trace": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "evidence": {
+      "type": "object",
+      "required": [
+        "must",
+        "should",
+        "missing",
+        "items"
+      ],
+      "properties": {
+        "must": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "should": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "missing": {
+          "type": "object"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "eid",
+              "action",
+              "rc",
+              "trace",
+              "art_dir"
+            ],
+            "properties": {
+              "eid": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string",
+                "enum": [
+                  "run",
+                  "skip"
+                ]
+              },
+              "rc": {
+                "type": "integer"
+              },
+              "trace": {
+                "type": "string"
+              },
+              "art_dir": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "audit_file": {
+      "type": "string"
+    },
+    "ssot_file": {
+      "type": "string"
+    },
+    "patched": {
+      "type": "object"
+    },
+    "result_file": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,13 @@
+# Required
+REPO_ROOT="/Users/you/workspace/src/github.com/pingcap/tidb"
+DEFAULT_REMOTE="origin"
+BASE_BRANCH="master"
+
+# Tool launch templates
+# - If template contains %WORKTREE%, it will be replaced.
+# - Otherwise wt runs template from worktree directory.
+CURSOR_CMD='open -a "Cursor" "%WORKTREE%"'
+CODEX_CMD='cd "%WORKTREE%" && codex'
+
+# Optional (default: sibling <repo-name>-wt)
+# WT_ROOT="/Users/you/workspace/src/github.com/pingcap/tidb-wt"

@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.1.0"
+CONFIG_FILE="${WT_CONFIG:-${HOME}/.config/wt/config}"
+
+VERBOSE=0
+DRY_RUN=0
+WANT_CODEX=0
+WANT_CURSOR=0
+
+REPO_ROOT=""
+DEFAULT_REMOTE=""
+BASE_BRANCH=""
+CURSOR_CMD=""
+CODEX_CMD=""
+WT_ROOT=""
+
+usage() {
+  cat <<'EOF'
+Usage:
+  wt open <branch> [--codex] [--cursor] [--dry-run] [-v]
+  wt pr <prNum> [--codex] [--cursor] [--dry-run] [-v]
+  wt --version
+
+Config:
+  ~/.config/wt/config
+  required: REPO_ROOT, DEFAULT_REMOTE, BASE_BRANCH, CURSOR_CMD, CODEX_CMD
+EOF
+}
+
+die() {
+  echo "[wt][ERROR] $*" >&2
+  exit 1
+}
+
+info() {
+  echo "[wt] $*"
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
+}
+
+quote_cmd() {
+  local out=""
+  local arg
+  for arg in "$@"; do
+    out+=$(printf '%q ' "$arg")
+  done
+  out="${out% }"
+  printf '%s' "${out}"
+}
+
+run_cmd() {
+  local rendered
+  rendered="$(quote_cmd "$@")"
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[dry-run] ${rendered}"
+    return 0
+  fi
+  if [[ "${VERBOSE}" == "1" ]]; then
+    echo "+ ${rendered}"
+  fi
+  "$@"
+}
+
+run_shell_cmd() {
+  local script="$1"
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[dry-run] bash -lc $(printf '%q' "${script}")"
+    return 0
+  fi
+  if [[ "${VERBOSE}" == "1" ]]; then
+    echo "+ bash -lc $(printf '%q' "${script}")"
+  fi
+  bash -lc "${script}"
+}
+
+load_config() {
+  [[ -f "${CONFIG_FILE}" ]] || die "config not found: ${CONFIG_FILE} (see ai/ai-change-gates/tools/wt/config.example)"
+  # shellcheck disable=SC1090
+  source "${CONFIG_FILE}"
+
+  REPO_ROOT="${REPO_ROOT:-}"
+  DEFAULT_REMOTE="${DEFAULT_REMOTE:-}"
+  BASE_BRANCH="${BASE_BRANCH:-}"
+  CURSOR_CMD="${CURSOR_CMD:-}"
+  CODEX_CMD="${CODEX_CMD:-}"
+  WT_ROOT="${WT_ROOT:-}"
+
+  [[ -n "${REPO_ROOT}" ]] || die "REPO_ROOT is required in ${CONFIG_FILE}"
+  [[ -n "${DEFAULT_REMOTE}" ]] || die "DEFAULT_REMOTE is required in ${CONFIG_FILE}"
+  [[ -n "${BASE_BRANCH}" ]] || die "BASE_BRANCH is required in ${CONFIG_FILE}"
+  [[ -n "${CURSOR_CMD}" ]] || die "CURSOR_CMD is required in ${CONFIG_FILE}"
+  [[ -n "${CODEX_CMD}" ]] || die "CODEX_CMD is required in ${CONFIG_FILE}"
+
+  [[ -d "${REPO_ROOT}" ]] || die "REPO_ROOT does not exist: ${REPO_ROOT}"
+  git -C "${REPO_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "REPO_ROOT is not a git repo: ${REPO_ROOT}"
+
+  if [[ -z "${WT_ROOT}" ]]; then
+    WT_ROOT="$(cd "${REPO_ROOT}/.." && pwd)/$(basename "${REPO_ROOT}")-wt"
+  fi
+}
+
+exec_tool_cmd() {
+  # exec_tool_cmd <template> <worktree>
+  local template="$1"
+  local worktree="$2"
+  local script
+  if [[ "${template}" == *"%WORKTREE%"* ]]; then
+    script="${template//%WORKTREE%/${worktree}}"
+  else
+    script="cd $(printf '%q' "${worktree}") && ${template}"
+  fi
+  run_shell_cmd "${script}"
+}
+
+ensure_worktree_dirs() {
+  local worktree="$1"
+  run_cmd mkdir -p "${worktree}/_run/logs" "${worktree}/_run/tmp" "${worktree}/_run/data" "${worktree}/_run/ai"
+}
+
+open_worktree() {
+  local branch="$1"
+  [[ -n "${branch}" ]] || die "branch is required"
+
+  local worktree="${WT_ROOT}/${branch}"
+  local remote_branch="${DEFAULT_REMOTE}/${branch}"
+  local base_ref="${DEFAULT_REMOTE}/${BASE_BRANCH}"
+
+  info "repo=${REPO_ROOT}"
+  info "worktree=${worktree}"
+  info "branch=${branch}"
+  info "remote_branch=${remote_branch}"
+
+  run_cmd mkdir -p "${WT_ROOT}"
+  run_cmd git -C "${REPO_ROOT}" fetch "${DEFAULT_REMOTE}" --prune
+
+  if git -C "${REPO_ROOT}" show-ref --verify --quiet "refs/remotes/${remote_branch}"; then
+    run_cmd git -C "${REPO_ROOT}" branch -f "${branch}" "${remote_branch}"
+  else
+    local start_point="HEAD"
+    if git -C "${REPO_ROOT}" show-ref --verify --quiet "refs/remotes/${base_ref}"; then
+      start_point="${base_ref}"
+    elif git -C "${REPO_ROOT}" show-ref --verify --quiet "refs/heads/${BASE_BRANCH}"; then
+      start_point="${BASE_BRANCH}"
+    fi
+    run_cmd git -C "${REPO_ROOT}" branch -f "${branch}" "${start_point}"
+    run_cmd git -C "${REPO_ROOT}" push -u "${DEFAULT_REMOTE}" "${branch}:${branch}"
+  fi
+
+  if [[ -d "${worktree}" ]]; then
+    info "worktree exists: ${worktree}"
+  else
+    run_cmd git -C "${REPO_ROOT}" worktree add "${worktree}" "${branch}"
+  fi
+  ensure_worktree_dirs "${worktree}"
+
+  if [[ "${WANT_CURSOR}" == "1" ]]; then
+    exec_tool_cmd "${CURSOR_CMD}" "${worktree}"
+  fi
+  if [[ "${WANT_CODEX}" == "1" ]]; then
+    exec_tool_cmd "${CODEX_CMD}" "${worktree}"
+  fi
+}
+
+pr_worktree() {
+  local pr_num="$1"
+  [[ "${pr_num}" =~ ^[0-9]+$ ]] || die "prNum must be a number"
+  need_cmd gh
+
+  local branch="pr-${pr_num}"
+  local worktree="${WT_ROOT}/${branch}"
+
+  info "repo=${REPO_ROOT}"
+  info "worktree=${worktree}"
+  info "pr=${pr_num}"
+
+  run_cmd mkdir -p "${WT_ROOT}"
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    run_shell_cmd "cd $(printf '%q' "${REPO_ROOT}") && gh pr checkout ${pr_num} -b $(printf '%q' "${branch}")"
+  else
+    if ! bash -lc "cd $(printf '%q' "${REPO_ROOT}") && gh pr checkout ${pr_num} -b $(printf '%q' "${branch}")" >/dev/null 2>&1; then
+      bash -lc "cd $(printf '%q' "${REPO_ROOT}") && gh pr checkout ${pr_num}"
+      local cur_branch
+      cur_branch="$(git -C "${REPO_ROOT}" branch --show-current || true)"
+      [[ -n "${cur_branch}" ]] || die "failed to determine current branch after gh pr checkout"
+      run_cmd git -C "${REPO_ROOT}" branch -f "${branch}" "${cur_branch}"
+    fi
+  fi
+
+  if [[ -d "${worktree}" ]]; then
+    info "worktree exists: ${worktree}"
+  else
+    run_cmd git -C "${REPO_ROOT}" worktree add "${worktree}" "${branch}"
+  fi
+  ensure_worktree_dirs "${worktree}"
+
+  if [[ "${WANT_CURSOR}" == "1" ]]; then
+    exec_tool_cmd "${CURSOR_CMD}" "${worktree}"
+  fi
+  if [[ "${WANT_CODEX}" == "1" ]]; then
+    exec_tool_cmd "${CODEX_CMD}" "${worktree}"
+  fi
+}
+
+parse_flags() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --codex)
+        WANT_CODEX=1
+        ;;
+      --cursor)
+        WANT_CURSOR=1
+        ;;
+      --dry-run)
+        DRY_RUN=1
+        ;;
+      -v)
+        VERBOSE=1
+        ;;
+      *)
+        die "unknown flag: $1"
+        ;;
+    esac
+    shift
+  done
+}
+
+main() {
+  local cmd="${1:-}"
+  if [[ -z "${cmd}" ]]; then
+    usage
+    exit 2
+  fi
+
+  case "${cmd}" in
+    --version|-V|version)
+      echo "wt ${VERSION}"
+      exit 0
+      ;;
+    open)
+      shift
+      local branch="${1:-}"
+      [[ -n "${branch}" ]] || die "open requires <branch>"
+      shift || true
+      parse_flags "$@"
+      need_cmd git
+      load_config
+      open_worktree "${branch}"
+      ;;
+    pr)
+      shift
+      local pr_num="${1:-}"
+      [[ -n "${pr_num}" ]] || die "pr requires <prNum>"
+      shift || true
+      parse_flags "$@"
+      need_cmd git
+      load_config
+      pr_worktree "${pr_num}"
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"

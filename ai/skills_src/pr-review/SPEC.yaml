@@ -1,0 +1,13 @@
+name: pr-review
+version: v1.4
+description: Review pull requests for correctness, risk, and test coverage.
+triggers:
+  - review pr/diff/commit
+  - incremental re-review
+  - targeted verification
+outputs:
+  - chinese review results for human approval by default
+  - no github side effects unless explicitly requested
+safety:
+  - findings-first and evidence-based review
+  - no github comment/issue operations without explicit instruction
