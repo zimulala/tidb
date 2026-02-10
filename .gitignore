@@ -74,6 +74,12 @@ compose-dev.yaml
 fix.sql
 export-20*/
 var
+ai/projects/*/artifacts/pr_ready/runs/
+ai/projects/*/artifacts/impl/
+ai/projects/*/artifacts/fix/
+ai/projects/*/artifacts/audit/runs/
+ai/projects/*/artifacts/oneclick/
+ai/projects/*/artifacts/review/
 
 # Personal config files
 /*config.toml
