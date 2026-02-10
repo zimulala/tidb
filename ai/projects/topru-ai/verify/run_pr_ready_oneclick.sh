@@ -8,15 +8,24 @@ PROJECT_ROOT="ai/projects/topru-ai"
 TRACK_ID="resource-observability-topru"
 PROTOCOL_ROOT="ai/ai-change-gates"
 PR_READY_INCLUDE_REVIEW="${PR_READY_INCLUDE_REVIEW:-0}" # 1 to include strict-review gate
+PR_READY_OUTPUT="${PR_READY_OUTPUT:-summary}"           # summary | verbose
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project) PROJECT_ROOT="$2"; shift 2;;
     --track) TRACK_ID="$2"; shift 2;;
     --protocol-root) PROTOCOL_ROOT="$2"; shift 2;;
+    --output) PR_READY_OUTPUT="$2"; shift 2;;
+    --summary) PR_READY_OUTPUT="summary"; shift;;
+    --verbose) PR_READY_OUTPUT="verbose"; shift;;
     *) echo "Unknown arg: $1"; exit 2;;
   esac
 done
+
+case "${PR_READY_OUTPUT}" in
+  summary|verbose) ;;
+  *) echo "Unknown --output: ${PR_READY_OUTPUT} (expected: summary|verbose)"; exit 2;;
+esac
 
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
@@ -41,6 +50,10 @@ file_sig() {
 resolve_base_sha() {
   if [[ -n "${ONECLICK_BASE_SHA:-}" ]]; then
     echo "${ONECLICK_BASE_SHA}"
+    return 0
+  fi
+  if [[ -n "${BASE_REV:-}" ]]; then
+    echo "${BASE_REV}"
     return 0
   fi
   local upstream base
@@ -116,6 +129,10 @@ bool_json() {
   else
     echo "false"
   fi
+}
+
+is_verbose_output() {
+  [[ "${PR_READY_OUTPUT}" == "verbose" ]]
 }
 
 STATE_SIG_BEFORE="$(file_sig "${STATE_FILE}")"
@@ -297,6 +314,34 @@ json_array_to_bracket_display() {
   else
     echo "[${csv}]"
   fi
+}
+
+count_evidence_actions() {
+  # count_evidence_actions <run|skip>
+  local target="${1}"
+  local count=0
+  local n="${#EVIDENCE_ACTIONS[@]}"
+  local i=0
+  while [[ ${i} -lt ${n} ]]; do
+    if [[ "${EVIDENCE_ACTIONS[$i]}" == "${target}" ]]; then
+      count=$((count + 1))
+    fi
+    i=$((i + 1))
+  done
+  echo "${count}"
+}
+
+count_evidence_failures() {
+  local count=0
+  local n="${#EVIDENCE_RCS[@]}"
+  local i=0
+  while [[ ${i} -lt ${n} ]]; do
+    if [[ "${EVIDENCE_RCS[$i]}" != "0" ]]; then
+      count=$((count + 1))
+    fi
+    i=$((i + 1))
+  done
+  echo "${count}"
 }
 
 eid_runner_script() {
@@ -609,15 +654,34 @@ EOF
 emit_layered_human_output() {
   local must_missing_display
   must_missing_display="$(json_array_to_bracket_display "${FINAL_MUST_MISSING_JSON}")"
+  local should_missing_display
+  should_missing_display="$(json_array_to_bracket_display "${FINAL_SHOULD_MISSING_JSON}")"
+  local run_count skip_count failed_count
+  run_count="$(count_evidence_actions run)"
+  skip_count="$(count_evidence_actions skip)"
+  failed_count="$(count_evidence_failures)"
 
-  echo "PR_READY=${FINAL_PR_READY_BOOL} REVIEW=${FINAL_REVIEW_RESULT} review_open=${FINAL_REVIEW_OPEN_COUNT} evidence_must_missing=${must_missing_display} RUN_ID=${PR_READY_RUN_ID}"
+  if is_verbose_output; then
+    echo "PR_READY=${FINAL_PR_READY_BOOL} REVIEW=${FINAL_REVIEW_RESULT} review_open=${FINAL_REVIEW_OPEN_COUNT} evidence_must_missing=${must_missing_display} RUN_ID=${PR_READY_RUN_ID}"
+    echo "NEXT: ${FINAL_NEXT_COMMAND}"
+    echo "SSOT: ${STATE_FILE}"
+    echo "RESULT_JSON: ${PR_READY_RESULT_FILE}"
+    echo "RUN_MANIFEST: ${PR_READY_MANIFEST_FILE}"
+    echo "REVIEW_DIR: ${REVIEW_ART_DIR:-<none>}"
+    echo "AUDIT_FILE: ${AUDIT_OUT_FILE:-<none>}"
+    echo "TRACE: ${PR_READY_TRACE_FILE}"
+    return 0
+  fi
+
+  echo " "
+  echo "=== Result ==="
+  echo "PR_READY=${FINAL_PR_READY_BOOL} REVIEW=${FINAL_REVIEW_RESULT} review_open=${FINAL_REVIEW_OPEN_COUNT} RUN_ID=${PR_READY_RUN_ID}"
+  echo "SUMMARY: must_missing=${must_missing_display} should_missing=${should_missing_display} evidence(run=${run_count},skip=${skip_count},failed=${failed_count})"
   echo "NEXT: ${FINAL_NEXT_COMMAND}"
-  echo "SSOT: ${STATE_FILE}"
   echo "RESULT_JSON: ${PR_READY_RESULT_FILE}"
   echo "RUN_MANIFEST: ${PR_READY_MANIFEST_FILE}"
-  echo "REVIEW_DIR: ${REVIEW_ART_DIR:-<none>}"
-  echo "AUDIT_FILE: ${AUDIT_OUT_FILE:-<none>}"
   echo "TRACE: ${PR_READY_TRACE_FILE}"
+  echo " "
 }
 
 emit_summary() {
@@ -787,18 +851,24 @@ finalize_and_exit() {
   exit "${rc}"
 }
 
-log "PR-ready navigator start"
-log "track=${TRACK_ID}"
-log "must=[${MUST_RAW}]"
-log "should=[${SHOULD_RAW}]"
-log "conditional=[${COND_RAW}]"
+if is_verbose_output; then
+  log "PR-ready navigator start"
+  log "track=${TRACK_ID}"
+  log "must=[${MUST_RAW}]"
+  log "should=[${SHOULD_RAW}]"
+  log "conditional=[${COND_RAW}]"
+else
+  log "PR-ready navigator start track=${TRACK_ID} include_review=${PR_READY_INCLUDE_REVIEW} output=${PR_READY_OUTPUT}"
+fi
 
 # Run MUST first
 for eid in ${MUST_LIST}; do
   if evidence_is_truly_captured "${eid}"; then
     art_dir="${PROJECT_ROOT}/artifacts/evidence/${eid}"
     trace_file="${art_dir}/trace.jsonl"
-    echo "[pr_ready] skip ${eid}: already captured (valid) (art_dir=${art_dir}, trace=${trace_file})"
+    if is_verbose_output; then
+      echo "[pr_ready] skip ${eid}: already captured (valid) (art_dir=${art_dir}, trace=${trace_file})"
+    fi
     if [[ ! -f "${trace_file}" ]]; then
       pr_ready_trace_stub "${trace_file}" "pr_ready" "skip: already captured" "ok" "{\"eid\":\"${eid}\"}"
     fi
@@ -824,7 +894,9 @@ for eid in ${SHOULD_LIST}; do
   if evidence_is_truly_captured "${eid}"; then
     art_dir="${PROJECT_ROOT}/artifacts/evidence/${eid}"
     trace_file="${art_dir}/trace.jsonl"
-    echo "[pr_ready] skip ${eid}: already captured (valid) (art_dir=${art_dir}, trace=${trace_file})"
+    if is_verbose_output; then
+      echo "[pr_ready] skip ${eid}: already captured (valid) (art_dir=${art_dir}, trace=${trace_file})"
+    fi
     if [[ ! -f "${trace_file}" ]]; then
       pr_ready_trace_stub "${trace_file}" "pr_ready" "skip: already captured" "ok" "{\"eid\":\"${eid}\"}"
     fi

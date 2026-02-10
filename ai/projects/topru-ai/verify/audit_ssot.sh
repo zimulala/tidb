@@ -124,8 +124,10 @@ fi
   echo "pr_ready_status: ${pr_status}"
   echo "missing_must: [$(IFS=,; echo "${missing_must[*]-}")]"
   echo "missing_should: [$(IFS=,; echo "${missing_should[*]-}")]"
-  echo
-  echo "NOTE: Run with --patch to write pr_ready fields back into SSOT."
+  if [[ "${MODE}" != "patch" ]]; then
+    echo
+    echo "NOTE: Run with --patch to write pr_ready fields back into SSOT."
+  fi
 } | tee "${OUT_FILE}"
 
 echo "Wrote audit report: ${OUT_FILE}"
