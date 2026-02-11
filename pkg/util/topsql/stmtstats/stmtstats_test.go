@@ -395,6 +395,7 @@ func TestExecCountBeginBased_ToggleMidExecution(t *testing.T) {
 		stats := CreateStatementStats()
 		ru := util.NewRUDetailsWith(3, 0, 0)
 		ctx := context.WithValue(context.Background(), util.RUDetailsCtxKey, ru)
+		key := RUKey{User: "u1", SQLDigest: BinaryDigest("sql"), PlanDigest: BinaryDigest("plan")}
 
 		stats.OnExecutionBegin([]byte("sql"), []byte("plan"), &ExecBeginInfo{
 			User:         "u1",
@@ -408,7 +409,12 @@ func TestExecCountBeginBased_ToggleMidExecution(t *testing.T) {
 			ExecDuration: time.Second,
 		})
 		require.Nil(t, stats.execCtx)
-		require.Len(t, stats.MergeRUInto(), 0)
+		m := stats.MergeRUInto()
+		require.Len(t, m, 1)
+		incr, ok := m[key]
+		require.True(t, ok)
+		require.Equal(t, uint64(1), incr.ExecCount)
+		require.InDelta(t, 0.0, incr.TotalRU, 1e-9)
 
 		ru.Merge(util.NewRUDetailsWith(2, 0, 0))
 		require.Len(t, stats.MergeRUInto(), 0)
@@ -442,13 +448,19 @@ func TestExecCountBeginBased_RUZeroNoNoise(t *testing.T) {
 	stats := CreateStatementStats()
 	ru := util.NewRUDetailsWith(0, 0, 0)
 	ctx := context.WithValue(context.Background(), util.RUDetailsCtxKey, ru)
+	key := RUKey{User: "u3", SQLDigest: BinaryDigest("sql"), PlanDigest: BinaryDigest("plan")}
 
 	stats.OnExecutionBegin([]byte("sql"), []byte("plan"), &ExecBeginInfo{
 		User:         "u3",
 		TopRUEnabled: true,
 		Ctx:          ctx,
 	})
-	require.Len(t, stats.MergeRUInto(), 0)
+	m := stats.MergeRUInto()
+	require.Len(t, m, 1)
+	incr, ok := m[key]
+	require.True(t, ok)
+	require.Equal(t, uint64(1), incr.ExecCount)
+	require.InDelta(t, 0.0, incr.TotalRU, 1e-9)
 
 	stats.OnExecutionFinished([]byte("sql"), []byte("plan"), &ExecFinishInfo{
 		User:         "u3",
@@ -741,7 +753,15 @@ func TestExecCountBeginBased_KeySwitchNoCrossPollution(t *testing.T) {
 		RUDetails:    ruA,
 		ExecDuration: 2 * time.Second,
 	})
-	require.Len(t, stats.MergeRUInto(), 0)
+	pseudoB := stats.MergeRUInto()
+	require.Len(t, pseudoB, 1)
+	// Stale finish for keyA should not contaminate keyB.
+	_, existsA := pseudoB[keyA]
+	require.False(t, existsA)
+	incrPseudoB, ok := pseudoB[keyB]
+	require.True(t, ok)
+	require.Equal(t, uint64(1), incrPseudoB.ExecCount)
+	require.InDelta(t, 0.0, incrPseudoB.TotalRU, 1e-9)
 
 	ruB.Merge(util.NewRUDetailsWith(7, 0, 0))
 	stats.OnExecutionFinished([]byte("sqlB"), []byte("planB"), &ExecFinishInfo{
@@ -755,7 +775,13 @@ func TestExecCountBeginBased_KeySwitchNoCrossPollution(t *testing.T) {
 	incrB, ok := bucketB[keyB]
 	require.True(t, ok)
 	require.InDelta(t, 7.0, incrB.TotalRU, 1e-9)
-	require.Equal(t, uint64(1), incrB.ExecCount)
+	require.Equal(t, uint64(0), incrB.ExecCount)
+	// Across buckets, keyB still has exactly one begin-based ExecCount.
+	total := RUIncrementMap{}
+	total.Merge(pseudoB)
+	total.Merge(bucketB)
+	require.Equal(t, uint64(1), total[keyB].ExecCount)
+	require.InDelta(t, 7.0, total[keyB].TotalRU, 1e-9)
 
 	require.Nil(t, stats.execCtx)
 }

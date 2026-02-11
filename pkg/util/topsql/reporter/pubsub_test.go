@@ -222,18 +222,21 @@ func TestPubSubMultiSubscriberIsolation(t *testing.T) {
 	}
 
 	go func() { _ = svc.Subscribe(req1, stream1) }()
-	go func() { _ = svc.Subscribe(req2, stream2) }()
-
 	require.Eventually(t, func() bool {
-		return topsqlstate.TopRUEnabled() && topsqlstate.GetTopRUItemInterval() == 15
+		return topsqlstate.TopRUEnabled() && topsqlstate.GetTopRUItemInterval() == 30
 	}, time.Second, 10*time.Millisecond)
 
-	cancel1()
+	go func() { _ = svc.Subscribe(req2, stream2) }()
 	require.Eventually(t, func() bool {
 		return topsqlstate.TopRUEnabled() && topsqlstate.GetTopRUItemInterval() == 15
 	}, time.Second, 10*time.Millisecond)
 
 	cancel2()
+	require.Eventually(t, func() bool {
+		return topsqlstate.TopRUEnabled() && topsqlstate.GetTopRUItemInterval() == 15
+	}, time.Second, 10*time.Millisecond)
+
+	cancel1()
 	require.Eventually(t, func() bool {
 		return !topsqlstate.TopRUEnabled() && topsqlstate.GetTopRUItemInterval() == int64(topsqlstate.DefTiDBTopRUItemIntervalSeconds)
 	}, time.Second, 10*time.Millisecond)

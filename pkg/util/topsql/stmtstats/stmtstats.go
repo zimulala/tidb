@@ -123,6 +123,8 @@ func (s *StatementStats) addRUOnBeginLocked(user string, sqlDigest, planDigest [
 		Key:       key,
 	}
 	// Count ExecCount at begin time, consistent with TopSQL behavior.
+	// ExecCount is begin-based by design (TopSQL-aligned); TotalRU==0 && ExecCount>0 can appear
+	// in RU=0 / mid-disable / key-switch paths.
 	incr := s.getOrCreateRUIncrementLocked(key)
 	incr.ExecCount++
 }

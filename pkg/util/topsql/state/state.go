@@ -15,8 +15,10 @@
 package state
 
 import (
+	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tipb/go-tipb"
 	"go.uber.org/atomic"
+	"go.uber.org/zap"
 )
 
 // Default Top-SQL state values.
@@ -67,7 +69,7 @@ type State struct {
 	ruConsumerCount *atomic.Int64
 	// The report data interval of top-ru.
 	// Set from subscription request (15s/30s/60s); defaults to 60s.
-	// Phase 3: Smaller interval prevails when multiple subscribers set different values.
+	// Phase 3: Global last-write-wins while subscribers are active.
 	TopRUItemIntervalSeconds *atomic.Int64
 }
 
@@ -152,25 +154,21 @@ func normalizeTopRUItemIntervalSeconds(intervalSeconds tipb.ItemInterval) int64 
 // Valid values: 15, 30, 60 (from tipb.ItemInterval enum).
 // This value controls TopRURecordItem.timestamp_sec aggregation granularity only.
 // It does not define stream push cadence, which is driven by reporter report tick.
-// Invalid values are normalized to the default 60s before applying "smaller prevails".
+// Invalid values are normalized to the default 60s before storing.
 //
-// Phase 3 Design: When multiple subscribers set different intervals,
-// the smaller interval prevails. This ensures all subscribers receive
-// data at least as frequently as they requested.
+// Phase 3 Design: Global last-write-wins semantics.
+// The most recent SetTopRUItemInterval call determines the effective value.
+// The value remains until the last subscriber leaves and DisableTopRU resets it.
 func SetTopRUItemInterval(itemIntervalSeconds tipb.ItemInterval) {
 	intervalSeconds := normalizeTopRUItemIntervalSeconds(itemIntervalSeconds)
-	for {
-		current := GlobalState.TopRUItemIntervalSeconds.Load()
-		// Smaller interval prevails
-		if intervalSeconds >= current {
-			// Current interval is already smaller or equal, no change needed
-			return
-		}
-		if GlobalState.TopRUItemIntervalSeconds.CAS(current, intervalSeconds) {
-			return
-		}
-		// CAS failed, retry
-	}
+	current := GlobalState.TopRUItemIntervalSeconds.Load()
+	logutil.BgLogger().Warn(
+		"[top-sql] top ru item interval overridden by later subscription",
+		zap.Int64("current_interval_seconds", current),
+		zap.Int64("new_interval_seconds", intervalSeconds),
+		zap.Int64("active_subscribers", GlobalState.ruConsumerCount.Load()),
+	)
+	GlobalState.TopRUItemIntervalSeconds.Store(intervalSeconds)
 }
 
 // GetTopRUItemInterval returns the report interval for TopRU (in seconds).
@@ -182,7 +180,7 @@ func GetTopRUItemInterval() int64 {
 // ResetTopRUItemInterval resets the report interval to the default value.
 // Called when the last TopRU subscriber unsubscribes.
 // This allows the next subscriber to set their preferred interval without
-// being constrained by a previous subscriber's smaller interval.
+// inheriting the previous subscriber's last-write value.
 func ResetTopRUItemInterval() {
 	GlobalState.TopRUItemIntervalSeconds.Store(DefTiDBTopRUItemIntervalSeconds)
 }

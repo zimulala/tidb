@@ -46,16 +46,16 @@ func TestTopRUEnableDisableAndResetInterval(t *testing.T) {
 	require.False(t, TopRUEnabled())
 }
 
-func TestTopRUItemIntervalSmallerPrevails(t *testing.T) {
+func TestTopRUItemIntervalLastWriteWins(t *testing.T) {
 	GlobalState.ruConsumerCount.Store(0)
 	ResetTopRUItemInterval()
 
 	SetTopRUItemInterval(30)
 	require.Equal(t, int64(30), GetTopRUItemInterval())
 
-	// Larger interval should not overwrite smaller one.
+	// Last write wins globally.
 	SetTopRUItemInterval(60)
-	require.Equal(t, int64(30), GetTopRUItemInterval())
+	require.Equal(t, int64(60), GetTopRUItemInterval())
 
 	SetTopRUItemInterval(15)
 	require.Equal(t, int64(15), GetTopRUItemInterval())
@@ -74,9 +74,9 @@ func TestTopRUItemIntervalNormalizeInvalidToDefault(t *testing.T) {
 	SetTopRUItemInterval(99)
 	require.Equal(t, int64(DefTiDBTopRUItemIntervalSeconds), GetTopRUItemInterval())
 
-	// "Smaller prevails" remains effective after normalization.
+	// Invalid values are normalized to 60 and last write wins.
 	SetTopRUItemInterval(15)
 	require.Equal(t, int64(15), GetTopRUItemInterval())
-	SetTopRUItemInterval(0) // normalized to 60, should not override current 15.
-	require.Equal(t, int64(15), GetTopRUItemInterval())
+	SetTopRUItemInterval(0) // normalized to 60.
+	require.Equal(t, int64(DefTiDBTopRUItemIntervalSeconds), GetTopRUItemInterval())
 }
