@@ -60,7 +60,7 @@ func TestRUWindowAggregatorReportGranularity(t *testing.T) {
 	run(60, []uint64{0}, []float64{10})
 }
 
-func TestRUWindowAggregatorSealTo200(t *testing.T) {
+func TestRUWindowAggregatorCompactTo200(t *testing.T) {
 	agg := newRUWindowAggregator()
 	batch := make(stmtstats.RUIncrementMap, 250)
 	for i := 0; i < 250; i++ {
@@ -85,7 +85,7 @@ func TestRUWindowAggregatorSealTo200(t *testing.T) {
 
 	bucket := agg.buckets[0]
 	require.NotNil(t, bucket)
-	require.Equal(t, ruBucketStateSealed, bucket.state)
+	require.Equal(t, ruBucketStateCompacted, bucket.state)
 	require.Nil(t, bucket.collecting)
 	require.NotEmpty(t, bucket.records)
 
@@ -95,7 +95,7 @@ func TestRUWindowAggregatorSealTo200(t *testing.T) {
 			normalUsers++
 		}
 	}
-	require.LessOrEqual(t, normalUsers, ruSealedTopNUsers)
+	require.LessOrEqual(t, normalUsers, ruCompactedTopNUsers)
 }
 
 func TestRUWindowAggregatorTakeOncePerWindow(t *testing.T) {

@@ -25,21 +25,21 @@ const (
 	ruBaseBucketSeconds   uint64 = 15
 	ruReportWindowSeconds uint64 = 60
 
-	// Online stage (1~14s in an open bucket): allow larger pre-TopN headroom.
+	// Online stage (1~14s in a collecting bucket): allow larger pre-TopN headroom.
 	ruOpenPreTopNUsers       = maxPreTopNUsers
 	ruOpenPreTopNSQLsPerUser = maxPreTopNSQLsPerUser
 
-	// Sealed 15s buckets: compact to 200x200.
-	ruSealedTopNUsers       = maxTopUsers
-	ruSealedTopNSQLsPerUser = maxTopSQLsPerUser
+	// Compacted 15s buckets: compact to 200x200.
+	ruCompactedTopNUsers       = maxTopUsers
+	ruCompactedTopNSQLsPerUser = maxTopSQLsPerUser
 
 	// Final 60s report points: compact to 100x100.
 	ruReportTopNUsers       = 100
 	ruReportTopNSQLsPerUser = 100
 
-	// Merge stage may combine up to 4 sealed buckets, so keep enough pre-cap before final 100x100 filtering.
-	ruReportMergePreTopNUsers       = int(ruReportWindowSeconds/ruBaseBucketSeconds) * ruSealedTopNUsers
-	ruReportMergePreTopNSQLsPerUser = int(ruReportWindowSeconds/ruBaseBucketSeconds) * ruSealedTopNSQLsPerUser
+	// Merge stage may combine up to 4 compacted buckets, so keep enough pre-cap before final 100x100 filtering.
+	ruReportMergePreTopNUsers       = int(ruReportWindowSeconds/ruBaseBucketSeconds) * ruCompactedTopNUsers
+	ruReportMergePreTopNSQLsPerUser = int(ruReportWindowSeconds/ruBaseBucketSeconds) * ruCompactedTopNSQLsPerUser
 
 	// The final output can contain up to 4 report points (15s granularity),
 	// each with 100x100 top entries.
@@ -50,8 +50,8 @@ const (
 type ruBucketState uint8
 
 const (
-	ruBucketStateOpen ruBucketState = iota
-	ruBucketStateSealed
+	ruBucketStateCollecting ruBucketState = iota
+	ruBucketStateCompacted
 )
 
 type ruPointBucket struct {
@@ -62,9 +62,9 @@ type ruPointBucket struct {
 }
 
 // ruWindowAggregator keeps online 15s buckets:
-//   - open bucket aggregates 1s batches with 400x400 pre-cap
-//   - sealed bucket keeps 200x200 compacted records
-//   - report stage (every 60s) merges sealed buckets and applies 100x100 filtering
+//   - collecting bucket aggregates 1s batches with 400x400 pre-cap
+//   - compacted bucket keeps 200x200 compacted records
+//   - report stage (every 60s) merges compacted buckets and applies 100x100 filtering
 type ruWindowAggregator struct {
 	mu                sync.Mutex
 	buckets           map[uint64]*ruPointBucket // 15s startTs -> bucket
@@ -98,19 +98,19 @@ func (a *ruWindowAggregator) addSecondBatch(ts uint64, increments stmtstats.RUIn
 		return
 	}
 
-	a.sealBucketsBeforeLocked(bucketStart)
+	a.rotateBucketsBeforeLocked(bucketStart)
 
 	bucket, ok := a.buckets[bucketStart]
 	if !ok {
 		bucket = &ruPointBucket{
 			startTs:    bucketStart,
-			state:      ruBucketStateOpen,
+			state:      ruBucketStateCollecting,
 			collecting: newRUCollectingWithCaps(ruOpenPreTopNUsers, ruOpenPreTopNSQLsPerUser),
 		}
 		a.buckets[bucketStart] = bucket
 	}
-	if bucket.state != ruBucketStateOpen || bucket.collecting == nil {
-		// Out-of-order data hitting an already sealed bucket.
+	if bucket.state != ruBucketStateCollecting || bucket.collecting == nil {
+		// Out-of-order data hitting an already compacted bucket.
 		return
 	}
 
@@ -135,8 +135,8 @@ func (a *ruWindowAggregator) takeReportRecords(nowTs, granularitySec uint64, key
 		return nil
 	}
 
-	// Seal all buckets that are no longer writable for this report boundary.
-	a.sealBucketsBeforeLocked(windowEnd)
+	// Rotate all buckets that are no longer writable for this report boundary.
+	a.rotateBucketsBeforeLocked(windowEnd)
 
 	windowStart := windowEnd - ruReportWindowSeconds
 	records := a.buildReportRecordsLocked(windowStart, windowEnd, granularitySec, keyspaceName)
@@ -157,28 +157,28 @@ func (a *ruWindowAggregator) takeReportRecords(nowTs, granularitySec uint64, key
 	return records
 }
 
-func (a *ruWindowAggregator) sealBucketsBeforeLocked(boundaryStart uint64) {
+func (a *ruWindowAggregator) rotateBucketsBeforeLocked(boundaryStart uint64) {
 	for _, bucket := range a.buckets {
-		if bucket.state != ruBucketStateOpen {
+		if bucket.state != ruBucketStateCollecting {
 			continue
 		}
 		if bucket.startTs+ruBaseBucketSeconds <= boundaryStart {
-			a.sealBucketLocked(bucket)
+			a.rotateBucketLocked(bucket)
 		}
 	}
 }
 
-func (a *ruWindowAggregator) sealBucketLocked(bucket *ruPointBucket) {
-	if bucket == nil || bucket.state != ruBucketStateOpen {
+func (a *ruWindowAggregator) rotateBucketLocked(bucket *ruPointBucket) {
+	if bucket == nil || bucket.state != ruBucketStateCollecting {
 		return
 	}
 	if bucket.collecting == nil {
-		bucket.state = ruBucketStateSealed
+		bucket.state = ruBucketStateCompacted
 		return
 	}
-	bucket.records = bucket.collecting.getReportRecordsWithLimits(nil, ruSealedTopNUsers, ruSealedTopNSQLsPerUser)
+	bucket.records = bucket.collecting.getReportRecordsWithLimits(nil, ruCompactedTopNUsers, ruCompactedTopNSQLsPerUser)
 	bucket.collecting = nil
-	bucket.state = ruBucketStateSealed
+	bucket.state = ruBucketStateCompacted
 }
 
 func (a *ruWindowAggregator) buildReportRecordsLocked(windowStart, windowEnd, granularitySec uint64, keyspaceName []byte) []tipb.TopRURecord {
