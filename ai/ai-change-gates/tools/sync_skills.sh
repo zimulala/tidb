@@ -7,20 +7,26 @@ CODEX_HOME_DIR="${CODEX_HOME:-${HOME}/.codex}"
 CURSOR_HOME_DIR="${CURSOR_HOME:-${HOME}/.cursor}"
 SYNC_CODEX="1"
 SYNC_CURSOR="1"
+TARGET_FILTER_SET="0"
 CURSOR_OUT_DIR="${CURSOR_HOME_DIR}"
 
 usage() {
   cat <<'EOF'
 Usage:
-  bash ai/ai-change-gates/tools/sync_skills.sh [--codex-home <path>] [--no-cursor] [--cursor-home <path>] [--cursor-out <path>]
+  bash ai/ai-change-gates/tools/sync_skills.sh [--codex] [--cursor] [--codex-home <path>] [--cursor-home <path>] [--cursor-out <path>]
 
 Defaults:
-  - Syncs to both Codex and Cursor.
+  - If neither --codex nor --cursor is provided, sync both targets.
+  - --codex syncs to ~/.codex/skills by default (override via --codex-home).
+  - --cursor syncs to ~/.cursor/skills by default (override via --cursor-home/--cursor-out).
   - Source of truth is ai/skills_src/*/{SPEC.yaml,BODY.md}.
 
 Notes:
   - Do not edit ~/.codex/skills/... or ~/.cursor/skills/... manually.
   - Edit ai/skills_src/... and re-run this script.
+  - Optional in SPEC.yaml: install_name: <dir-name>
+    - Controls output directory name under ~/.codex/skills and ~/.cursor/skills.
+    - If omitted, install_name defaults to name.
 EOF
 }
 
@@ -46,6 +52,24 @@ read_spec_scalar() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --codex)
+      if [[ "${TARGET_FILTER_SET}" == "0" ]]; then
+        SYNC_CODEX="0"
+        SYNC_CURSOR="0"
+        TARGET_FILTER_SET="1"
+      fi
+      SYNC_CODEX="1"
+      shift
+      ;;
+    --cursor)
+      if [[ "${TARGET_FILTER_SET}" == "0" ]]; then
+        SYNC_CODEX="0"
+        SYNC_CURSOR="0"
+        TARGET_FILTER_SET="1"
+      fi
+      SYNC_CURSOR="1"
+      shift
+      ;;
     --codex-home)
       CODEX_HOME_DIR="$2"
       shift 2
@@ -80,6 +104,16 @@ if [[ ! -d "${SRC_ROOT}" ]]; then
   exit 1
 fi
 
+if [[ "${SYNC_CODEX}" != "1" && "${SYNC_CURSOR}" != "1" ]]; then
+  echo "[sync_skills][FATAL] no sync target selected; use --codex and/or --cursor" >&2
+  exit 1
+fi
+
+if [[ "${SYNC_CODEX}" == "1" && -z "${CODEX_HOME_DIR}" ]]; then
+  echo "[sync_skills][FATAL] codex home dir is empty" >&2
+  exit 1
+fi
+
 if [[ "${SYNC_CURSOR}" == "1" && -z "${CURSOR_OUT_DIR}" ]]; then
   echo "[sync_skills][FATAL] cursor output dir is empty" >&2
   exit 1
@@ -95,6 +129,7 @@ for skill_dir in "${SRC_ROOT}"/*; do
   [[ -f "${body_file}" ]] || continue
 
   skill_name="$(read_spec_scalar "${spec_file}" "name")"
+  install_name="$(read_spec_scalar "${spec_file}" "install_name")"
   skill_version="$(read_spec_scalar "${spec_file}" "version")"
   skill_description="$(read_spec_scalar "${spec_file}" "description")"
   triggers_line="$(grep -E '^triggers:' "${spec_file}" || true)"
@@ -104,6 +139,9 @@ for skill_dir in "${SRC_ROOT}"/*; do
   if [[ -z "${skill_name}" || -z "${skill_version}" || -z "${skill_description}" ]]; then
     echo "[sync_skills][FATAL] missing name/version/description in ${spec_file}" >&2
     exit 1
+  fi
+  if [[ -z "${install_name}" ]]; then
+    install_name="${skill_name}"
   fi
   if [[ -z "${triggers_line}" || -z "${outputs_line}" || -z "${safety_line}" ]]; then
     echo "[sync_skills][FATAL] SPEC.yaml missing required keys in ${spec_file}" >&2
@@ -126,19 +164,17 @@ for skill_dir in "${SRC_ROOT}"/*; do
   } > "${tmp_file}"
 
   if [[ "${SYNC_CODEX}" == "1" ]]; then
-    codex_target_dir="${CODEX_HOME_DIR}/skills/${skill_name}"
+    codex_target_dir="${CODEX_HOME_DIR}/skills/${install_name}"
     mkdir -p "${codex_target_dir}"
     cp "${tmp_file}" "${codex_target_dir}/SKILL.md"
     echo "[sync_skills] codex -> ${codex_target_dir}/SKILL.md"
   fi
 
   if [[ "${SYNC_CURSOR}" == "1" ]]; then
-    cursor_target_dir="${CURSOR_OUT_DIR}/skills/${skill_name}"
+    cursor_target_dir="${CURSOR_OUT_DIR}/skills/${install_name}"
     mkdir -p "${cursor_target_dir}"
     cp "${tmp_file}" "${cursor_target_dir}/skill.md"
     echo "[sync_skills] cursor -> ${cursor_target_dir}/skill.md"
-  else
-    echo "[sync_skills] cursor sync disabled by --no-cursor."
   fi
 
   rm -f "${tmp_file}"

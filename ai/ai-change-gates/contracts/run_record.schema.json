@@ -1,0 +1,181 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "ai/ai-change-gates/contracts/run_record.schema.json",
+  "title": "ai-change-gates run record",
+  "type": "object",
+  "required": [
+    "run_id",
+    "timestamp",
+    "trigger",
+    "inputs",
+    "outputs",
+    "roles",
+    "verifier",
+    "latency_ms",
+    "next_actions"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "minLength": 1
+    },
+    "trigger": {
+      "type": "string",
+      "minLength": 1
+    },
+    "inputs": {
+      "type": "object",
+      "required": [
+        "ssot_path",
+        "ssot_hash",
+        "read_files"
+      ],
+      "properties": {
+        "ssot_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ssot_hash": {
+          "type": "string",
+          "minLength": 1
+        },
+        "read_files": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "outputs": {
+      "type": "object",
+      "required": [
+        "written_files"
+      ],
+      "properties": {
+        "written_files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "added_lines",
+              "removed_lines"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "added_lines": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "removed_lines": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "diff_summary": {
+          "type": "string",
+          "maxLength": 200
+        }
+      },
+      "additionalProperties": true
+    },
+    "roles": {
+      "type": "object",
+      "required": [
+        "navigator",
+        "patch",
+        "implement"
+      ],
+      "properties": {
+        "navigator": {
+          "type": "object"
+        },
+        "patch": {
+          "type": "object"
+        },
+        "implement": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": true
+    },
+    "verifier": {
+      "type": "object",
+      "required": [
+        "status",
+        "fail_codes"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail"
+          ]
+        },
+        "fail_codes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "latency_ms": {
+      "type": "object",
+      "required": [
+        "navigator",
+        "patch",
+        "verifier"
+      ],
+      "properties": {
+        "navigator": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "patch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "verifier": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "implement": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "next_actions": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

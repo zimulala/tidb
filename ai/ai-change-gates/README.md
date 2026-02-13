@@ -12,7 +12,10 @@ ai-change-gates/
 │   ├── stop-rules.md
 │   ├── assumption-closure-gate.md
 │   ├── semantic-go-gate.md
-│   └── review-evidence-slots.md
+│   ├── review-evidence-slots.md
+│   ├── fail_codes.json
+│   ├── fail_codes.md
+│   └── run_record.schema.json
 ├── templates/
 │   ├── CHANGE_BRIEF.md
 │   ├── CHANGE_BRIEF_MINI.md
@@ -27,7 +30,8 @@ ai-change-gates/
 │   ├── PHASE_3D_REVIEW_REPORT.md
 │   ├── FAILURE_ASSUMPTIONS.md
 │   ├── PR_AI_DISCLOSURE.md
-│   └── EVIDENCE_INDEX.md
+│   ├── EVIDENCE_INDEX.md
+│   └── run_record.template.json
 ├── prompts/
 │   ├── quickstart.prompt.md
 │   ├── quickstart-mini.prompt.md
@@ -69,6 +73,8 @@ ai-change-gates/
 │       └── prompts/
 │           ├── topru-phase-2.prompt.md
 │           └── topru-phase-3d-review.prompt.md
+├── runs/
+│   └── YYYY-MM-DD_run-<run_id>.json/.md
 └── examples/
     └── topru-case-study.md
 
@@ -92,6 +98,7 @@ ai-change-gates/
   - Verified-by-test 无 Evidence Index ⇒ STOP（contracts/evidence-policy.md）
   - Review findings 必须可关闭（closure requirement + evidence id）（contracts/review-evidence-slots.md）
 - Evidence is immutable during review：证据必须绑定 commit/time/env/params；diff 变化 ⇒ 证据失效
+- Every NAVIGATE / NAVIGATE+PATCH run should produce a black-box run record under `runs/`
 
 ## Trust Levels（TL0~TL4）
 

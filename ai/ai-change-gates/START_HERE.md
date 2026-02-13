@@ -109,7 +109,14 @@ Examples:
 - State
 - Gate blockers (if any)
 - Next actions (max 3): each with exact file path + exact edit intent
+- Run record path (`ai/ai-change-gates/runs/YYYY-MM-DD_run-<run_id>.json`)
 - STOP (no long explanations)
+
+4) Write one black-box run record for every run:
+- Generate:
+  - `ai/ai-change-gates/runs/YYYY-MM-DD_run-<run_id>.json`
+  - `ai/ai-change-gates/runs/YYYY-MM-DD_run-<run_id>.md`
+- Update `<project>/PROJECT_STATE.md` with `last_run: ai/ai-change-gates/runs/<...>.json`
 
 ## NAVIGATE+PATCH mode
 
@@ -122,8 +129,10 @@ Behavior:
   - Create missing governance files under <project>/ by copying protocol templates
   - Insert placeholder TODO blocks for missing required slots (do NOT invent facts)
   - Update <project>/PROJECT_STATE.md with current state and next actions
+  - MUST generate run record json+md under `ai/ai-change-gates/runs/`
+  - MUST update `<project>/PROJECT_STATE.md` `last_run` pointer to latest run record json
 
 Safety (hard):
 - MUST NOT modify any source code files.
 - MUST NOT modify any build/config files (Makefile/BUILD/WORKSPACE/etc).
-- Only allowed to create/edit markdown files under <project>/.
+- Only allowed to create/edit markdown files under <project>/, plus run record files under ai/ai-change-gates/runs (.json/.md).

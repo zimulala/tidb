@@ -1,0 +1,195 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "ai/ai-change-gates/contracts/output_schemas/navigator_output.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "role",
+    "run_id",
+    "state",
+    "next_actions",
+    "risk_flags",
+    "assumptions"
+  ],
+  "properties": {
+    "role": {
+      "const": "navigator"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "summary",
+        "ssot_paths",
+        "key_files"
+      ],
+      "properties": {
+        "phase": {
+          "enum": [
+            "discover",
+            "design",
+            "implement",
+            "verify",
+            "review",
+            "release"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "ssot_paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "key_files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "next_actions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "type",
+          "target_paths",
+          "acceptance",
+          "evidence_plan"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "type": {
+            "enum": [
+              "patch_ssot",
+              "implement_code",
+              "add_tests",
+              "run_verifier",
+              "collect_evidence"
+            ]
+          },
+          "target_paths": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "acceptance": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "evidence_plan": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "risk_flags": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "type",
+          "note",
+          "mitigation"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "type": {
+            "enum": [
+              "correctness",
+              "performance",
+              "compatibility",
+              "safety",
+              "security"
+            ]
+          },
+          "note": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mitigation": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status",
+          "note",
+          "proof"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "enum": [
+              "confirmed",
+              "needs_confirmation",
+              "forbidden_open"
+            ]
+          },
+          "note": {
+            "type": "string",
+            "minLength": 1
+          },
+          "proof": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

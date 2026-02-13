@@ -9,8 +9,8 @@
         "ai/skills_src/*/BODY.md"
       ],
       "outputs": [
-        "~/.codex/skills/<skill>/SKILL.md",
-        "~/.cursor/skills/<skill>/skill.md"
+        "~/.codex/skills/<install_name-or-skill>/SKILL.md",
+        "~/.cursor/skills/<install_name-or-skill>/skill.md"
       ],
       "offline": true
     },
@@ -39,12 +39,40 @@
       "offline": true
     },
     {
+      "name": "run_record",
+      "entry": "ai/ai-change-gates/tools/run_record.sh",
+      "inputs": [
+        "--ssot <project>/PROJECT_STATE.md",
+        "--mode navigate|navigate_patch",
+        "--trigger manual|ci|local",
+        "--read-file <path> (repeat)",
+        "--next-action <text> (max 3)"
+      ],
+      "outputs": [
+        "ai/ai-change-gates/runs/YYYY-MM-DD_run-<run_id>.json",
+        "ai/ai-change-gates/runs/YYYY-MM-DD_run-<run_id>.md",
+        "updated PROJECT_STATE.md last_run pointer"
+      ],
+      "safety": {
+        "forbidden": [
+          "source code edits",
+          "build/config edits",
+          "network bootstrap",
+          "git push"
+        ]
+      },
+      "offline": true
+    },
+    {
       "name": "quick_gatecheck",
       "entry": "ai/ai-change-gates/gatecheck/quick.sh",
       "inputs": [
-        "ai/projects/topru-ai/PROJECT_STATE.md",
+        "ai/ai-change-gates/contracts/fail_codes.json",
+        "ai/ai-change-gates/contracts/run_record.schema.json",
+        "ai/ai-change-gates/skills.index.json",
+        "ai/ai-change-gates/templates/run_record.template.json",
         "ai/ai-change-gates/tools.index.json",
-        "ai/ai-change-gates/skills.index.json"
+        "ai/projects/topru-ai/PROJECT_STATE.md"
       ],
       "outputs": [
         "stdout gate summary"

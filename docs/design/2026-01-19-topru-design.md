@@ -1,4 +1,4 @@
-# TiDB TopRU Design
+# TiDB TopRU
 
 - Author: [zimulala](https://github.com/zimulala)
 - Tracking Issue: https://github.com/pingcap/tidb/issues/65471
@@ -47,7 +47,7 @@ Next-gen TiDB Cloud charges by RU (Request Unit). When cluster RU consumption is
 
 1. **Sort by RU Consumption**: Support sorting and querying by cumulative RU consumption, identifying high RU SQLs (including SQLs with short execution time but high RU consumption)
 2. **User-Dimension Aggregation**: Aggregate by `(user, sql_digest, plan_digest)` tuple, support viewing RU consumption distribution by user
-3. **Near Real-Time Statistics**: Local 1-second sampling; RU output is attempted on each TopSQL report tick (default 60s). `item_interval_seconds` controls TopRU item granularity (15s/30s/60s) within each emitted 60s window; end-to-end latency approximately 60~120s
+3. **Near Real-Time Statistics**: Local 1-second sampling, batch reporting to downstream (e.g., Vector) every `report_interval` (default 60s, configurable 15s/30s/60s); end-to-end latency approximately 60~120s
 4. **Compatible with Existing Capabilities**: Coexists with TopSQL's existing CPU time statistics without interference
 
 ### Non-Goals
@@ -60,71 +60,11 @@ Next-gen TiDB Cloud charges by RU (Request Unit). When cluster RU consumption is
 
 ### Architecture Overview
 
-TopRU reuses TopSQL's reporting pipeline and adds RU-specific **bounded window aggregation** (producing at most one aligned 60s window per TopSQL report tick), controlling memory and CPU while ensuring near real-time capabilities.
+TopRU reuses TopSQL's reporting pipeline and adds RU-specific **bounded window aggregation** (producing 1 data point per `report_interval`), controlling memory and CPU while ensuring near real-time capabilities.
 
 **Architecture Diagram** (`[NEW]` marks TopRU new pipelines):
 
-```mermaid
----
-config:
-  theme: neutral
----
-flowchart TB
-    subgraph SQL_Execution["SQL Execution Layer"]
-        ex1["pprof.SetGoroutineLabels<br/>(sql_digest, plan_digest)"]
-        ex2["OnExecutionFinished<br/>(write StatementStats.data)"]
-        startExec["<b>[NEW]</b> StartExecution<br/>(register executionContext)"]:::newRU
-        ruDetails["<b>[NEW]</b> util.RUDetails<br/>(TiKV/TiFlash response accum RU)"]:::newRU
-    end
-
-    subgraph Data_Collection["Data Collection Layer"]
-        cpu["SQLCPUCollector<br/>parseCPUProfileBySQLLabels"]
-        agg["aggregator.aggregate() (1s)<br/>Take() + Merge"]
-        execCtx["<b>[NEW]</b> executionContext<br/>(Ctx, Key, LastRUSample)"]:::newRU
-        ruAgg["<b>[NEW]</b> ruAggregate() (1s)<br/>MergeRUInto()"]:::newRU
-    end
-
-    subgraph Reporter["RemoteTopSQLReporter.collectWorker"]
-        cpuChan["collectCPUTimeChan"]
-        stmtChan["collectStmtStatsChan"]
-        ruChan["<b>[NEW]</b> RU increments"]:::newRU
-        procCPU["processCPUTimeData()<br/>TopN + others"]
-        stmtBuf["stmtStatsBuffer<br/>(buffer by timestamp)"]
-        ruBuf["<b>[NEW]</b> ruIncrementBuffer<br/>(2-level TopN + others: 200x200)"]:::newRU
-        procStmt["processStmtStatsData() (60s)<br/>TopN by NetworkBytes"]
-        procRU["<b>[NEW]</b> processRUIncrement (15s)<br/>200×200 TopN → ruPointBucket"]:::newRU
-    end
-
-    subgraph Storage["Buffer & Storage Layer"]
-        rec["collecting.records<br/>(cpu + stmtStats)"]
-        ruBucket["<b>[NEW]</b> ruPointBucket<br/>(startTs → 200×200 aggregation)"]:::newRU
-    end
-
-    subgraph Report["Report Layer"]
-        send["takeDataAndSendToReportChan() (60s)<br/>100×100 final filtering → report"]
-        worker["reportWorker"]
-        sink["DataSink<br/>(SingleTarget/PubSub)"]
-    end
-
-    %% CPU pipeline
-    ex1 -- "1s Collect()" --> cpu --> cpuChan --> procCPU --> rec
-
-    %% StmtStats pipeline  
-    ex2 --> agg --> stmtChan --> stmtBuf --> procStmt --> rec
-
-    %% [NEW] RU pipeline
-    startExec --> execCtx
-    ruDetails --> execCtx
-    execCtx --> ruAgg --> ruChan --> ruBuf --> procRU --> ruBucket
-
-    %% Report
-    rec --> send
-    ruBucket --> send
-    send --> worker --> sink
-
-    %% Styles for new RU components
-    classDef newRU fill:#d4edda,stroke:#28a745,stroke-width:2px
-```
+![TopRU Architecture](./imgs/topru-architecture.png)
 
 **Design Principles**:
 
@@ -166,19 +106,17 @@ SQL Execution → ExecutionContext Registration → 1s sampling writes to timest
 
 #### Feature Toggle
 
-TopRU is controlled through **subscription configuration** (pushed from downstream subscriber to TiDB):
+TopRU is controlled in a **subscription-driven, reference-counted** way.
 
-| Config Item | Type | Default | Description |
-|-------------|------|---------|-------------|
-| `collectors` includes `COLLECTOR_TYPE_TOPRU` | repeated enum | empty | TopRU toggle, controls RU collection and RU data sending |
-| `item_interval_seconds` | enum | 60s | TopRURecordItem aggregation granularity, options: 15s/30s/60s |
+| Config Item                                    | Type | Default | Description |
+|------------------------------------------------|------|---------|-------------|
+| `subscriptors` includes `COLLECTOR_TYPE_TOPRU` | repeated enum | empty | TopRU toggle via subscription; enabled when `ruConsumerCount > 0`, controlling RU collection and sending. |
+| `item_interval_seconds`                        | enum | 60s | TopRURecordItem aggregation interval, options: 15s/30s/60s |
 
 **Design Considerations**:
-- TopRU enable/disable is independent from TopSQL CPU collection
-- TopRU report triggering currently reuses TopSQL report ticker
-- `item_interval_seconds` controls item granularity only, not stream push cadence
-- Configuration pushed by subscriber, no manual configuration needed on TiDB side
-- Configuration changes take effect dynamically, no restart required
+- Independent feature (decoupled from TopSQL semantics).
+- Reference counting avoids “last write wins” bugs under multiple subscribers.
+- Configuration changes take effect dynamically, no restart required.
 
 **Behavior When Disabled**:
 - Stop RU sampling (`ruAggregate()` skips execution)
@@ -211,7 +149,7 @@ type ExecutionContext struct {
 type StatementStats struct {
     data     StatementStatsMap
     finished *atomic.Bool
-    mu       sync.Mutex // Could consider changing to RWMutex, but tick/finish paths both have write operations
+    mu       sync.Mutex // Protects StatementStats; RWMutex was considered, but tick/finish paths both perform writes
 
     execCtx *ExecutionContext // Currently executing statement
     // finishedRUIncrements caches RU increments from the finish path,
@@ -274,7 +212,7 @@ func (m *aggregator) ruAggregate() {
     if len(incr.Data) > 0 || incr.OthersRU > 0 {
         m.collectors.Range(func(c, _ any) bool {
             if rc, ok := c.(RUCollector); ok {
-                rc.CollectRUIncrements(incr.Data, incr.OthersRU)
+                rc.CollectRUIncrements(incr)
             }
             return true
         })
@@ -358,12 +296,11 @@ func (b *ruPointBucket) TakeAll() map[uint64]*timestampBuffer
 func (tsr *RemoteTopSQLReporter) processRUIncrementBuffer()
 ```
 
-**60s Reporting**: On each TopSQL report tick (default 60s), TopRU attempts to take out one aligned complete 60s window from `ruPointBucket`, merges and applies 100×100 TopN + others final filtering, and reports. If one or more windows are missed, only the latest complete window is emitted; older windows are dropped (no catch-up).
+**60s Reporting**: Every `report_interval` (default 60s) takes out `ruPointBucket`, merges and applies 100×100 TopN + others final filtering and reports.
 
 ```go
-// RemoteTopSQLReporter.reportRUData: triggered on TopSQL report tick,
-// takes out one aligned complete 60s window from ruPointBucket, applies
-// 100×100 TopN + others final filtering, and reports (no catch-up for missed windows).
+// RemoteTopSQLReporter.reportRUData: triggered every report_interval,
+// takes out ruPointBucket, applies 100×100 TopN + others final filtering, generates TopRURecord and reports.
 func (tsr *RemoteTopSQLReporter) reportRUData()
 ```
 
@@ -418,7 +355,7 @@ type ruRecord struct {
 // collecting extension
 type collecting struct {
     records   map[string]*record  // CPU data (key: sql+plan)
-    ruRecords map[string]*record  // New: RU data (key: user+sql+plan)
+    ruRecords map[string]*ruRecord  // New: RU data (key: user+sql+plan)
     // ...
 }
 ```
@@ -464,8 +401,6 @@ type ReportData struct {
 - SQLMetas and PlanMetas are shared between TopSQL and TopRU to avoid duplicate transmission
 - Protocol evolution commitment: only add new fields, do not modify/reuse existing field numbers, do not change existing field semantics
 
-For detailed protocol discussion, refer to: TiDB TopRU Protocol Discussion Document
-
 ## Performance and Risk Analysis
 
 ### Performance Optimization Measures
@@ -476,7 +411,7 @@ For detailed protocol discussion, refer to: TiDB TopRU Protocol Discussion Docum
 |----------|---------|
 | Memory | Three-tier buffer design, 1s writes to lightweight buffer (200×200), 15s re-filters and merges to point bucket |
 | CPU | RU collection reuses aggregator's 1s tick, no additional collection cycles |
-| Network | Batches on TopSQL report tick (default 60s), reuses TopSQL's existing reporting pipeline |
+| Network | 60s batch reporting, reuses TopSQL's existing reporting pipeline |
 
 **Optional Optimizations**:
 
@@ -568,16 +503,9 @@ TopRU feature supports dynamic disabling through configuration toggle, no restar
 
 **Memory Estimation Baseline** (based on TopRU reporting fields):
 
-| Field | Type | Size |
-|-------|------|------|
-| Keyspace | []byte | ~16 bytes |
-| User | string | ~16 bytes (average username) |
-| SQLDigest | []byte | 32 bytes (SHA256) |
-| PlanDigest | []byte | 32 bytes (SHA256) |
-| TotalRU | float64 | 8 bytes |
-| ExecCount | uint64 | 8 bytes |
-| SumDurationNs | uint64 | 8 bytes |
-| **Total** | | **~120 bytes/entry** |
+Each `(keyspace, user, sql_digest, plan_digest)` record payload is roughly **~120 bytes/entry**
+(~16 keyspace + ~16 user + 32 sql_digest + 32 plan_digest + 8 total_ru + 8 exec_count + 8 sum_duration_ns).
+Note this is a **lower-bound payload estimate**; Go in-memory structures (e.g. map/string overhead) can be significantly larger.
 
 **Shortcomings**:
 

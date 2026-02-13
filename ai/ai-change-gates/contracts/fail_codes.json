@@ -1,0 +1,68 @@
+{
+  "schema_version": "v1",
+  "codes": [
+    {
+      "code": "E_PATCH_SCOPE",
+      "title": "Patch touched out-of-scope paths",
+      "condition": "Any changed path is outside allowlist: ai/ai-change-gates/** plus configured SSOT path",
+      "min_fix": "Revert out-of-scope files; keep only ai/ai-change-gates/** and SSOT markdown updates; rerun gatecheck.",
+      "severity": "blocker"
+    },
+    {
+      "code": "E_NO_RUN_RECORD",
+      "title": "Run record files are missing",
+      "condition": "No runs/YYYY-MM-DD_run-*.json exists",
+      "min_fix": "Run: bash ai/ai-change-gates/tools/run_record.sh --ssot <project>/PROJECT_STATE.md --mode navigate_patch --trigger local",
+      "severity": "blocker"
+    },
+    {
+      "code": "E_BAD_RUN_RECORD",
+      "title": "Run record validation failed",
+      "condition": "last_run json missing required fields or wrong types",
+      "min_fix": "Regenerate run record via run_record.sh and ensure required fields: run_id/timestamp/inputs/outputs/roles/verifier/latency_ms/next_actions.",
+      "severity": "blocker"
+    },
+    {
+      "code": "E_TOO_MANY_ACTIONS",
+      "title": "Too many next actions",
+      "condition": "next_actions length is greater than 3 in SSOT or run record",
+      "min_fix": "Trim next_actions to max 3 prioritized items and rerun gatecheck.",
+      "severity": "blocker"
+    },
+    {
+      "code": "E_OPEN_ASSUMPTION",
+      "title": "Open assumption without closure fields",
+      "condition": "Any SSOT assumption is Open or missing owner/deadline",
+      "min_fix": "For each open assumption set owner+deadline, or close it with evidence and rationale.",
+      "severity": "blocker"
+    },
+    {
+      "code": "E_NO_EVIDENCE",
+      "title": "Action lacks evidence/verification plan",
+      "condition": "Any next_actions item misses produces/evidence/verification field",
+      "min_fix": "Add produces/evidence/verification plan for each action (command + artifact target).",
+      "severity": "blocker"
+    },
+    {
+      "code": "E_MISSING_LAST_RUN",
+      "title": "SSOT last_run is missing or stale",
+      "condition": "SSOT lacks last_run, points outside runs/, points to missing file, or not latest run json",
+      "min_fix": "Update SSOT last_run to latest ai/ai-change-gates/runs/YYYY-MM-DD_run-<run_id>.json.",
+      "severity": "blocker"
+    },
+    {
+      "code": "E_SCHEMA_INVALID",
+      "title": "Schema/contract invalid",
+      "condition": "SSOT required keys or contract json/template files are missing/invalid",
+      "min_fix": "Fix missing keys/files and JSON parse errors, then rerun gatecheck.",
+      "severity": "blocker"
+    },
+    {
+      "code": "W_RISK_NO_MITIGATION",
+      "title": "Risk marker without mitigation",
+      "condition": "Risk signal exists but mitigation text is absent",
+      "min_fix": "Add explicit mitigation owner+plan for each risk marker.",
+      "severity": "warn"
+    }
+  ]
+}

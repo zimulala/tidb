@@ -3,6 +3,11 @@ REPO_ROOT="/Users/you/workspace/src/github.com/pingcap/tidb"
 DEFAULT_REMOTE="origin"
 BASE_BRANCH="master"
 
+# Optional
+# - PR_REMOTE is used by `wt pr`/`wt review` (default: origin).
+# - Keep DEFAULT_REMOTE for `wt open` (often your fork remote, e.g. zimuxia).
+# PR_REMOTE="origin"
+
 # Tool launch templates
 # - If template contains %WORKTREE%, it will be replaced.
 # - Otherwise wt runs template from worktree directory.

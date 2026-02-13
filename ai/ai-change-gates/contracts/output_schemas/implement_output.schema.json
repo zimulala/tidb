@@ -1,0 +1,108 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "ai/ai-change-gates/contracts/output_schemas/implement_output.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "role",
+    "run_id",
+    "outputs"
+  ],
+  "properties": {
+    "role": {
+      "const": "implement"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "outputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assumptions",
+        "test_plan",
+        "code_diff",
+        "proof"
+      ],
+      "properties": {
+        "assumptions": {
+          "type": "array"
+        },
+        "test_plan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tests_to_add_or_update",
+            "commands_to_run"
+          ],
+          "properties": {
+            "tests_to_add_or_update": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "path",
+                  "intent",
+                  "must_fail_before_fix"
+                ],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "intent": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "must_fail_before_fix": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            "commands_to_run": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "code_diff": {
+          "type": "string",
+          "minLength": 1
+        },
+        "proof": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "results_summary",
+            "references"
+          ],
+          "properties": {
+            "results_summary": {
+              "type": "string",
+              "minLength": 1
+            },
+            "references": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "run_record"
+              ],
+              "properties": {
+                "run_record": {
+                  "type": "string",
+                  "pattern": "^ai/ai-change-gates/runs/.+"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

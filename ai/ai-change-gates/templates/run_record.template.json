@@ -1,0 +1,48 @@
+{
+  "run_id": "TODO_RUN_ID",
+  "timestamp": "TODO_TIMESTAMP_ISO8601",
+  "trigger": "local",
+  "inputs": {
+    "ssot_path": "ai/projects/TODO/PROJECT_STATE.md",
+    "ssot_hash": "TODO_SHA256",
+    "read_files": [
+      "ai/projects/TODO/PROJECT_STATE.md"
+    ]
+  },
+  "outputs": {
+    "written_files": [
+      {
+        "path": "ai/projects/TODO/PROJECT_STATE.md",
+        "added_lines": 1,
+        "removed_lines": 1
+      },
+      {
+        "path": "ai/ai-change-gates/runs/2026-02-12_run-TODO.json",
+        "added_lines": 1,
+        "removed_lines": 0
+      }
+    ],
+    "diff_summary": "TODO_DIFF_SUMMARY_MAX_200_CHARS"
+  },
+  "roles": {
+    "navigator": {
+      "summary": "TODO_NAVIGATOR_SUMMARY"
+    },
+    "patch": {
+      "summary": "TODO_PATCH_SUMMARY"
+    },
+    "implement": {}
+  },
+  "verifier": {
+    "status": "pass",
+    "fail_codes": []
+  },
+  "latency_ms": {
+    "navigator": 0,
+    "patch": 0,
+    "verifier": 0,
+    "implement": null
+  },
+  "next_actions": [],
+  "notes": ""
+}

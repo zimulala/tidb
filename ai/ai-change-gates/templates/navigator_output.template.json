@@ -1,0 +1,46 @@
+{
+  "role": "navigator",
+  "run_id": "RUN_ID_PLACEHOLDER",
+  "state": {
+    "phase": "discover",
+    "summary": "<=200 chars",
+    "ssot_paths": [
+      "PATH_PLACEHOLDER"
+    ],
+    "key_files": [
+      "PATH_PLACEHOLDER"
+    ]
+  },
+  "next_actions": [
+    {
+      "id": "A1",
+      "title": "imperative verb phrase",
+      "type": "patch_ssot",
+      "target_paths": [
+        "PATH_PLACEHOLDER"
+      ],
+      "acceptance": [
+        "verifiable criteria strings"
+      ],
+      "evidence_plan": [
+        "what evidence will prove done"
+      ]
+    }
+  ],
+  "risk_flags": [
+    {
+      "id": "R1",
+      "type": "correctness",
+      "note": "short",
+      "mitigation": "short"
+    }
+  ],
+  "assumptions": [
+    {
+      "id": "AS1",
+      "status": "needs_confirmation",
+      "note": "short",
+      "proof": "how to confirm or reference"
+    }
+  ]
+}

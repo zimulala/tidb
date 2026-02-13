@@ -3,29 +3,83 @@ set -euo pipefail
 
 VERSION="0.1.0"
 CONFIG_FILE="${WT_CONFIG:-${HOME}/.config/wt/config}"
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
 
 VERBOSE=0
 DRY_RUN=0
 WANT_CODEX=0
 WANT_CURSOR=0
+WANT_REVIEW=0
+REVIEW_FLAG_EXPLICIT=0
+WANT_CODEX_PLAN=0
+BASE_OVERRIDE=""
+WT_INVOCATION=""
+DECONFLICT_PUSH=0
+DECONFLICT_NO_FALLBACK=0
+DECONFLICT_HEAD_OWNER=""
+DECONFLICT_HEAD_REPO=""
+DECONFLICT_STRATEGY=""
+DECONFLICT_DEFAULT_HEAD_OWNER="ti-chi-bot"
+
+DECONFLICT_PR_URL=""
+DECONFLICT_PR_TITLE=""
+DECONFLICT_PR_NUMBER=""
+DECONFLICT_BASE_REF=""
+DECONFLICT_HEAD_REF=""
+DECONFLICT_META_HEAD_REPO=""
+DECONFLICT_META_HEAD_OWNER=""
+DECONFLICT_EFFECTIVE_HEAD_REPO=""
+DECONFLICT_EFFECTIVE_HEAD_OWNER=""
+DECONFLICT_HEAD_REMOTE_URL=""
+DECONFLICT_PR_META_RAW=""
+DECONFLICT_PR_BODY=""
+DECONFLICT_META_STATUS="not-run"
+DECONFLICT_INTENT_STATUS="not-run"
+DECONFLICT_WARNINGS=""
+
+DECONFLICT_MARKER_SCAN_FILE=""
+DECONFLICT_MARKER_LINE_COUNT=0
+DECONFLICT_MARKER_FILE_COUNT=0
+DECONFLICT_MARKER_SCAN_STATUS="not-run"
+
+REVIEW_ART_DIR=""
+REVIEW_RESULT_FILE=""
+REVIEW_MANIFEST_FILE=""
+REVIEW_TRACE_FILE=""
+REVIEW_PR_SUMMARY_FILE=""
+REVIEW_STRATEGY_FILE=""
+REVIEW_RISK_SCAN_FILE=""
+REVIEW_TEST_PLAN_FILE=""
+REVIEW_NEXT_FILE=""
+REVIEW_LLM_REVIEW_FILE=""
+REVIEW_FINDINGS_FILE=""
+REVIEW_STATUS="FAIL"
+REVIEW_MIN_TESTS_HINT=""
 
 REPO_ROOT=""
 DEFAULT_REMOTE=""
+PR_REMOTE=""
 BASE_BRANCH=""
 CURSOR_CMD=""
 CODEX_CMD=""
 WT_ROOT=""
+HAS_RG=0
 
 usage() {
   cat <<'EOF'
 Usage:
   wt open <branch> [--codex] [--cursor] [--dry-run] [-v]
-  wt pr <prNum> [--codex] [--cursor] [--dry-run] [-v]
+  wt pr <prNum> [--review] [--codex|--cursor] [--base <ref>] [--dry-run] [-v]
+  wt review <prNum> [--codex|--cursor] [--base <ref>] [--dry-run] [-v]
+  wt deconflict <prNum> [--codex] [--head-owner <login>] [--head-repo <owner/repo>] [--merge|--rebase] [--dry-run] [-v]
+  wt deconflict <prNum> --push [--head-owner <login>] [--head-repo <owner/repo>] [--merge|--rebase] [--no-fallback] [--dry-run] [-v]
+  wt sync [--dry-run] [-v]
   wt --version
 
 Config:
   ~/.config/wt/config
   required: REPO_ROOT, DEFAULT_REMOTE, BASE_BRANCH, CURSOR_CMD, CODEX_CMD
+  optional: PR_REMOTE (default: origin, used by `wt pr`)
 EOF
 }
 
@@ -34,8 +88,26 @@ die() {
   exit 1
 }
 
+die_usage() {
+  echo "[wt][ERROR] $*" >&2
+  exit 2
+}
+
+warn_deconflict() {
+  local msg="$1"
+  echo "[wt][WARN] ${msg}" >&2
+  if [[ -n "${DECONFLICT_WARNINGS}" ]]; then
+    DECONFLICT_WARNINGS+=$'\n'
+  fi
+  DECONFLICT_WARNINGS+="${msg}"
+}
+
 info() {
-  echo "[wt] $*"
+  if [[ "${WANT_REVIEW}" == "1" ]]; then
+    echo "[wt] $*" >&2
+  else
+    echo "[wt] $*"
+  fi
 }
 
 need_cmd() {
@@ -62,7 +134,11 @@ run_cmd() {
   if [[ "${VERBOSE}" == "1" ]]; then
     echo "+ ${rendered}"
   fi
-  "$@"
+  if [[ "${WANT_REVIEW}" == "1" ]]; then
+    "$@" >/dev/null 2>&1
+  else
+    "$@"
+  fi
 }
 
 run_shell_cmd() {
@@ -77,6 +153,55 @@ run_shell_cmd() {
   bash -lc "${script}"
 }
 
+now_utc() {
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+run_id_utc() {
+  date -u +"%Y%m%dT%H%M%SZ"
+}
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "${s}"
+}
+
+json_quote() {
+  printf '"%s"' "$(json_escape "$1")"
+}
+
+sha1_text() {
+  local input="$1"
+  if command -v sha1sum >/dev/null 2>&1; then
+    printf '%s' "${input}" | sha1sum | awk '{print $1}'
+  else
+    printf '%s' "${input}" | shasum -a 1 | awk '{print $1}'
+  fi
+}
+
+normalize_issue_key() {
+  local issue="$1"
+  issue="$(printf '%s' "${issue}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  printf '%s' "${issue:0:16}"
+}
+
+append_csv_unique() {
+  local current="$1"
+  local value="$2"
+  if [[ ",${current}," == *",${value},"* ]]; then
+    printf '%s' "${current}"
+  elif [[ -n "${current}" ]]; then
+    printf '%s, %s' "${current}" "${value}"
+  else
+    printf '%s' "${value}"
+  fi
+}
+
 load_config() {
   [[ -f "${CONFIG_FILE}" ]] || die "config not found: ${CONFIG_FILE} (see ai/ai-change-gates/tools/wt/config.example)"
   # shellcheck disable=SC1090
@@ -84,6 +209,7 @@ load_config() {
 
   REPO_ROOT="${REPO_ROOT:-}"
   DEFAULT_REMOTE="${DEFAULT_REMOTE:-}"
+  PR_REMOTE="${PR_REMOTE:-origin}"
   BASE_BRANCH="${BASE_BRANCH:-}"
   CURSOR_CMD="${CURSOR_CMD:-}"
   CODEX_CMD="${CODEX_CMD:-}"
@@ -97,6 +223,11 @@ load_config() {
 
   [[ -d "${REPO_ROOT}" ]] || die "REPO_ROOT does not exist: ${REPO_ROOT}"
   git -C "${REPO_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "REPO_ROOT is not a git repo: ${REPO_ROOT}"
+  if command -v rg >/dev/null 2>&1; then
+    HAS_RG=1
+  else
+    HAS_RG=0
+  fi
 
   if [[ -z "${WT_ROOT}" ]]; then
     WT_ROOT="$(cd "${REPO_ROOT}/.." && pwd)/$(basename "${REPO_ROOT}")-wt"
@@ -119,6 +250,1781 @@ exec_tool_cmd() {
 ensure_worktree_dirs() {
   local worktree="$1"
   run_cmd mkdir -p "${worktree}/_run/logs" "${worktree}/_run/tmp" "${worktree}/_run/data" "${worktree}/_run/ai"
+}
+
+canonical_wt_path() {
+  echo "${REPO_ROOT}/ai/ai-change-gates/tools/wt/wt"
+}
+
+normalize_path() {
+  local p="$1"
+  if [[ -d "${p}" ]]; then
+    (cd "${p}" >/dev/null 2>&1 && pwd -P) || echo "${p}"
+    return 0
+  fi
+  local d b
+  d="$(dirname "${p}")"
+  b="$(basename "${p}")"
+  if [[ -d "${d}" ]]; then
+    echo "$(cd "${d}" >/dev/null 2>&1 && pwd -P)/${b}"
+    return 0
+  fi
+  echo "${p}"
+}
+
+worktree_path_for_branch() {
+  local branch="$1"
+  local branch_ref="refs/heads/${branch}"
+  git -C "${REPO_ROOT}" worktree list --porcelain | awk -v b="${branch_ref}" '
+    $1=="worktree" { wt=$2 }
+    $1=="branch" && $2==b { print wt }
+  '
+}
+
+github_repo_from_remote_url() {
+  local url="$1"
+  local owner=""
+  local repo=""
+  if [[ "${url}" =~ ^git@github.com:([^/]+)/([^/]+)(\.git)?$ ]]; then
+    owner="${BASH_REMATCH[1]}"
+    repo="${BASH_REMATCH[2]}"
+  elif [[ "${url}" =~ ^https://github.com/([^/]+)/([^/]+)(\.git)?$ ]]; then
+    owner="${BASH_REMATCH[1]}"
+    repo="${BASH_REMATCH[2]}"
+  elif [[ "${url}" =~ ^ssh://git@github.com/([^/]+)/([^/]+)(\.git)?$ ]]; then
+    owner="${BASH_REMATCH[1]}"
+    repo="${BASH_REMATCH[2]}"
+  fi
+  repo="${repo%.git}"
+  if [[ -n "${owner}" && -n "${repo}" ]]; then
+    echo "${owner}/${repo}"
+  fi
+}
+
+resolve_gh_repo_full() {
+  local remote
+  local url
+  local repo_full
+  for remote in "${PR_REMOTE:-}" "${DEFAULT_REMOTE:-}" origin; do
+    [[ -n "${remote}" ]] || continue
+    if ! url="$(git -C "${REPO_ROOT}" remote get-url "${remote}" 2>/dev/null)"; then
+      continue
+    fi
+    repo_full="$(github_repo_from_remote_url "${url}")"
+    if [[ -n "${repo_full}" ]]; then
+      echo "${repo_full}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+sanitize_ref_component() {
+  local input="$1"
+  input="${input//\//-}"
+  input="$(printf '%s' "${input}" | tr -c '[:alnum:]._-' '-')"
+  input="${input#-}"
+  input="${input%-}"
+  [[ -n "${input}" ]] || input="unknown"
+  printf '%s' "${input}"
+}
+
+deconflict_name_for_pr() {
+  local pr_num="$1"
+  local base_ref="$2"
+  local base_norm
+  base_norm="$(sanitize_ref_component "${base_ref}")"
+  printf 'deconflict-pr-%s-%s' "${pr_num}" "${base_norm}"
+}
+
+fetch_deconflict_pr_meta() {
+  local pr_num="$1"
+  local repo_full=""
+  local gh_cmd=()
+  local meta_json_fields="url,number,title,body,baseRefName,headRefName,headRepository,headRepositoryOwner"
+  local gh_output=""
+  local gh_rc=0
+
+  DECONFLICT_META_STATUS="ok"
+  DECONFLICT_PR_NUMBER="${pr_num}"
+  DECONFLICT_PR_TITLE="<missing>"
+  DECONFLICT_BASE_REF="${BASE_BRANCH}"
+  DECONFLICT_HEAD_REF=""
+  DECONFLICT_META_HEAD_REPO=""
+  DECONFLICT_META_HEAD_OWNER=""
+  DECONFLICT_PR_BODY=""
+  DECONFLICT_PR_META_RAW='{}'
+
+  repo_full="$(resolve_gh_repo_full || true)"
+  if [[ -n "${repo_full}" ]]; then
+    DECONFLICT_PR_URL="https://github.com/${repo_full}/pull/${pr_num}"
+  else
+    DECONFLICT_PR_URL="PR#${pr_num}"
+    warn_deconflict "failed to resolve GitHub repo from remotes; using degraded metadata for #${pr_num}"
+    DECONFLICT_META_STATUS="degraded"
+    return 0
+  fi
+
+  if ! command -v gh >/dev/null 2>&1; then
+    warn_deconflict "gh is unavailable; using degraded metadata for #${pr_num}"
+    DECONFLICT_META_STATUS="degraded"
+    return 0
+  fi
+
+  gh_cmd=(gh pr view "${pr_num}" --repo "${repo_full}")
+  set +e
+  gh_output="$("${gh_cmd[@]}" --json "${meta_json_fields}" 2>&1)"
+  gh_rc=$?
+  set -e
+  if [[ "${gh_rc}" != "0" ]]; then
+    warn_deconflict "failed to load PR metadata for #${pr_num}: ${gh_output}"
+    DECONFLICT_META_STATUS="degraded"
+    return 0
+  fi
+
+  DECONFLICT_PR_META_RAW="${gh_output}"
+
+  if command -v jq >/dev/null 2>&1; then
+    DECONFLICT_PR_URL="$(printf '%s' "${DECONFLICT_PR_META_RAW}" | jq -r '.url // ""')"
+    DECONFLICT_PR_NUMBER="$(printf '%s' "${DECONFLICT_PR_META_RAW}" | jq -r '.number // empty')"
+    DECONFLICT_PR_TITLE="$(printf '%s' "${DECONFLICT_PR_META_RAW}" | jq -r '.title // ""')"
+    DECONFLICT_BASE_REF="$(printf '%s' "${DECONFLICT_PR_META_RAW}" | jq -r '.baseRefName // ""')"
+    DECONFLICT_HEAD_REF="$(printf '%s' "${DECONFLICT_PR_META_RAW}" | jq -r '.headRefName // ""')"
+    DECONFLICT_META_HEAD_REPO="$(printf '%s' "${DECONFLICT_PR_META_RAW}" | jq -r '.headRepository.nameWithOwner // ""')"
+    DECONFLICT_META_HEAD_OWNER="$(printf '%s' "${DECONFLICT_PR_META_RAW}" | jq -r '.headRepositoryOwner.login // ""')"
+    DECONFLICT_PR_BODY="$(printf '%s' "${DECONFLICT_PR_META_RAW}" | jq -r '.body // ""')"
+  else
+    warn_deconflict "jq is unavailable; extracting PR fields via gh --jq fallback"
+    DECONFLICT_PR_URL="$("${gh_cmd[@]}" --json url --jq '.url' 2>/dev/null || true)"
+    DECONFLICT_PR_NUMBER="$("${gh_cmd[@]}" --json number --jq '.number' 2>/dev/null || true)"
+    DECONFLICT_PR_TITLE="$("${gh_cmd[@]}" --json title --jq '.title' 2>/dev/null || true)"
+    DECONFLICT_BASE_REF="$("${gh_cmd[@]}" --json baseRefName --jq '.baseRefName' 2>/dev/null || true)"
+    DECONFLICT_HEAD_REF="$("${gh_cmd[@]}" --json headRefName --jq '.headRefName' 2>/dev/null || true)"
+    DECONFLICT_META_HEAD_REPO="$("${gh_cmd[@]}" --json headRepository --jq '.headRepository.nameWithOwner // ""' 2>/dev/null || true)"
+    DECONFLICT_META_HEAD_OWNER="$("${gh_cmd[@]}" --json headRepositoryOwner --jq '.headRepositoryOwner.login // ""' 2>/dev/null || true)"
+    DECONFLICT_PR_BODY="$("${gh_cmd[@]}" --json body --jq '.body // ""' 2>/dev/null || true)"
+  fi
+
+  [[ -n "${DECONFLICT_PR_URL}" ]] || DECONFLICT_PR_URL="https://github.com/${repo_full}/pull/${pr_num}"
+  [[ -n "${DECONFLICT_PR_NUMBER}" ]] || DECONFLICT_PR_NUMBER="${pr_num}"
+  [[ -n "${DECONFLICT_PR_TITLE}" ]] || DECONFLICT_PR_TITLE="<missing>"
+  if [[ -z "${DECONFLICT_BASE_REF}" ]]; then
+    DECONFLICT_BASE_REF="${BASE_BRANCH}"
+    warn_deconflict "missing baseRefName in PR metadata; fallback to BASE_BRANCH=${BASE_BRANCH}"
+    DECONFLICT_META_STATUS="degraded"
+  fi
+  if [[ -z "${DECONFLICT_HEAD_REF}" ]]; then
+    warn_deconflict "missing headRefName in PR metadata; prepare will create worktree from base branch only"
+    DECONFLICT_META_STATUS="degraded"
+  fi
+}
+resolve_deconflict_head_target() {
+  local repo_name=""
+  local resolved_from="pr-meta"
+  if [[ -n "${DECONFLICT_META_HEAD_REPO}" && "${DECONFLICT_META_HEAD_REPO}" == */* ]]; then
+    repo_name="${DECONFLICT_META_HEAD_REPO#*/}"
+  else
+    repo_name="$(basename "${REPO_ROOT}")"
+  fi
+
+  if [[ -n "${DECONFLICT_HEAD_REPO}" ]]; then
+    if [[ ! "${DECONFLICT_HEAD_REPO}" =~ ^[^/]+/[^/]+$ ]]; then
+      die_usage "--head-repo expects <owner/repo>, got: ${DECONFLICT_HEAD_REPO}"
+    fi
+    DECONFLICT_EFFECTIVE_HEAD_REPO="${DECONFLICT_HEAD_REPO}"
+    DECONFLICT_EFFECTIVE_HEAD_OWNER="${DECONFLICT_HEAD_REPO%%/*}"
+    resolved_from="flag --head-repo"
+    if [[ -n "${DECONFLICT_HEAD_OWNER}" && "${DECONFLICT_HEAD_OWNER}" != "${DECONFLICT_EFFECTIVE_HEAD_OWNER}" ]]; then
+      warn_deconflict "--head-owner (${DECONFLICT_HEAD_OWNER}) differs from --head-repo owner (${DECONFLICT_EFFECTIVE_HEAD_OWNER}); using --head-repo owner"
+    fi
+  elif [[ -n "${DECONFLICT_HEAD_OWNER}" ]]; then
+    DECONFLICT_EFFECTIVE_HEAD_OWNER="${DECONFLICT_HEAD_OWNER}"
+    DECONFLICT_EFFECTIVE_HEAD_REPO="${DECONFLICT_HEAD_OWNER}/${repo_name}"
+    resolved_from="flag --head-owner"
+  else
+    DECONFLICT_EFFECTIVE_HEAD_OWNER="${DECONFLICT_META_HEAD_OWNER}"
+    DECONFLICT_EFFECTIVE_HEAD_REPO="${DECONFLICT_META_HEAD_REPO}"
+  fi
+
+  if [[ -z "${DECONFLICT_EFFECTIVE_HEAD_OWNER}" ]]; then
+    DECONFLICT_EFFECTIVE_HEAD_OWNER="${DECONFLICT_DEFAULT_HEAD_OWNER}"
+  fi
+  if [[ -z "${DECONFLICT_EFFECTIVE_HEAD_REPO}" ]]; then
+    DECONFLICT_EFFECTIVE_HEAD_REPO="${DECONFLICT_EFFECTIVE_HEAD_OWNER}/${repo_name}"
+  fi
+
+  if [[ -n "${DECONFLICT_META_HEAD_OWNER}" && -n "${DECONFLICT_HEAD_OWNER}" && "${DECONFLICT_HEAD_OWNER}" != "${DECONFLICT_META_HEAD_OWNER}" ]]; then
+    warn_deconflict "head owner mismatch: PR meta=${DECONFLICT_META_HEAD_OWNER}, flag=${DECONFLICT_HEAD_OWNER}; using flag value"
+  fi
+  if [[ -n "${DECONFLICT_META_HEAD_REPO}" && -n "${DECONFLICT_HEAD_REPO}" && "${DECONFLICT_HEAD_REPO}" != "${DECONFLICT_META_HEAD_REPO}" ]]; then
+    warn_deconflict "head repo mismatch: PR meta=${DECONFLICT_META_HEAD_REPO}, flag=${DECONFLICT_HEAD_REPO}; using flag value"
+  fi
+  if [[ -z "${DECONFLICT_HEAD_OWNER}" && -n "${DECONFLICT_META_HEAD_OWNER}" && "${DECONFLICT_META_HEAD_OWNER}" != "${DECONFLICT_DEFAULT_HEAD_OWNER}" ]]; then
+    warn_deconflict "default expected head owner is ${DECONFLICT_DEFAULT_HEAD_OWNER}, but PR meta owner is ${DECONFLICT_META_HEAD_OWNER}"
+  fi
+
+  DECONFLICT_HEAD_REMOTE_URL="git@github.com:${DECONFLICT_EFFECTIVE_HEAD_REPO}.git"
+  if [[ "${VERBOSE}" == "1" ]]; then
+    echo "[wt] deconflict head target resolved from ${resolved_from}: ${DECONFLICT_EFFECTIVE_HEAD_REPO} (${DECONFLICT_HEAD_REF})"
+  fi
+}
+ensure_deconflict_head_remote() {
+  local repo_path="$1"
+  if git -C "${repo_path}" remote get-url head >/dev/null 2>&1; then
+    run_cmd git -C "${repo_path}" remote set-url head "${DECONFLICT_HEAD_REMOTE_URL}"
+  else
+    run_cmd git -C "${repo_path}" remote add head "${DECONFLICT_HEAD_REMOTE_URL}"
+  fi
+}
+
+write_deconflict_pr_artifacts() {
+  local worktree="$1"
+  local pr_meta_path="${worktree}/_run/ai/pr_meta.json"
+  local pr_body_path="${worktree}/_run/ai/pr_body.md"
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[dry-run] write ${pr_meta_path}"
+    echo "[dry-run] write ${pr_body_path}"
+    return 0
+  fi
+
+  printf '%s\n' "${DECONFLICT_PR_META_RAW}" > "${pr_meta_path}"
+  printf '%s\n' "${DECONFLICT_PR_BODY}" > "${pr_body_path}"
+}
+
+extract_deconflict_intent_section() {
+  local body_file="$1"
+  local intent_file="$2"
+  local tmp_file=""
+  local rc=0
+
+  : > "${intent_file}"
+  [[ -f "${body_file}" ]] || return 1
+
+  tmp_file="$(mktemp "$(dirname "${intent_file}")/intent_extract.XXXXXX")"
+  set +e
+  awk '
+    function ltrim(s) { sub(/^[[:space:]]+/, "", s); return s }
+    function rtrim(s) { sub(/[[:space:]]+$/, "", s); return s }
+    function trim(s) { return rtrim(ltrim(s)) }
+    function normalize_heading(s, t) {
+      t = tolower(s)
+      t = trim(t)
+      sub(/^#+[[:space:]]*/, "", t)
+      gsub(/^[*_`~]+/, "", t)
+      gsub(/[*_`~]+$/, "", t)
+      gsub(/[[:space:]]+/, " ", t)
+      gsub(/[[:space:]]*[?:：。．.]+[[:space:]]*$/, "", t)
+      t = trim(t)
+      return t
+    }
+    function is_target_heading(s, n) {
+      n = normalize_heading(s)
+      return (n ~ /^what changed( and how does it work)?$/ || (index(n, "what changed") > 0 && index(n, "how does it work") > 0))
+    }
+    BEGIN {
+      in_section = 0
+      found_heading = 0
+    }
+    {
+      raw = $0
+      if (in_section == 0 && is_target_heading(raw)) {
+        in_section = 1
+        found_heading = 1
+        next
+      }
+      if (in_section == 1) {
+        if (raw ~ /^[[:space:]]*#/) {
+          exit
+        }
+        print raw
+      }
+    }
+    END {
+      if (found_heading == 0) {
+        exit 2
+      }
+    }
+  ' "${body_file}" > "${tmp_file}"
+  rc=$?
+  set -e
+
+  if [[ "${rc}" != "0" ]]; then
+    rm -f "${tmp_file}"
+    : > "${intent_file}"
+    return 1
+  fi
+
+  awk '
+    {
+      line = $0
+      sub(/[[:space:]]+$/, "", line)
+      rows[NR] = line
+      if (line ~ /[^[:space:]]/) {
+        if (first == 0) {
+          first = NR
+        }
+        last = NR
+      }
+    }
+    END {
+      if (first == 0) {
+        exit 0
+      }
+      for (i = first; i <= last; i++) {
+        print rows[i]
+      }
+    }
+  ' "${tmp_file}" > "${intent_file}"
+
+  rm -f "${tmp_file}"
+  [[ -s "${intent_file}" ]]
+}
+
+write_deconflict_policy() {
+  local worktree="$1"
+  local policy_file="${worktree}/_run/ai/pr_policy.md"
+  local intent_file="${worktree}/_run/ai/pr_intent.txt"
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[dry-run] write ${policy_file}"
+    return 0
+  fi
+
+  cat > "${policy_file}" <<EOF_POLICY
+# PR Deconflict Policy (Intent-driven)
+
+## Metadata
+- PR: ${DECONFLICT_PR_URL}
+- Base: ${DECONFLICT_BASE_REF}
+- Head: ${DECONFLICT_EFFECTIVE_HEAD_OWNER}:${DECONFLICT_HEAD_REF}
+
+## Rules
+- PreferHEAD: true
+
+## Intent (must preserve)
+EOF_POLICY
+
+  if [[ -s "${intent_file}" ]]; then
+    cat "${intent_file}" >> "${policy_file}"
+  else
+    echo "(missing)" >> "${policy_file}"
+  fi
+
+  cat >> "${policy_file}" <<'EOF_POLICY'
+
+## KEEP (allowlist, optional)
+# Use for concrete symbols/keywords that must exist.
+KEEP:
+  - symbol:
+
+## NOTOUCH (denylist, optional)
+NOTOUCH:
+  - path:
+
+## ExtraChecks (optional)
+ExtraChecks:
+  - cmd:
+
+## Notes
+- If Intent is missing, manually fill it using PR description.
+EOF_POLICY
+}
+
+prepare_deconflict_intent_policy() {
+  local worktree="$1"
+  local body_file="${worktree}/_run/ai/pr_body.md"
+  local intent_file="${worktree}/_run/ai/pr_intent.txt"
+
+  DECONFLICT_INTENT_STATUS="missing"
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[dry-run] write ${intent_file}"
+    return 0
+  fi
+
+  if extract_deconflict_intent_section "${body_file}" "${intent_file}"; then
+    DECONFLICT_INTENT_STATUS="found"
+  else
+    : > "${intent_file}"
+    DECONFLICT_INTENT_STATUS="missing"
+    warn_deconflict "failed to extract section 'What changed and how does it work?' from PR body; Intent requires manual fill"
+  fi
+
+  write_deconflict_policy "${worktree}"
+}
+
+render_deconflict_warnings_markdown() {
+  if [[ -z "${DECONFLICT_WARNINGS}" ]]; then
+    echo "- (none)"
+    return 0
+  fi
+
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    echo "- ${line}"
+  done <<< "${DECONFLICT_WARNINGS}"
+}
+scan_deconflict_markers() {
+  local worktree="$1"
+  local marker_file="${worktree}/_run/ai/conflict_markers.txt"
+  local tmp_file
+  local scan_rc
+
+  DECONFLICT_MARKER_SCAN_FILE="_run/ai/conflict_markers.txt"
+  DECONFLICT_MARKER_LINE_COUNT=0
+  DECONFLICT_MARKER_FILE_COUNT=0
+  DECONFLICT_MARKER_SCAN_STATUS="clean"
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[dry-run] scan conflict markers under ${worktree}"
+    DECONFLICT_MARKER_SCAN_STATUS="dry-run"
+    return 0
+  fi
+
+  tmp_file="$(mktemp "${worktree}/_run/tmp/marker_scan.XXXXXX")"
+  set +e
+  grep -R -n -E '^(<<<<<<< |>>>>>>> )' --exclude-dir=.git --exclude-dir=_run "${worktree}" > "${tmp_file}"
+  scan_rc=$?
+  set -e
+
+  if [[ "${scan_rc}" -gt 1 ]]; then
+    rm -f "${tmp_file}"
+    DECONFLICT_MARKER_SCAN_STATUS="error"
+    die "failed to scan conflict markers in ${worktree}"
+  fi
+
+  if [[ "${scan_rc}" == "0" ]]; then
+    sed "s#^${worktree}/##" "${tmp_file}" > "${marker_file}"
+    DECONFLICT_MARKER_LINE_COUNT="$(wc -l < "${marker_file}" | tr -d '[:space:]')"
+    DECONFLICT_MARKER_FILE_COUNT="$(cut -d: -f1 "${marker_file}" | sort -u | wc -l | tr -d '[:space:]')"
+    DECONFLICT_MARKER_SCAN_STATUS="found"
+    warn_deconflict "detected conflict markers in working tree: files=${DECONFLICT_MARKER_FILE_COUNT}, lines=${DECONFLICT_MARKER_LINE_COUNT}"
+  else
+    : > "${marker_file}"
+    DECONFLICT_MARKER_SCAN_STATUS="clean"
+  fi
+
+  rm -f "${tmp_file}"
+}
+
+write_deconflict_ai_workspace() {
+  local worktree="$1"
+  local local_branch="$2"
+  local path="${worktree}/AI_WORKSPACE.md"
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[dry-run] write ${path}"
+    return 0
+  fi
+  cat > "${path}" <<EOF
+# AI Workspace
+
+- PR: ${DECONFLICT_PR_URL}
+- PR Number: ${DECONFLICT_PR_NUMBER}
+- PR Title: ${DECONFLICT_PR_TITLE}
+- Base: ${DECONFLICT_BASE_REF}
+- Head: ${DECONFLICT_EFFECTIVE_HEAD_OWNER}:${DECONFLICT_HEAD_REF}
+- Head Repo: ${DECONFLICT_EFFECTIVE_HEAD_REPO}
+- Local Branch: ${local_branch}
+- Worktree: ${worktree}
+- Goal: resolve cherry-pick conflicts in isolated workspace and push back safely.
+EOF
+}
+
+write_deconflict_prepare_report() {
+  local worktree="$1"
+  local local_branch="$2"
+  local remote_old_sha="$3"
+  local report="${worktree}/_run/ai/deconflict_report.md"
+  local intent_file="${worktree}/_run/ai/pr_intent.txt"
+  local intent_preview="(missing)"
+  local intent_action="none"
+  local strategy_note="none"
+  local marker_note="clean"
+
+  [[ -n "${DECONFLICT_STRATEGY}" ]] && strategy_note="${DECONFLICT_STRATEGY} (advisory only)"
+
+  if [[ -s "${intent_file}" ]]; then
+    intent_preview="$(sed -n '1,10p' "${intent_file}")"
+  else
+    intent_action="manual intent fill required"
+  fi
+
+  if [[ "${DECONFLICT_MARKER_SCAN_STATUS}" == "found" ]]; then
+    marker_note="residual conflict markers in file contents (not Git merge conflict state)"
+  fi
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[dry-run] write ${report}"
+    return 0
+  fi
+
+  cat > "${report}" <<EOF_REPORT
+# Deconflict Report
+
+## Policy Summary
+- intent_extract_status: ${DECONFLICT_INTENT_STATUS}
+- intent_file: _run/ai/pr_intent.txt
+- policy_file: _run/ai/pr_policy.md
+- action_required: ${intent_action}
+
+Intent preview (up to 10 lines):
+\`\`\`text
+${intent_preview}
+\`\`\`
+
+## Metadata
+- generated_at_utc: $(now_utc)
+- pr_url: ${DECONFLICT_PR_URL}
+- pr_number: ${DECONFLICT_PR_NUMBER}
+- pr_title: ${DECONFLICT_PR_TITLE}
+- base_ref: ${DECONFLICT_BASE_REF}
+- head_ref: ${DECONFLICT_HEAD_REF}
+- pr_meta_head_owner: ${DECONFLICT_META_HEAD_OWNER}
+- pr_meta_head_repo: ${DECONFLICT_META_HEAD_REPO}
+- effective_head_owner: ${DECONFLICT_EFFECTIVE_HEAD_OWNER}
+- effective_head_repo: ${DECONFLICT_EFFECTIVE_HEAD_REPO}
+- worktree_path: ${worktree}
+- local_branch: ${local_branch}
+- preferred_strategy_flag: ${strategy_note}
+- pr_meta_file: _run/ai/pr_meta.json
+- pr_body_file: _run/ai/pr_body.md
+- prepare_remote_head_sha: ${remote_old_sha}
+- marker_scan_status: ${DECONFLICT_MARKER_SCAN_STATUS}
+- marker_scan_note: ${marker_note}
+- marker_scan_file: ${DECONFLICT_MARKER_SCAN_FILE}
+- marker_scan_marker_files: ${DECONFLICT_MARKER_FILE_COUNT}
+- marker_scan_marker_lines: ${DECONFLICT_MARKER_LINE_COUNT}
+
+## Warnings
+EOF_REPORT
+
+  render_deconflict_warnings_markdown >> "${report}"
+
+  cat >> "${report}" <<EOF_REPORT
+
+## Next Actions
+EOF_REPORT
+
+  if [[ "${DECONFLICT_MARKER_SCAN_STATUS}" == "found" ]]; then
+    cat >> "${report}" <<'EOF_REPORT'
+- Marker scan found residual conflict markers in file contents; this is not Git merge conflict state.
+- Clean marker files listed in `_run/ai/conflict_markers.txt` (or `_run/ai/conflicts.txt`).
+- Run `gofmt -w <file>` for each edited file.
+- Run minimal compile verification: `go test ./... -run TestNonExistent`.
+EOF_REPORT
+  else
+    cat >> "${report}" <<'EOF_REPORT'
+- Proceed with rebase/merge strategy below.
+EOF_REPORT
+  fi
+
+  cat >> "${report}" <<EOF_REPORT
+
+## Strategy 1: Rebase (recommended for cherry-pick PR)
+\`\`\`bash
+git fetch upstream ${DECONFLICT_BASE_REF}
+git rebase upstream/${DECONFLICT_BASE_REF}
+
+# inspect conflicts
+git diff --name-only --diff-filter=U
+git status
+
+# after resolving conflicts
+git add ...
+git rebase --continue
+
+# abort
+git rebase --abort
+\`\`\`
+
+## Strategy 2: Merge (no history rewrite, may create merge commit)
+\`\`\`bash
+git fetch upstream ${DECONFLICT_BASE_REF}
+git merge --no-ff upstream/${DECONFLICT_BASE_REF}
+
+# after resolving conflicts
+git add ...
+git commit
+
+# abort
+git merge --abort
+\`\`\`
+EOF_REPORT
+
+  if [[ "${DECONFLICT_MARKER_SCAN_STATUS}" == "found" && -f "${worktree}/_run/ai/conflict_markers.txt" ]]; then
+    {
+      echo
+      echo "## Conflict Marker Scan (prepare)"
+      echo "- status: ${DECONFLICT_MARKER_SCAN_STATUS}"
+      echo "- explanation: residual conflict markers in file contents (not Git merge conflict state)"
+      echo "- marker_file: _run/ai/conflict_markers.txt"
+      echo "- marker_files: ${DECONFLICT_MARKER_FILE_COUNT}"
+      echo "- marker_lines: ${DECONFLICT_MARKER_LINE_COUNT}"
+      echo
+      echo "Sample (first 120 lines):"
+      echo "\`\`\`"
+      sed -n '1,120p' "${worktree}/_run/ai/conflict_markers.txt"
+      echo "\`\`\`"
+    } >> "${report}"
+  fi
+}
+
+launch_deconflict_codex() {
+  local worktree="$1"
+  local manual_cmd="cd ${worktree} && codex"
+  local escaped_cmd=""
+  local osa_output=""
+  local osa_rc=0
+
+  if [[ "${WANT_CODEX}" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[dry-run] codex launch for ${worktree}"
+    echo "[dry-run] manual command: ${manual_cmd}"
+    return 0
+  fi
+
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    warn_deconflict "codex auto-launch skipped: non-interactive terminal. Please run in iTerm/interactive terminal: ${manual_cmd}"
+    info "codex auto-launch skipped (non-interactive terminal)."
+    echo "[wt] run this in iTerm/interactive terminal:"
+    echo "${manual_cmd}"
+    return 0
+  fi
+
+  if [[ "${OSTYPE:-}" == darwin* ]] && command -v osascript >/dev/null 2>&1; then
+    escaped_cmd="${manual_cmd//\\/\\\\}"
+    escaped_cmd="${escaped_cmd//\"/\\\"}"
+    set +e
+    osa_output="$(osascript <<OSA 2>&1
+tell application "iTerm"
+  activate
+  if (count of windows) = 0 then
+    create window with default profile
+  end if
+  tell current window
+    create tab with default profile
+    tell current session
+      write text "${escaped_cmd}"
+    end tell
+  end tell
+end tell
+OSA
+)"
+    osa_rc=$?
+    set -e
+    if [[ "${osa_rc}" == "0" ]]; then
+      info "opened iTerm tab and started codex in ${worktree}"
+      return 0
+    fi
+    warn_deconflict "failed to auto-open iTerm tab for codex: ${osa_output}"
+  fi
+
+  warn_deconflict "codex auto-launch fallback to manual command: ${manual_cmd}"
+  info "codex auto-launch unavailable; run manually."
+  echo "[wt] run this in iTerm/interactive terminal:"
+  echo "${manual_cmd}"
+  return 0
+}
+append_deconflict_push_report() {
+  local report="$1"
+  local status="$2"
+  local old_sha="$3"
+  local new_sha="$4"
+  local push_target="$5"
+  local detail="$6"
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[dry-run] append ${report} [${status}]"
+    return 0
+  fi
+  {
+    echo
+    echo "## Push Result ($(now_utc))"
+    echo "- status: ${status}"
+    echo "- old_sha: ${old_sha}"
+    echo "- new_sha: ${new_sha}"
+    echo "- push_target: ${push_target}"
+    echo "- detail: ${detail}"
+  } >> "${report}"
+}
+
+deconflict_prepare() {
+  local pr_num="$1"
+  local local_name local_branch worktree occupied occupied_norm worktree_norm
+  local remote_old_sha=""
+  local base_tracking_ref=""
+  local use_base_fallback=0
+  local head_fetch_rc=0
+
+  DECONFLICT_WARNINGS=""
+  DECONFLICT_INTENT_STATUS="not-run"
+
+  fetch_deconflict_pr_meta "${pr_num}"
+  resolve_deconflict_head_target
+
+  local_name="$(deconflict_name_for_pr "${pr_num}" "${DECONFLICT_BASE_REF}")"
+  local_branch="${local_name}"
+  worktree="${WT_ROOT}/${local_name}"
+  worktree_norm="$(normalize_path "${worktree}")"
+
+  info "repo=${REPO_ROOT}"
+  info "worktree=${worktree}"
+  info "pr=${pr_num}"
+  info "base_ref=${DECONFLICT_BASE_REF}"
+  info "head_ref=${DECONFLICT_HEAD_REF}"
+  info "head_repo=${DECONFLICT_EFFECTIVE_HEAD_REPO}"
+
+  run_cmd mkdir -p "${WT_ROOT}"
+
+  occupied="$(worktree_path_for_branch "${local_branch}" | head -n1 || true)"
+  occupied_norm=""
+  if [[ -n "${occupied}" ]]; then
+    occupied_norm="$(normalize_path "${occupied}")"
+  fi
+  if [[ -n "${occupied_norm}" && "${occupied_norm}" != "${worktree_norm}" ]]; then
+    die "branch ${local_branch} is already attached at ${occupied}; refusing to switch current workspace"
+  fi
+
+  if [[ -n "${DECONFLICT_HEAD_REF}" ]]; then
+    ensure_deconflict_head_remote "${REPO_ROOT}"
+
+    if [[ "${DRY_RUN}" == "1" ]]; then
+      if [[ -n "${occupied_norm}" && "${occupied_norm}" == "${worktree_norm}" && -d "${worktree}" ]]; then
+        echo "[dry-run] git -C ${REPO_ROOT} fetch head +${DECONFLICT_HEAD_REF}:refs/remotes/head/${DECONFLICT_HEAD_REF}"
+      else
+        echo "[dry-run] git -C ${REPO_ROOT} fetch head +${DECONFLICT_HEAD_REF}:refs/heads/${local_branch}"
+      fi
+    else
+      set +e
+      if [[ -n "${occupied_norm}" && "${occupied_norm}" == "${worktree_norm}" && -d "${worktree}" ]]; then
+        info "branch ${local_branch} is already attached to target worktree; fetch head/${DECONFLICT_HEAD_REF} without updating local branch"
+        git -C "${REPO_ROOT}" fetch head "+${DECONFLICT_HEAD_REF}:refs/remotes/head/${DECONFLICT_HEAD_REF}"
+        head_fetch_rc=$?
+      else
+        git -C "${REPO_ROOT}" fetch head "+${DECONFLICT_HEAD_REF}:refs/heads/${local_branch}"
+        head_fetch_rc=$?
+      fi
+      set -e
+      if [[ "${head_fetch_rc}" != "0" ]]; then
+        warn_deconflict "failed to fetch head/${DECONFLICT_HEAD_REF}; fallback to base branch ${DECONFLICT_BASE_REF}"
+        use_base_fallback=1
+      fi
+    fi
+  else
+    use_base_fallback=1
+  fi
+
+  if [[ "${use_base_fallback}" == "1" ]]; then
+    base_tracking_ref="${DEFAULT_REMOTE}/${DECONFLICT_BASE_REF}"
+    if [[ "${DRY_RUN}" == "1" ]]; then
+      echo "[dry-run] git -C ${REPO_ROOT} fetch ${DEFAULT_REMOTE} ${DECONFLICT_BASE_REF}"
+      if [[ -z "${occupied_norm}" ]]; then
+        echo "[dry-run] git -C ${REPO_ROOT} branch -f ${local_branch} ${base_tracking_ref}"
+      fi
+    else
+      set +e
+      git -C "${REPO_ROOT}" fetch "${DEFAULT_REMOTE}" "${DECONFLICT_BASE_REF}"
+      head_fetch_rc=$?
+      set -e
+      if [[ "${head_fetch_rc}" != "0" ]]; then
+        die "failed to fetch ${DEFAULT_REMOTE}/${DECONFLICT_BASE_REF} for fallback worktree"
+      fi
+      if [[ -z "${occupied_norm}" ]]; then
+        run_cmd git -C "${REPO_ROOT}" branch -f "${local_branch}" "${base_tracking_ref}"
+      fi
+    fi
+  fi
+
+  if [[ -d "${worktree}" ]]; then
+    info "worktree exists: ${worktree}"
+  else
+    run_cmd git -C "${REPO_ROOT}" worktree add "${worktree}" "${local_branch}"
+  fi
+
+  ensure_worktree_dirs "${worktree}"
+  write_deconflict_ai_workspace "${worktree}" "${local_branch}"
+  write_deconflict_pr_artifacts "${worktree}"
+  prepare_deconflict_intent_policy "${worktree}"
+  scan_deconflict_markers "${worktree}"
+
+  if [[ "${DECONFLICT_MARKER_SCAN_STATUS}" == "found" ]]; then
+    warn_deconflict "marker scan hit residual conflict markers in file contents; this is not Git merge conflict state"
+    info "marker scan found residual conflict markers (not Git merge conflict state)."
+    info "next: clean marker files, run gofmt, then run go test ./... -run TestNonExistent"
+  fi
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    remote_old_sha="<dry-run>"
+  elif [[ -n "${DECONFLICT_HEAD_REF}" ]]; then
+    set +e
+    remote_old_sha="$(git -C "${REPO_ROOT}" ls-remote head "refs/heads/${DECONFLICT_HEAD_REF}" | awk 'NR==1{print $1}')"
+    set -e
+    if [[ -z "${remote_old_sha}" ]]; then
+      remote_old_sha="<missing>"
+      warn_deconflict "failed to resolve remote SHA for head/${DECONFLICT_HEAD_REF} during prepare"
+    fi
+  else
+    remote_old_sha="<missing-head-ref>"
+  fi
+
+  if [[ "${WANT_CODEX}" == "1" ]]; then
+    launch_deconflict_codex "${worktree}"
+  fi
+
+  write_deconflict_prepare_report "${worktree}" "${local_branch}" "${remote_old_sha}"
+}
+deconflict_push() {
+  local pr_num="$1"
+  local local_name local_branch worktree report
+  local current_branch current_sha local_branch_sha
+  local old_sha new_sha push_target push_output push_rc
+  local fallback_branch fallback_target fallback_output fallback_rc
+
+  fetch_deconflict_pr_meta "${pr_num}"
+  resolve_deconflict_head_target
+
+  local_name="$(deconflict_name_for_pr "${pr_num}" "${DECONFLICT_BASE_REF}")"
+  local_branch="${local_name}"
+  worktree="${WT_ROOT}/${local_name}"
+  report="${worktree}/_run/ai/deconflict_report.md"
+
+  [[ -d "${worktree}" ]] || die "worktree not found: ${worktree}; run 'wt deconflict ${pr_num}' first"
+  ensure_deconflict_head_remote "${worktree}"
+  ensure_worktree_dirs "${worktree}"
+
+  if [[ "${DRY_RUN}" != "1" ]]; then
+    printf '%s\n' "${DECONFLICT_PR_META_RAW}" > "${worktree}/_run/ai/pr_meta.json"
+  else
+    echo "[dry-run] write ${worktree}/_run/ai/pr_meta.json"
+  fi
+  if [[ "${DRY_RUN}" != "1" && ! -f "${report}" ]]; then
+    cat > "${report}" <<EOF
+# Deconflict Report
+
+## Metadata
+- generated_at_utc: $(now_utc)
+- pr_url: ${DECONFLICT_PR_URL}
+- pr_number: ${DECONFLICT_PR_NUMBER}
+- pr_title: ${DECONFLICT_PR_TITLE}
+- base_ref: ${DECONFLICT_BASE_REF}
+- head_ref: ${DECONFLICT_HEAD_REF}
+- effective_head_owner: ${DECONFLICT_EFFECTIVE_HEAD_OWNER}
+- effective_head_repo: ${DECONFLICT_EFFECTIVE_HEAD_REPO}
+- worktree_path: ${worktree}
+- local_branch: ${local_branch}
+EOF
+  fi
+
+  current_branch="$(git -C "${worktree}" rev-parse --abbrev-ref HEAD)"
+  current_sha="$(git -C "${worktree}" rev-parse HEAD)"
+  local_branch_sha="$(git -C "${worktree}" rev-parse "${local_branch}" 2>/dev/null || true)"
+  if [[ "${current_branch}" != "${local_branch}" && ( -z "${local_branch_sha}" || "${local_branch_sha}" != "${current_sha}" ) ]]; then
+    die "worktree HEAD is not on ${local_branch}; current branch=${current_branch}, head=${current_sha}"
+  fi
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    old_sha="<dry-run>"
+    push_target="${DECONFLICT_EFFECTIVE_HEAD_OWNER}:${DECONFLICT_HEAD_REF}"
+    append_deconflict_push_report "${report}" "DRY_RUN" "${old_sha}" "${current_sha}" "${push_target}" "skipped push"
+    return 0
+  fi
+
+  run_cmd git -C "${worktree}" fetch head "+${DECONFLICT_HEAD_REF}:refs/remotes/head/${DECONFLICT_HEAD_REF}"
+  old_sha="$(git -C "${worktree}" ls-remote head "refs/heads/${DECONFLICT_HEAD_REF}" | awk 'NR==1{print $1}')"
+  [[ -n "${old_sha}" ]] || die "failed to resolve remote old SHA for head/${DECONFLICT_HEAD_REF}"
+
+  set +e
+  push_output="$(git -C "${worktree}" push --force-with-lease="head/${DECONFLICT_HEAD_REF}:${old_sha}" head "HEAD:${DECONFLICT_HEAD_REF}" 2>&1)"
+  push_rc=$?
+  set -e
+
+  push_target="${DECONFLICT_EFFECTIVE_HEAD_OWNER}:${DECONFLICT_HEAD_REF}"
+  new_sha="${current_sha}"
+  if [[ "${push_rc}" == "0" ]]; then
+    append_deconflict_push_report "${report}" "SUCCESS" "${old_sha}" "${new_sha}" "${push_target}" "pushed with --force-with-lease"
+    info "push success: ${push_target} (${old_sha} -> ${new_sha})"
+    return 0
+  fi
+
+  append_deconflict_push_report "${report}" "FAILED" "${old_sha}" "${new_sha}" "${push_target}" "${push_output}"
+  if [[ "${DECONFLICT_NO_FALLBACK}" == "1" ]]; then
+    die "push failed and --no-fallback is set: ${push_output}"
+  fi
+
+  git -C "${worktree}" remote get-url zimuxia >/dev/null 2>&1 || die "push failed and fallback remote 'zimuxia' not found: ${push_output}"
+  fallback_branch="zimuxia/${local_name}"
+  fallback_target="zimuxia:${fallback_branch}"
+  set +e
+  fallback_output="$(git -C "${worktree}" push -u zimuxia "HEAD:${fallback_branch}" 2>&1)"
+  fallback_rc=$?
+  set -e
+  if [[ "${fallback_rc}" != "0" ]]; then
+    append_deconflict_push_report "${report}" "FALLBACK_FAILED" "${old_sha}" "${new_sha}" "${fallback_target}" "${fallback_output}"
+    die "push failed on head and fallback failed: ${fallback_output}"
+  fi
+
+  append_deconflict_push_report "${report}" "FALLBACK_SUCCESS" "${old_sha}" "${new_sha}" "${fallback_target}" "created fallback branch on fork"
+  cat <<EOF
+[wt] push to head failed; fallback branch pushed to ${fallback_target}
+Alternative PR command:
+gh pr create --base ${DECONFLICT_BASE_REF} --head zimuxia:${fallback_branch} --title "[deconflict] ${DECONFLICT_PR_TITLE}" --body "Deconflict fallback for ${DECONFLICT_PR_URL}"
+
+Comment template for original PR:
+I don't have permission to push to \`${DECONFLICT_EFFECTIVE_HEAD_OWNER}:${DECONFLICT_HEAD_REF}\`.
+I pushed conflict-resolution commits to my fork branch \`zimuxia:${fallback_branch}\` instead.
+Please review via replacement PR: <REPLACEMENT_PR_URL>
+EOF
+}
+
+deconflict_workflow() {
+  local pr_num="$1"
+  [[ "${pr_num}" =~ ^[0-9]+$ ]] || die "prNum must be a number"
+  if [[ "${DECONFLICT_PUSH}" == "1" ]]; then
+    deconflict_push "${pr_num}"
+  else
+    deconflict_prepare "${pr_num}"
+  fi
+}
+
+try_git_switch() {
+  local rendered
+  rendered="$(quote_cmd git -C "${REPO_ROOT}" "$@")"
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[dry-run] ${rendered}"
+    return 0
+  fi
+  if [[ "${VERBOSE}" == "1" ]]; then
+    echo "+ ${rendered}"
+  fi
+  git -C "${REPO_ROOT}" "$@" >/dev/null 2>&1
+}
+
+switch_repo_root_away_from_pr_branch() {
+  local branch="$1"
+  local fallback_remote="${2:-${DEFAULT_REMOTE}}"
+  info "${REPO_ROOT} currently on ${branch}; switching away before creating worktree"
+
+  if git -C "${REPO_ROOT}" show-ref --verify --quiet "refs/heads/${BASE_BRANCH}"; then
+    if try_git_switch switch "${BASE_BRANCH}"; then
+      info "root switched to ${BASE_BRANCH}"
+      return 0
+    fi
+  fi
+
+  if git -C "${REPO_ROOT}" show-ref --verify --quiet "refs/remotes/${fallback_remote}/${BASE_BRANCH}"; then
+    if try_git_switch switch -c "${BASE_BRANCH}" --track "${fallback_remote}/${BASE_BRANCH}"; then
+      info "root switched to ${BASE_BRANCH} (tracking ${fallback_remote}/${BASE_BRANCH})"
+      return 0
+    fi
+  fi
+
+  if try_git_switch switch --detach; then
+    info "root switched to detached HEAD (fallback)"
+    return 0
+  fi
+
+  die "failed to switch repo root away from ${branch}; please commit/stash local changes, then rerun wt"
+}
+
+warn_if_noncanonical_entry() {
+  local canonical canonical_norm script_norm
+  canonical="$(canonical_wt_path)"
+  if [[ ! -f "${canonical}" ]]; then
+    return 0
+  fi
+  canonical_norm="$(normalize_path "${canonical}")"
+  script_norm="$(normalize_path "${SCRIPT_PATH}")"
+  if [[ "${script_norm}" != "${canonical_norm}" ]]; then
+    echo "[wt][WARN] invoked via ${SCRIPT_PATH}" >&2
+    echo "[wt][WARN] canonical entry is ${canonical}" >&2
+    echo "[wt][WARN] run 'wt sync' to refresh local wrappers" >&2
+  fi
+}
+
+sync_entrypoints() {
+  local canonical wrapper tmp
+  canonical="$(canonical_wt_path)"
+  wrapper="${REPO_ROOT}/wt"
+  tmp="${wrapper}.tmp.$$"
+
+  [[ -f "${canonical}" ]] || die "canonical wt script not found: ${canonical}"
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[dry-run] chmod +x ${canonical}"
+  else
+    chmod +x "${canonical}"
+  fi
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[dry-run] write wrapper ${wrapper} -> ${canonical}"
+  else
+    cat > "${tmp}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+exec "${SCRIPT_DIR}/ai/ai-change-gates/tools/wt/wt" "$@"
+EOF
+    chmod +x "${tmp}"
+    mv "${tmp}" "${wrapper}"
+  fi
+  info "synced ${wrapper} -> ${canonical}"
+}
+
+review_trace() {
+  # review_trace <stage> <status> <msg> [details-json]
+  local stage="$1"
+  local status="$2"
+  local msg="$3"
+  local details="${4:-{}}"
+  [[ -n "${REVIEW_TRACE_FILE}" ]] || return 0
+  echo "{\"time\":$(json_quote "$(now_utc)"),\"stage\":$(json_quote "${stage}"),\"status\":$(json_quote "${status}"),\"msg\":$(json_quote "${msg}"),\"details\":${details}}" >> "${REVIEW_TRACE_FILE}"
+}
+
+join_with() {
+  local sep="$1"
+  shift
+  local out=""
+  local item
+  for item in "$@"; do
+    if [[ -z "${out}" ]]; then
+      out="${item}"
+    else
+      out="${out}${sep}${item}"
+    fi
+  done
+  printf '%s' "${out}"
+}
+
+text_match_q() {
+  # text_match_q <pattern> <file>
+  local pattern="$1"
+  local file="$2"
+  if [[ "${HAS_RG}" == "1" ]]; then
+    rg -q "${pattern}" "${file}" 2>/dev/null
+  else
+    grep -Eq "${pattern}" "${file}" 2>/dev/null
+  fi
+}
+
+text_match_n() {
+  # text_match_n <pattern> <file>
+  local pattern="$1"
+  local file="$2"
+  if [[ "${HAS_RG}" == "1" ]]; then
+    rg -n "${pattern}" "${file}" 2>/dev/null
+  else
+    grep -nE "${pattern}" "${file}" 2>/dev/null
+  fi
+}
+
+text_match_n_no_filename() {
+  # text_match_n_no_filename <pattern> <file>
+  local pattern="$1"
+  local file="$2"
+  if [[ "${HAS_RG}" == "1" ]]; then
+    rg -n --no-filename "${pattern}" "${file}" 2>/dev/null
+  else
+    grep -nE "${pattern}" "${file}" 2>/dev/null
+  fi
+}
+
+print_review_stdout() {
+  local state="$1"
+  local next_hint="${REVIEW_MIN_TESTS_HINT:-<none>}"
+  echo "REVIEW_PACK=${state}"
+  echo "NEXT=artifacts_dir=${REVIEW_ART_DIR:-<none>} minimal_tests=${next_hint} reminder=use_pr-review_skill"
+  echo "DETAILS=manifest=${REVIEW_MANIFEST_FILE:-<none>} risk_scan=${REVIEW_RISK_SCAN_FILE:-<none>} pr_summary=${REVIEW_PR_SUMMARY_FILE:-<none>} review_strategy=${REVIEW_STRATEGY_FILE:-<none>} llm_review=${REVIEW_LLM_REVIEW_FILE:-<none>} findings=${REVIEW_FINDINGS_FILE:-<none>} result=${REVIEW_RESULT_FILE:-<none>}"
+  echo "===ONECLICK_JSON_BEGIN==="
+  if [[ -n "${REVIEW_RESULT_FILE}" && -f "${REVIEW_RESULT_FILE}" ]]; then
+    cat "${REVIEW_RESULT_FILE}"
+  else
+    echo "{\"review_pack\":\"${state}\",\"reason\":\"result file missing\"}"
+  fi
+  echo "===ONECLICK_JSON_END==="
+}
+
+generate_review_pack() {
+  # generate_review_pack <pr_num> <pr_remote> <worktree> <branch>
+  local pr_num="$1"
+  local pr_remote="$2"
+  local worktree="$3"
+  local branch="$4"
+
+  local run_id ts context_dir analysis_dir llm_dir
+  local pr_meta_file git_status_file commits_file diffstat_file changed_files_file diff_patch_file
+  local review_strategy_file next_file llm_review_file findings_file
+  local head_sha base_ref base_candidate base_sha range patch_id env_summary tool_cmd
+  local commit_count changed_count top_dirs ext_stats diff_patch_tmp diff_patch_bytes patch_cap_bytes
+  local pr_url="" pr_title="" pr_head_ref="" pr_head_sha=""
+  local repo_owner="" repo_name="" origin_url="" repo_full="" gh_meta="" gh_rc=1
+  local high_hits_file medium_hits_file low_hits_file must_tests_file optional_tests_file
+  local high_sorted_file medium_sorted_file low_sorted_file hotspots_tmp_file
+  local findings_tmp_file findings_md_tmp_file
+  local change_types="" has_only_tests=0
+  local p0_fatal_in_goroutine=0 p0_channel_no_timeout=0
+  local rel abs line recv_line line_no content go_line d suite
+  local first_must_test="<none>" loc issue action verify_min verify_opt cleanup closure
+  local finding_type must_fix impact scope probability must_fix_bool issue_key fingerprint
+  local loc_file loc_line idx=0
+
+  ts="$(now_utc)"
+  run_id="$(run_id_utc)_pr${pr_num}_$(git -C "${worktree}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  REVIEW_ART_DIR="${REPO_ROOT}/ai/artifacts/wt_review/pr-${pr_num}/${run_id}"
+  REVIEW_TRACE_FILE="${REVIEW_ART_DIR}/trace.jsonl"
+  REVIEW_MANIFEST_FILE="${REVIEW_ART_DIR}/manifest.json"
+  REVIEW_RESULT_FILE="${REVIEW_ART_DIR}/result.json"
+
+  context_dir="${REVIEW_ART_DIR}/context"
+  analysis_dir="${REVIEW_ART_DIR}/analysis"
+  llm_dir="${REVIEW_ART_DIR}/llm"
+  REVIEW_PR_SUMMARY_FILE="${analysis_dir}/pr_summary.md"
+  REVIEW_STRATEGY_FILE="${analysis_dir}/review_strategy.md"
+  REVIEW_RISK_SCAN_FILE="${analysis_dir}/risk_scan.md"
+  REVIEW_TEST_PLAN_FILE="${analysis_dir}/test_plan.md"
+  REVIEW_NEXT_FILE="${analysis_dir}/NEXT.txt"
+  REVIEW_LLM_REVIEW_FILE="${llm_dir}/review.md"
+  REVIEW_FINDINGS_FILE="${llm_dir}/findings.yaml"
+
+  pr_meta_file="${context_dir}/pr_meta.json"
+  git_status_file="${context_dir}/git_status.txt"
+  commits_file="${context_dir}/commits.txt"
+  diffstat_file="${context_dir}/diffstat.txt"
+  changed_files_file="${context_dir}/changed_files.txt"
+  diff_patch_file="${context_dir}/diff.patch"
+  review_strategy_file="${REVIEW_STRATEGY_FILE}"
+  next_file="${REVIEW_NEXT_FILE}"
+  llm_review_file="${REVIEW_LLM_REVIEW_FILE}"
+  findings_file="${REVIEW_FINDINGS_FILE}"
+  diff_patch_tmp="${context_dir}/diff.patch.tmp"
+  high_hits_file="${analysis_dir}/.risk_high.tmp"
+  medium_hits_file="${analysis_dir}/.risk_medium.tmp"
+  low_hits_file="${analysis_dir}/.risk_low.tmp"
+  high_sorted_file="${analysis_dir}/.risk_high.sorted.tmp"
+  medium_sorted_file="${analysis_dir}/.risk_medium.sorted.tmp"
+  low_sorted_file="${analysis_dir}/.risk_low.sorted.tmp"
+  hotspots_tmp_file="${analysis_dir}/.hotspots.tmp"
+  must_tests_file="${analysis_dir}/.must_tests.tmp"
+  optional_tests_file="${analysis_dir}/.optional_tests.tmp"
+  findings_tmp_file="${llm_dir}/.findings.tmp"
+  findings_md_tmp_file="${llm_dir}/.findings_md.tmp"
+
+  mkdir -p "${context_dir}" "${analysis_dir}" "${llm_dir}" || return 1
+  : > "${REVIEW_TRACE_FILE}"
+  : > "${high_hits_file}"
+  : > "${medium_hits_file}"
+  : > "${low_hits_file}"
+  : > "${high_sorted_file}"
+  : > "${medium_sorted_file}"
+  : > "${low_sorted_file}"
+  : > "${hotspots_tmp_file}"
+  : > "${must_tests_file}"
+  : > "${optional_tests_file}"
+  : > "${findings_tmp_file}"
+  : > "${findings_md_tmp_file}"
+  review_trace "init" "ok" "review pack init" "{\"pr\":${pr_num},\"worktree\":$(json_quote "${worktree}")}"
+
+  head_sha="$(git -C "${worktree}" rev-parse HEAD)"
+  base_ref="${BASE_OVERRIDE:-${BASE_BRANCH}}"
+  base_candidate=""
+
+  for candidate in "${base_ref}" "${pr_remote}/${base_ref}" "${DEFAULT_REMOTE}/${base_ref}" "${DEFAULT_REMOTE}/${BASE_BRANCH}" "${BASE_BRANCH}"; do
+    if git -C "${worktree}" rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null; then
+      base_candidate="${candidate}"
+      break
+    fi
+  done
+
+  if [[ -n "${base_candidate}" ]]; then
+    base_sha="$(git -C "${worktree}" merge-base "${head_sha}" "${base_candidate}" 2>/dev/null || true)"
+    if [[ -z "${base_sha}" ]]; then
+      base_sha="$(git -C "${worktree}" rev-parse "${base_candidate}^{commit}" 2>/dev/null || true)"
+    fi
+  else
+    base_sha="$(git -C "${worktree}" rev-parse "${head_sha}^" 2>/dev/null || true)"
+  fi
+  [[ -n "${base_sha}" ]] || base_sha="${head_sha}"
+  range="${base_sha}..${head_sha}"
+  review_trace "base" "ok" "resolved base/head" "{\"base_ref\":$(json_quote "${base_ref}"),\"base_sha\":$(json_quote "${base_sha}"),\"head_sha\":$(json_quote "${head_sha}")}"
+
+  # Best-effort PR metadata; failures should not break review pack generation.
+  origin_url="$(git -C "${REPO_ROOT}" remote get-url "${pr_remote}" 2>/dev/null || true)"
+  if [[ "${origin_url}" =~ ^git@github.com:(.+)/(.+)\.git$ ]]; then
+    repo_owner="${BASH_REMATCH[1]}"
+    repo_name="${BASH_REMATCH[2]}"
+  elif [[ "${origin_url}" =~ ^https://github.com/(.+)/(.+)\.git$ ]]; then
+    repo_owner="${BASH_REMATCH[1]}"
+    repo_name="${BASH_REMATCH[2]}"
+  elif [[ "${origin_url}" =~ ^ssh://git@github.com/(.+)/(.+)\.git$ ]]; then
+    repo_owner="${BASH_REMATCH[1]}"
+    repo_name="${BASH_REMATCH[2]}"
+  fi
+  if [[ -n "${repo_owner}" && -n "${repo_name}" ]] && command -v gh >/dev/null 2>&1; then
+    repo_full="${repo_owner}/${repo_name}"
+    set +e
+    gh_meta="$(gh pr view "${pr_num}" --repo "${repo_full}" --json url,title,headRefName,headRefOid 2>/dev/null)"
+    gh_rc=$?
+    set -e
+    if [[ "${gh_rc}" == "0" && -n "${gh_meta}" ]]; then
+      pr_url="$(echo "${gh_meta}" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p' | head -n1)"
+      pr_title="$(echo "${gh_meta}" | sed -n 's/.*"title":"\([^"]*\)".*/\1/p' | head -n1)"
+      pr_head_ref="$(echo "${gh_meta}" | sed -n 's/.*"headRefName":"\([^"]*\)".*/\1/p' | head -n1)"
+      pr_head_sha="$(echo "${gh_meta}" | sed -n 's/.*"headRefOid":"\([^"]*\)".*/\1/p' | head -n1)"
+    fi
+  fi
+  [[ -n "${pr_head_sha}" ]] || pr_head_sha="${head_sha}"
+  [[ -n "${pr_head_ref}" ]] || pr_head_ref="${branch}"
+
+  cat > "${pr_meta_file}" <<EOF
+{
+  "schema_version": "v1",
+  "pr_num": ${pr_num},
+  "pr_remote": $(json_quote "${pr_remote}"),
+  "repo_root": $(json_quote "${REPO_ROOT}"),
+  "worktree_path": $(json_quote "${worktree}"),
+  "branch": $(json_quote "${branch}"),
+  "base_ref": $(json_quote "${base_ref}"),
+  "base_sha": $(json_quote "${base_sha}"),
+  "head_ref": $(json_quote "${pr_head_ref}"),
+  "head_sha": $(json_quote "${pr_head_sha}"),
+  "pr_url": $(json_quote "${pr_url}"),
+  "pr_title": $(json_quote "${pr_title}")
+}
+EOF
+
+  git -C "${worktree}" status --short --branch > "${git_status_file}" || true
+  git -C "${worktree}" log --oneline "${range}" > "${commits_file}" || true
+  git -C "${worktree}" diff --stat "${range}" > "${diffstat_file}" || true
+  git -C "${worktree}" diff --name-only "${range}" > "${changed_files_file}" || true
+  git -C "${worktree}" diff "${range}" > "${diff_patch_tmp}" || true
+
+  patch_cap_bytes=$((2 * 1024 * 1024))
+  diff_patch_bytes="$(wc -c < "${diff_patch_tmp}" | tr -d ' ')"
+  if [[ "${diff_patch_bytes}" -le "${patch_cap_bytes}" ]]; then
+    mv "${diff_patch_tmp}" "${diff_patch_file}"
+  else
+    {
+      echo "# diff.patch omitted"
+      echo "size_bytes=${diff_patch_bytes}"
+      echo "cap_bytes=${patch_cap_bytes}"
+      echo "reason=diff_too_large"
+    } > "${diff_patch_file}"
+    rm -f "${diff_patch_tmp}"
+  fi
+  review_trace "context" "ok" "context artifacts generated" "{\"changed_files\":$(json_quote "${changed_files_file}")}"
+
+  commit_count="$(grep -cve '^[[:space:]]*$' "${commits_file}" || true)"
+  changed_count="$(grep -cve '^[[:space:]]*$' "${changed_files_file}" || true)"
+  top_dirs="$(awk -F/ 'NF>=2{print $1"/"$2; next} NF==1{print $1}' "${changed_files_file}" | sort | uniq -c | sort -nr | sed -e 's/^ *//')"
+  ext_stats="$(awk -F. 'NF>=2{print $NF}' "${changed_files_file}" | tr '[:upper:]' '[:lower:]' | sort | uniq -c | sort -nr | sed -e 's/^ *//')"
+
+  while IFS= read -r rel; do
+    [[ -n "${rel}" ]] || continue
+    [[ "${rel}" =~ _test\.go$ ]] || continue
+    abs="${worktree}/${rel}"
+    [[ -f "${abs}" ]] || continue
+
+    if text_match_q 'go[[:space:]]+func' "${abs}"; then
+      while IFS= read -r line; do
+        [[ -n "${line}" ]] || continue
+        echo "- HIGH: possible fail/assert in goroutine: ${line}" >> "${high_hits_file}"
+      done < <(text_match_n_no_filename 't\.FailNow\(|t\.Fatalf?\(|require\.[A-Za-z_]+\(|assert\.[A-Za-z_]+\(|MustExec\(' "${abs}" | awk -F: -v r="${rel}" '{print r ":" $1}')
+    fi
+
+    while IFS= read -r recv_line; do
+      [[ -n "${recv_line}" ]] || continue
+      line_no="$(echo "${recv_line}" | cut -d: -f1)"
+      content="$(echo "${recv_line}" | cut -d: -f2-)"
+      if echo "${content}" | grep -Eq 'select|time\.After|ctx\.Done|context\.Done|<-chan' 2>/dev/null; then
+        continue
+      fi
+      echo "- MEDIUM: channel receive without timeout/select: ${rel}:${line_no}" >> "${medium_hits_file}"
+    done < <(text_match_n '<-[[:space:]]*[A-Za-z_][A-Za-z0-9_\.]*' "${abs}")
+
+    if text_match_q 'go[[:space:]]+(func|\w+)' "${abs}"; then
+      if ! text_match_q 'WaitGroup|errgroup|context\.WithCancel|cancel\(|t\.Cleanup\(' "${abs}"; then
+        go_line="$(text_match_n 'go[[:space:]]+(func|\w+)' "${abs}" | head -n1 | cut -d: -f1)"
+        echo "- MEDIUM: goroutine start without explicit cancel/join pattern: ${rel}:${go_line}" >> "${medium_hits_file}"
+      fi
+    fi
+  done < "${changed_files_file}"
+
+  sort -u "${high_hits_file}" > "${high_sorted_file}" || true
+  sort -u "${medium_hits_file}" > "${medium_sorted_file}" || true
+  sort -u "${low_hits_file}" > "${low_sorted_file}" || true
+  if [[ -s "${high_sorted_file}" ]]; then
+    p0_fatal_in_goroutine=1
+  fi
+  if grep -q 'channel receive without timeout/select' "${medium_sorted_file}" 2>/dev/null; then
+    p0_channel_no_timeout=1
+  fi
+
+  {
+    echo "# Risk Scan"
+    echo
+    echo "- source: heuristic grep scan over changed *_test.go files"
+    echo "- scope: ${changed_count} changed files"
+    echo
+    echo "## HIGH"
+    if [[ -s "${high_sorted_file}" ]]; then
+      cat "${high_sorted_file}"
+    else
+      echo "- none"
+    fi
+    echo
+    echo "## MEDIUM"
+    if [[ -s "${medium_sorted_file}" ]]; then
+      cat "${medium_sorted_file}"
+    else
+      echo "- none"
+    fi
+    echo
+    echo "## LOW"
+    if [[ -s "${low_sorted_file}" ]]; then
+      cat "${low_sorted_file}"
+    else
+      echo "- none"
+    fi
+  } > "${REVIEW_RISK_SCAN_FILE}"
+
+  while IFS= read -r rel; do
+    [[ -n "${rel}" ]] || continue
+    case "${rel}" in
+      pkg/*)
+        d="$(dirname "${rel}")"
+        echo "go test --tags=intest -run TestNonExistent ./${d}/..." >> "${must_tests_file}"
+        ;;
+      tests/realtikvtest/*)
+        echo "go test --tags=intest -run TestNonExistent ./tests/realtikvtest/..." >> "${must_tests_file}"
+        ;;
+      tests/integrationtest/t/*.test)
+        suite="${rel#tests/integrationtest/t/}"
+        suite="${suite%.test}"
+        echo "pushd tests/integrationtest && ./run-tests.sh -r ${suite} && popd" >> "${optional_tests_file}"
+        ;;
+    esac
+  done < "${changed_files_file}"
+  sort -u "${must_tests_file}" -o "${must_tests_file}" || true
+  sort -u "${optional_tests_file}" -o "${optional_tests_file}" || true
+
+  REVIEW_MIN_TESTS_HINT="$(head -n 3 "${must_tests_file}" | paste -sd';' - | sed 's/;/; /g')"
+  [[ -n "${REVIEW_MIN_TESTS_HINT}" ]] || REVIEW_MIN_TESTS_HINT="<none>"
+  first_must_test="$(head -n 1 "${must_tests_file}" || true)"
+  [[ -n "${first_must_test}" ]] || first_must_test="go test --tags=intest -run TestNonExistent ./..."
+
+  {
+    echo "# Test Plan"
+    echo
+    echo "## Must"
+    if [[ -s "${must_tests_file}" ]]; then
+      sed 's/^/- /' "${must_tests_file}"
+    else
+      echo "- none derived from changed files"
+    fi
+    echo
+    echo "## Recommended Optional"
+    if [[ -s "${optional_tests_file}" ]]; then
+      sed 's/^/- /' "${optional_tests_file}"
+    else
+      echo "- none"
+    fi
+  } > "${REVIEW_TEST_PLAN_FILE}"
+
+  if [[ "${changed_count}" -gt 0 ]]; then
+    change_types="$(append_csv_unique "${change_types}" "Correctness")"
+  fi
+  if grep -Eiq '(^|/)(config|variable|sessionctx|parser|ddl|upgrade|compat)' "${changed_files_file}" 2>/dev/null; then
+    change_types="$(append_csv_unique "${change_types}" "Compatibility")"
+  fi
+  if grep -Eiq '(^|/)(planner|executor|statistics|distsql|cost|benchmark|perf)' "${changed_files_file}" 2>/dev/null; then
+    change_types="$(append_csv_unique "${change_types}" "Performance")"
+  fi
+  if grep -Eiq '(^|/)(metrics|grafana|telemetry|log|zap|trace|tracing|observ)' "${changed_files_file}" 2>/dev/null; then
+    change_types="$(append_csv_unique "${change_types}" "Observability")"
+  fi
+  if grep -Eiq 'refactor|cleanup|reorg|rename' "${commits_file}" 2>/dev/null; then
+    change_types="$(append_csv_unique "${change_types}" "Refactor")"
+  fi
+  if [[ "${changed_count}" -gt 0 ]] && awk 'NF{if($0 !~ /(^tests\/|_test\.go$)/){exit 1}} END{exit 0}' "${changed_files_file}"; then
+    has_only_tests=1
+  fi
+  if [[ "${has_only_tests}" == "1" ]]; then
+    change_types="$(append_csv_unique "${change_types}" "TestOnly")"
+  fi
+  [[ -n "${change_types}" ]] || change_types="Correctness"
+
+  {
+    sed -n -E 's/^- [A-Z]+: [^:]+: ([^:]+:[0-9]+)$/\1/p' "${high_sorted_file}" || true
+    sed -n -E 's/^- [A-Z]+: [^:]+: ([^:]+:[0-9]+)$/\1/p' "${medium_sorted_file}" || true
+    awk 'NF{print $1":1"}' "${changed_files_file}" || true
+  } | awk 'NF && !seen[$0]++' | head -n 3 > "${hotspots_tmp_file}"
+
+  {
+    echo "# PR Summary"
+    echo
+    echo "## PR Scope (commit range base..head, artifacts_dir)"
+    echo "- commit_range: ${range}"
+    echo "- base_sha: ${base_sha}"
+    echo "- head_sha: ${head_sha}"
+    echo "- artifacts_dir: ${REVIEW_ART_DIR}"
+    echo "- worktree: ${worktree}"
+    echo
+    echo "## ChangeType (multi-select): Correctness | Compatibility | Performance | Observability | Refactor | TestOnly"
+    echo "- selected: ${change_types}"
+    echo
+    echo "## What changed (bullet list from commits/diffstat/changed_files)"
+    echo "- commits (${commit_count}):"
+    if [[ -s "${commits_file}" ]]; then
+      sed -n '1,8p' "${commits_file}" | sed 's/^/  - /'
+    else
+      echo "  - none"
+    fi
+    echo "- diffstat:"
+    if [[ -s "${diffstat_file}" ]]; then
+      sed -n '1,8p' "${diffstat_file}" | sed 's/^/  - /'
+    else
+      echo "  - none"
+    fi
+    echo "- changed_files (${changed_count}):"
+    if [[ -s "${changed_files_file}" ]]; then
+      sed -n '1,12p' "${changed_files_file}" | sed 's/^/  - /'
+    else
+      echo "  - none"
+    fi
+    echo
+    echo "## Hotspots (top 3 risky files/functions to inspect)"
+    if [[ -s "${hotspots_tmp_file}" ]]; then
+      sed 's/^/- /' "${hotspots_tmp_file}"
+    else
+      echo "- none"
+    fi
+    echo
+    echo "## Assumptions / Unknowns (explicit list; avoid guessing)"
+    echo "- Risk scan is heuristic from static grep and may miss semantic issues."
+    echo "- No heavy/full test suite was executed during pack generation."
+    echo "- PR metadata from gh is best-effort; missing fields fall back to local git state."
+  } > "${REVIEW_PR_SUMMARY_FILE}"
+
+  {
+    echo "# Review Strategy"
+    echo
+    echo "## Review Priorities (P0/P1/P2 ordered)"
+    if [[ "${p0_fatal_in_goroutine}" == "1" ]]; then
+      echo "- P0: Investigate Fatal/FailNow/assert-related goroutine findings from ${REVIEW_RISK_SCAN_FILE}."
+    fi
+    if [[ "${p0_channel_no_timeout}" == "1" ]]; then
+      echo "- P0: Validate blocking safety for channel receives without timeout/select in ${REVIEW_RISK_SCAN_FILE}."
+    fi
+    if [[ "${p0_fatal_in_goroutine}" == "0" && "${p0_channel_no_timeout}" == "0" ]]; then
+      echo "- P0: none from heuristic scan; verify critical behavior paths manually."
+    fi
+    echo "- P1: Review hotspots first, then all changed files for behavior/regression risk."
+    echo "- P2: Evaluate refactor/readability/performance opportunities after correctness is clear."
+    echo
+    echo "## Review Path (what to inspect first, with file pointers)"
+    echo "- Step 1: inspect top hotspots listed in ${REVIEW_PR_SUMMARY_FILE}."
+    echo "- Step 2: inspect commit intent in ${commits_file} and file impact in ${diffstat_file}."
+    echo "- Step 3: inspect all touched files listed in ${changed_files_file}."
+    echo "- Input evidence: ${REVIEW_RISK_SCAN_FILE} (non-LLM heuristic scan)."
+    echo
+    echo "## Merge Gate / Closure Criteria (<=3 bullets, mechanical pass/fail)"
+    echo "- No open Must-fix correctness/concurrency findings remain."
+    echo "- Minimal verification commands complete without FAIL/panic."
+    echo "- Any changed test helpers avoid unsafe goroutine/channel patterns."
+    echo
+    echo "## Minimal Verification Plan (commands + expected signals)"
+    if [[ -s "${must_tests_file}" ]]; then
+      while IFS= read -r line; do
+        [[ -n "${line}" ]] || continue
+        echo "- cmd: ${line}"
+        echo "  expected: exits 0, no panic/FAIL output."
+      done < <(sed -n '1,5p' "${must_tests_file}")
+    else
+      echo "- cmd: go test --tags=intest -run TestNonExistent ./..."
+      echo "  expected: command is accepted and package path resolves."
+    fi
+    echo
+    echo "## Optional Verification Plan (nice-to-have)"
+    if [[ -s "${optional_tests_file}" ]]; then
+      sed 's/^/- /' "${optional_tests_file}"
+    else
+      echo "- none"
+    fi
+  } > "${review_strategy_file}"
+
+  {
+    echo "ARTIFACTS_DIR=${REVIEW_ART_DIR}"
+    echo "CODEX_NEXT=run pr-review skill with ARTIFACTS_DIR=${REVIEW_ART_DIR}"
+    echo "CODEX_NEXT_CMD=pr-review --artifacts-dir \"${REVIEW_ART_DIR}\""
+    echo "MINIMAL_TESTS=${REVIEW_MIN_TESTS_HINT}"
+  } > "${next_file}"
+
+  if [[ -s "${high_sorted_file}" ]]; then
+    loc="$(sed -n -E 's/^- [A-Z]+: [^:]+: ([^:]+:[0-9]+)$/\1/p' "${high_sorted_file}" | head -n1)"
+    [[ -n "${loc}" ]] || loc="unknown:0"
+    issue="Fatal/FailNow/assert-like call detected in goroutine context may hide flaky failure semantics."
+    action="Confirm assertion/fatal usage is synchronized with the parent test goroutine or refactor to safe error signaling."
+    verify_min="${first_must_test}"
+    verify_opt="Run affected package tests repeatedly to check flakes."
+    cleanup="none"
+    closure="Close when goroutine error handling is deterministic and test failure ownership is explicit."
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+      "Risk" "Yes" "Crash" "local" "Med" "${loc}" "${issue}" "${action}" "${verify_min}" "${verify_opt}" "${cleanup}" "${closure}" >> "${findings_tmp_file}"
+  fi
+
+  if grep -q 'channel receive without timeout/select' "${medium_sorted_file}" 2>/dev/null; then
+    loc="$(grep -m1 'channel receive without timeout/select' "${medium_sorted_file}" | sed -E 's/^- [A-Z]+: [^:]+: ([^:]+:[0-9]+)$/\1/')"
+    [[ -n "${loc}" ]] || loc="unknown:0"
+    issue="Channel receive path lacks timeout/select guard and may deadlock on stalled producer."
+    action="Wrap receive with select + timeout/context cancellation, or document bounded producer guarantee."
+    verify_min="${first_must_test}"
+    verify_opt="Add a timeout-focused test that fails before fix and passes after fix."
+    cleanup="none"
+    closure="Close when channel receive has explicit timeout or cancellation behavior."
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+      "Bug" "Yes" "Compatibility" "local" "Med" "${loc}" "${issue}" "${action}" "${verify_min}" "${verify_opt}" "${cleanup}" "${closure}" >> "${findings_tmp_file}"
+  fi
+
+  if grep -q 'goroutine start without explicit cancel/join pattern' "${medium_sorted_file}" 2>/dev/null; then
+    loc="$(grep -m1 'goroutine start without explicit cancel/join pattern' "${medium_sorted_file}" | sed -E 's/^- [A-Z]+: [^:]+: ([^:]+:[0-9]+)$/\1/')"
+    [[ -n "${loc}" ]] || loc="unknown:0"
+    issue="Started goroutine has no explicit cancel/join lifecycle signal and can leak under failures."
+    action="Add WaitGroup/errgroup or explicit cancel + t.Cleanup for goroutine lifecycle control."
+    verify_min="${first_must_test}"
+    verify_opt="Run with race detector where feasible."
+    cleanup="none"
+    closure="Close when goroutine lifecycle has deterministic join or cancellation path."
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+      "Risk" "No" "Observability" "local" "Low" "${loc}" "${issue}" "${action}" "${verify_min}" "${verify_opt}" "${cleanup}" "${closure}" >> "${findings_tmp_file}"
+  fi
+
+  if [[ ! -s "${findings_tmp_file}" ]]; then
+    cat > "${findings_file}" <<EOF
+schema_version: v1
+artifacts_dir: "$(json_escape "${REVIEW_ART_DIR}")"
+commit_range: "$(json_escape "${range}")"
+findings: []
+EOF
+    echo "- None." > "${findings_md_tmp_file}"
+  else
+    {
+      echo "schema_version: v1"
+      echo "artifacts_dir: \"$(json_escape "${REVIEW_ART_DIR}")\""
+      echo "commit_range: \"$(json_escape "${range}")\""
+      echo "findings:"
+      while IFS='|' read -r finding_type must_fix impact scope probability loc issue action verify_min verify_opt cleanup closure; do
+        [[ -n "${finding_type}" ]] || continue
+        idx=$((idx + 1))
+        loc_file="${loc%:*}"
+        loc_line="${loc##*:}"
+        if [[ "${loc_line}" == "${loc}" || ! "${loc_line}" =~ ^[0-9]+$ ]]; then
+          loc_file="${loc}"
+          loc_line="0"
+        fi
+        issue_key="$(normalize_issue_key "${issue}")"
+        fingerprint="$(sha1_text "${finding_type}${must_fix}${loc_file}${loc_line}${issue_key}")"
+        must_fix_bool="false"
+        if [[ "${must_fix}" == "Yes" ]]; then
+          must_fix_bool="true"
+        fi
+
+        echo "  - id: R${idx}"
+        echo "    fingerprint: \"${fingerprint}\""
+        echo "    status: open"
+        echo "    type: \"$(json_escape "${finding_type}")\""
+        echo "    must_fix: ${must_fix_bool}"
+        echo "    impact: \"$(json_escape "${impact}")\""
+        echo "    scope: \"$(json_escape "${scope}")\""
+        echo "    probability: \"$(json_escape "${probability}")\""
+        echo "    locations:"
+        echo "      - file: \"$(json_escape "${loc_file}")\""
+        echo "        line: ${loc_line}"
+        echo "    issue: \"$(json_escape "${issue}")\""
+        echo "    action: \"$(json_escape "${action}")\""
+        echo "    verify_min: \"$(json_escape "${verify_min}")\""
+        echo "    verify_opt: \"$(json_escape "${verify_opt}")\""
+        echo "    cleanup: \"$(json_escape "${cleanup}")\""
+        echo "    closure: \"$(json_escape "${closure}")\""
+
+        {
+          echo "${idx}. Type: ${finding_type}"
+          echo "   - Must fix: ${must_fix}"
+          echo "   - Impact: ${impact}"
+          echo "   - Scope: ${scope}"
+          echo "   - Probability: ${probability}"
+          echo "   - Location(s): ${loc}"
+          echo "   - Issue: ${issue}"
+          echo "   - Action: ${action}"
+          echo "   - Verify(min): ${verify_min}"
+          echo "   - Verify(opt): ${verify_opt}"
+          echo "   - Cleanup: ${cleanup}"
+          echo "   - fingerprint: ${fingerprint}"
+          echo "   - closure: ${closure}"
+        } >> "${findings_md_tmp_file}"
+      done < "${findings_tmp_file}"
+    } > "${findings_file}"
+  fi
+
+  {
+    echo "# LLM Review"
+    echo
+    echo "## 1) Layer 1 - PR Summary"
+    echo "### PR Scope (commit range base..head, artifacts_dir)"
+    echo "- commit_range: ${range}"
+    echo "- artifacts_dir: ${REVIEW_ART_DIR}"
+    echo "- source: ${REVIEW_PR_SUMMARY_FILE}"
+    echo
+    echo "### ChangeType (multi-select): Correctness | Compatibility | Performance | Observability | Refactor | TestOnly"
+    echo "- selected: ${change_types}"
+    echo
+    echo "### What changed (bullet list from commits/diffstat/changed_files)"
+    echo "- See ${REVIEW_PR_SUMMARY_FILE}."
+    echo
+    echo "### Hotspots (top 3 risky files/functions to inspect)"
+    if [[ -s "${hotspots_tmp_file}" ]]; then
+      sed 's/^/- /' "${hotspots_tmp_file}"
+    else
+      echo "- none"
+    fi
+    echo
+    echo "### Assumptions / Unknowns (explicit list; avoid guessing)"
+    echo "- Generated from static artifacts without semantic execution."
+    echo "- Heavy verification was not executed during pack generation."
+    echo
+    echo "## 2) Layer 2 - Review Strategy"
+    echo "### Review Priorities (P0/P1/P2 ordered)"
+    if [[ "${p0_fatal_in_goroutine}" == "1" ]]; then
+      echo "- P0: Fatal/FailNow/assert patterns in goroutine context require manual confirmation."
+    fi
+    if [[ "${p0_channel_no_timeout}" == "1" ]]; then
+      echo "- P0: Channel receive timeout/cancel behavior requires manual confirmation."
+    fi
+    if [[ "${p0_fatal_in_goroutine}" == "0" && "${p0_channel_no_timeout}" == "0" ]]; then
+      echo "- P0: none from heuristic scan."
+    fi
+    echo "- P1: file-level correctness for changed Go code."
+    echo "- P2: optimization/readability opportunities."
+    echo
+    echo "### Review Path (what to inspect first, with file pointers)"
+    echo "- Follow ${review_strategy_file} and ${REVIEW_RISK_SCAN_FILE}."
+    echo
+    echo "### Merge Gate / Closure Criteria (<=3 bullets, mechanical pass/fail)"
+    echo "- No open Must-fix findings."
+    echo "- Minimal verification passes."
+    echo "- Risk-scan P0 patterns explained or fixed."
+    echo
+    echo "### Minimal Verification Plan (commands + expected signals)"
+    echo "- ${first_must_test}"
+    echo
+    echo "### Optional Verification Plan (nice-to-have)"
+    echo "- See ${REVIEW_TEST_PLAN_FILE}."
+    echo
+    echo "## 3) Layer 3 - Detailed Review"
+    echo "### Short Overall Conclusion (merge-ready? yes/no + why)"
+    echo "- merge_ready: no"
+    echo "- why: this is an auto-generated baseline; manual reviewer confirmation is still required."
+    echo
+    echo "### Findings list (ranked)"
+    cat "${findings_md_tmp_file}"
+    echo
+    echo "### Executed Minimal Verification (if any; otherwise \"None\")"
+    echo "None"
+    echo
+    echo "### Review Scope Statement (first review? artifacts_dir? commit range? inference vs reproduced?)"
+    echo "- review_round: first review baseline generated by wt"
+    echo "- artifacts_dir: ${REVIEW_ART_DIR}"
+    echo "- commit_range: ${range}"
+    echo "- evidence: inference from static artifacts, not reproduced by runtime tests."
+  } > "${llm_review_file}"
+
+  review_trace "analysis" "ok" "analysis artifacts generated" "{\"risk_scan\":$(json_quote "${REVIEW_RISK_SCAN_FILE}")}"
+
+  patch_id="$( (git -C "${worktree}" show HEAD | git patch-id --stable | awk '{print $1}') 2>/dev/null || true )"
+  [[ -n "${patch_id}" ]] || patch_id="UNKNOWN"
+  env_summary="$(uname -s)/$(uname -m)"
+  tool_cmd="${WT_INVOCATION}"
+  [[ -n "${tool_cmd}" ]] || tool_cmd="$0"
+
+  cat > "${REVIEW_MANIFEST_FILE}" <<EOF
+{
+  "schema_version": "v1",
+  "tool": "wt",
+  "tool_version": $(json_quote "${VERSION}"),
+  "timestamp": $(json_quote "${ts}"),
+  "repo_root": $(json_quote "${REPO_ROOT}"),
+  "worktree_path": $(json_quote "${worktree}"),
+  "pr_num": ${pr_num},
+  "pr_remote": $(json_quote "${pr_remote}"),
+  "flags": {
+    "review": ${WANT_REVIEW},
+    "codex": ${WANT_CODEX},
+    "cursor": ${WANT_CURSOR},
+    "base_override": $(json_quote "${BASE_OVERRIDE}")
+  },
+  "git": {
+    "commit_sha": $(json_quote "${head_sha}"),
+    "base_ref": $(json_quote "${base_ref}"),
+    "base_sha": $(json_quote "${base_sha}"),
+    "patch_id": $(json_quote "${patch_id}")
+  },
+  "env": $(json_quote "${env_summary}"),
+  "command": $(json_quote "${tool_cmd}"),
+  "commands": [
+    "git status --short --branch",
+    "git log --oneline <base..head>",
+    "git diff --stat <base..head>",
+    "git diff --name-only <base..head>",
+    "git diff <base..head>"
+  ],
+  "artifacts": {
+    "trace": $(json_quote "${REVIEW_TRACE_FILE}"),
+    "pr_meta": $(json_quote "${pr_meta_file}"),
+    "git_status": $(json_quote "${git_status_file}"),
+    "commits": $(json_quote "${commits_file}"),
+    "diffstat": $(json_quote "${diffstat_file}"),
+    "changed_files": $(json_quote "${changed_files_file}"),
+    "diff_patch": $(json_quote "${diff_patch_file}"),
+    "pr_summary": $(json_quote "${REVIEW_PR_SUMMARY_FILE}"),
+    "review_strategy": $(json_quote "${review_strategy_file}"),
+    "risk_scan": $(json_quote "${REVIEW_RISK_SCAN_FILE}"),
+    "test_plan": $(json_quote "${REVIEW_TEST_PLAN_FILE}"),
+    "next_txt": $(json_quote "${next_file}"),
+    "llm_review": $(json_quote "${llm_review_file}"),
+    "findings_yaml": $(json_quote "${findings_file}"),
+    "result": $(json_quote "${REVIEW_RESULT_FILE}")
+  }
+}
+EOF
+
+  cat > "${REVIEW_RESULT_FILE}" <<EOF
+{
+  "schema_version": "v1",
+  "review_pack": "OK",
+  "pr_num": ${pr_num},
+  "pr_remote": $(json_quote "${pr_remote}"),
+  "artifacts_dir": $(json_quote "${REVIEW_ART_DIR}"),
+  "manifest": $(json_quote "${REVIEW_MANIFEST_FILE}"),
+  "risk_scan": $(json_quote "${REVIEW_RISK_SCAN_FILE}"),
+  "pr_summary": $(json_quote "${REVIEW_PR_SUMMARY_FILE}"),
+  "review_strategy": $(json_quote "${review_strategy_file}"),
+  "test_plan": $(json_quote "${REVIEW_TEST_PLAN_FILE}"),
+  "next_txt": $(json_quote "${next_file}"),
+  "llm_review": $(json_quote "${llm_review_file}"),
+  "findings_yaml": $(json_quote "${findings_file}"),
+  "minimal_tests_hint": $(json_quote "${REVIEW_MIN_TESTS_HINT}")
+}
+EOF
+
+  review_trace "finalize" "ok" "review pack completed" "{\"result\":$(json_quote "${REVIEW_RESULT_FILE}")}"
+  REVIEW_STATUS="OK"
+  rm -f \
+    "${high_hits_file}" "${medium_hits_file}" "${low_hits_file}" \
+    "${high_sorted_file}" "${medium_sorted_file}" "${low_sorted_file}" \
+    "${hotspots_tmp_file}" "${must_tests_file}" "${optional_tests_file}" \
+    "${findings_tmp_file}" "${findings_md_tmp_file}" || true
+  return 0
 }
 
 open_worktree() {
@@ -168,27 +2074,63 @@ open_worktree() {
 pr_worktree() {
   local pr_num="$1"
   [[ "${pr_num}" =~ ^[0-9]+$ ]] || die "prNum must be a number"
-  need_cmd gh
 
+  local pr_remote="${PR_REMOTE:-origin}"
   local branch="pr-${pr_num}"
   local worktree="${WT_ROOT}/${branch}"
+  local repo_norm worktree_norm occupied occupied_norm fetched_ref
+  local switched_from_repo=0
+  fetched_ref="refs/remotes/${pr_remote}/pr/${pr_num}"
+  repo_norm="$(normalize_path "${REPO_ROOT}")"
+  worktree_norm="$(normalize_path "${worktree}")"
 
-  info "repo=${REPO_ROOT}"
-  info "worktree=${worktree}"
-  info "pr=${pr_num}"
+  if [[ "${WANT_REVIEW}" != "1" ]]; then
+    info "repo=${REPO_ROOT}"
+    info "worktree=${worktree}"
+    info "pr=${pr_num}"
+    info "pr_remote=${pr_remote}"
+  fi
 
   run_cmd mkdir -p "${WT_ROOT}"
 
-  if [[ "${DRY_RUN}" == "1" ]]; then
-    run_shell_cmd "cd $(printf '%q' "${REPO_ROOT}") && gh pr checkout ${pr_num} -b $(printf '%q' "${branch}")"
-  else
-    if ! bash -lc "cd $(printf '%q' "${REPO_ROOT}") && gh pr checkout ${pr_num} -b $(printf '%q' "${branch}")" >/dev/null 2>&1; then
-      bash -lc "cd $(printf '%q' "${REPO_ROOT}") && gh pr checkout ${pr_num}"
-      local cur_branch
-      cur_branch="$(git -C "${REPO_ROOT}" branch --show-current || true)"
-      [[ -n "${cur_branch}" ]] || die "failed to determine current branch after gh pr checkout"
-      run_cmd git -C "${REPO_ROOT}" branch -f "${branch}" "${cur_branch}"
+  occupied="$(worktree_path_for_branch "${branch}" | head -n1 || true)"
+  occupied_norm=""
+  if [[ -n "${occupied}" ]]; then
+    occupied_norm="$(normalize_path "${occupied}")"
+  fi
+  if [[ -n "${occupied_norm}" && "${occupied_norm}" != "${worktree_norm}" ]]; then
+    if [[ "${occupied_norm}" == "${repo_norm}" ]]; then
+      switch_repo_root_away_from_pr_branch "${branch}" "${pr_remote}"
+      switched_from_repo=1
+    else
+      die "branch ${branch} is already checked out at ${occupied}"
     fi
+  fi
+
+  occupied="$(worktree_path_for_branch "${branch}" | head -n1 || true)"
+  occupied_norm=""
+  if [[ -n "${occupied}" ]]; then
+    occupied_norm="$(normalize_path "${occupied}")"
+  fi
+  if [[ -n "${occupied_norm}" && "${occupied_norm}" != "${worktree_norm}" ]]; then
+    if [[ "${DRY_RUN}" == "1" && "${switched_from_repo}" == "1" && "${occupied_norm}" == "${repo_norm}" ]]; then
+      info "dry-run mode: assume root branch switch succeeded"
+    else
+      die "branch ${branch} is still checked out at ${occupied}"
+    fi
+  fi
+
+  run_cmd git -C "${REPO_ROOT}" fetch "${pr_remote}" --prune
+  run_cmd git -C "${REPO_ROOT}" fetch "${pr_remote}" "pull/${pr_num}/head:${fetched_ref}"
+
+  if [[ "${occupied_norm}" != "${worktree_norm}" ]]; then
+    if git -C "${REPO_ROOT}" show-ref --verify --quiet "refs/heads/${branch}"; then
+      run_cmd git -C "${REPO_ROOT}" branch -f "${branch}" "${fetched_ref}"
+    else
+      run_cmd git -C "${REPO_ROOT}" branch "${branch}" "${fetched_ref}"
+    fi
+  else
+    info "branch ${branch} is already attached to target worktree; skip local branch reset"
   fi
 
   if [[ -d "${worktree}" ]]; then
@@ -198,11 +2140,82 @@ pr_worktree() {
   fi
   ensure_worktree_dirs "${worktree}"
 
+  if [[ "${WANT_REVIEW}" == "1" ]]; then
+    if ! generate_review_pack "${pr_num}" "${pr_remote}" "${worktree}" "${branch}"; then
+      REVIEW_STATUS="FAIL"
+      print_review_stdout "FAIL"
+      return 1
+    fi
+    print_review_stdout "OK"
+  fi
+
+  if [[ "${WANT_REVIEW}" == "1" ]]; then
+    echo "CODEX_NEXT: run pr-review skill with ARTIFACTS_DIR=${REVIEW_ART_DIR}"
+    echo "CODEX_NEXT_CMD: pr-review --artifacts-dir \"${REVIEW_ART_DIR}\""
+  fi
+
   if [[ "${WANT_CURSOR}" == "1" ]]; then
     exec_tool_cmd "${CURSOR_CMD}" "${worktree}"
   fi
   if [[ "${WANT_CODEX}" == "1" ]]; then
     exec_tool_cmd "${CODEX_CMD}" "${worktree}"
+  fi
+}
+
+parse_deconflict_flags() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --codex)
+        WANT_CODEX=1
+        ;;
+      --push)
+        DECONFLICT_PUSH=1
+        ;;
+      --head-owner)
+        [[ $# -ge 2 ]] || die_usage "--head-owner requires a value"
+        DECONFLICT_HEAD_OWNER="$2"
+        shift
+        ;;
+      --head-repo)
+        [[ $# -ge 2 ]] || die_usage "--head-repo requires a value"
+        DECONFLICT_HEAD_REPO="$2"
+        shift
+        ;;
+      --merge)
+        [[ -z "${DECONFLICT_STRATEGY}" || "${DECONFLICT_STRATEGY}" == "merge" ]] || die_usage "--merge and --rebase cannot be used together"
+        DECONFLICT_STRATEGY="merge"
+        ;;
+      --rebase)
+        [[ -z "${DECONFLICT_STRATEGY}" || "${DECONFLICT_STRATEGY}" == "rebase" ]] || die_usage "--merge and --rebase cannot be used together"
+        DECONFLICT_STRATEGY="rebase"
+        ;;
+      --no-fallback)
+        DECONFLICT_NO_FALLBACK=1
+        ;;
+      --dry-run)
+        DRY_RUN=1
+        ;;
+      -v)
+        VERBOSE=1
+        ;;
+      *)
+        die_usage "unknown flag: $1"
+        ;;
+    esac
+    shift
+  done
+
+  if [[ -n "${DECONFLICT_HEAD_OWNER}" && ! "${DECONFLICT_HEAD_OWNER}" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]]; then
+    die_usage "invalid --head-owner: ${DECONFLICT_HEAD_OWNER}"
+  fi
+  if [[ -n "${DECONFLICT_HEAD_REPO}" && ! "${DECONFLICT_HEAD_REPO}" =~ ^[^/]+/[^/]+$ ]]; then
+    die_usage "invalid --head-repo: ${DECONFLICT_HEAD_REPO} (expect owner/repo)"
+  fi
+  if [[ "${DECONFLICT_PUSH}" == "1" && "${WANT_CODEX}" == "1" ]]; then
+    die_usage "--codex is only valid for prepare phase (without --push)"
+  fi
+  if [[ "${DECONFLICT_PUSH}" != "1" && "${DECONFLICT_NO_FALLBACK}" == "1" ]]; then
+    die_usage "--no-fallback is only valid with --push"
   fi
 }
 
@@ -215,6 +2228,18 @@ parse_flags() {
       --cursor)
         WANT_CURSOR=1
         ;;
+      --review)
+        WANT_REVIEW=1
+        REVIEW_FLAG_EXPLICIT=1
+        ;;
+      --codex-plan)
+        WANT_CODEX_PLAN=1
+        ;;
+      --base)
+        [[ $# -ge 2 ]] || die_usage "--base requires a value"
+        BASE_OVERRIDE="$2"
+        shift
+        ;;
       --dry-run)
         DRY_RUN=1
         ;;
@@ -222,14 +2247,19 @@ parse_flags() {
         VERBOSE=1
         ;;
       *)
-        die "unknown flag: $1"
+        die_usage "unknown flag: $1"
         ;;
     esac
     shift
   done
+
+  if [[ "${WANT_CODEX}" == "1" && "${WANT_CURSOR}" == "1" ]]; then
+    die_usage "--codex and --cursor cannot be used together"
+  fi
 }
 
 main() {
+  WT_INVOCATION="$*"
   local cmd="${1:-}"
   if [[ -z "${cmd}" ]]; then
     usage
@@ -247,19 +2277,75 @@ main() {
       [[ -n "${branch}" ]] || die "open requires <branch>"
       shift || true
       parse_flags "$@"
+      if [[ "${WANT_REVIEW}" == "1" || "${WANT_CODEX_PLAN}" == "1" || -n "${BASE_OVERRIDE}" ]]; then
+        die_usage "--review/--codex-plan/--base are only valid for wt pr|review"
+      fi
       need_cmd git
       load_config
+      warn_if_noncanonical_entry
       open_worktree "${branch}"
       ;;
     pr)
       shift
       local pr_num="${1:-}"
-      [[ -n "${pr_num}" ]] || die "pr requires <prNum>"
+      [[ -n "${pr_num}" ]] || die_usage "pr requires <prNum>"
       shift || true
       parse_flags "$@"
+      if [[ "${WANT_REVIEW}" == "1" && "${DRY_RUN}" == "1" ]]; then
+        die_usage "--dry-run is not supported with --review"
+      fi
+      if [[ "${WANT_CODEX_PLAN}" == "1" ]]; then
+        echo "NOT_IMPLEMENTED: --codex-plan (use --codex)"
+        exit 2
+      fi
       need_cmd git
       load_config
+      warn_if_noncanonical_entry
       pr_worktree "${pr_num}"
+      ;;
+    review)
+      shift
+      local pr_num="${1:-}"
+      [[ -n "${pr_num}" ]] || die_usage "review requires <prNum>"
+      shift || true
+      WANT_REVIEW=1
+      parse_flags "$@"
+      if [[ "${REVIEW_FLAG_EXPLICIT}" == "1" ]]; then
+        die_usage "--review is redundant for wt review"
+      fi
+      if [[ "${WANT_REVIEW}" == "1" && "${DRY_RUN}" == "1" ]]; then
+        die_usage "--dry-run is not supported with --review"
+      fi
+      if [[ "${WANT_CODEX_PLAN}" == "1" ]]; then
+        echo "NOT_IMPLEMENTED: --codex-plan (use --codex)"
+        exit 2
+      fi
+      need_cmd git
+      load_config
+      warn_if_noncanonical_entry
+      pr_worktree "${pr_num}"
+      ;;
+    deconflict)
+      shift
+      local pr_num="${1:-}"
+      [[ -n "${pr_num}" ]] || die_usage "deconflict requires <prNum>"
+      shift || true
+      parse_deconflict_flags "$@"
+      need_cmd git
+      need_cmd gh
+      load_config
+      warn_if_noncanonical_entry
+      deconflict_workflow "${pr_num}"
+      ;;
+    sync)
+      shift || true
+      parse_flags "$@"
+      if [[ "${WANT_REVIEW}" == "1" || "${WANT_CODEX_PLAN}" == "1" || -n "${BASE_OVERRIDE}" || "${WANT_CODEX}" == "1" || "${WANT_CURSOR}" == "1" ]]; then
+        die_usage "sync only supports [--dry-run] [-v]"
+      fi
+      need_cmd git
+      load_config
+      sync_entrypoints
       ;;
     *)
       usage

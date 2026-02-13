@@ -80,6 +80,8 @@ ai/projects/*/artifacts/fix/
 ai/projects/*/artifacts/audit/runs/
 ai/projects/*/artifacts/oneclick/
 ai/projects/*/artifacts/review/
+ai/artifacts/pr_followup
+ai/artifacts/wt_review
 
 # Personal config files
 /*config.toml

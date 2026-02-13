@@ -1,0 +1,15 @@
+name: deconflict
+install_name: wt-deconflict
+version: v1.0
+description: Resolve Git PR conflicts in a deconflict worktree with deterministic, auditable outputs and PR-scoped policy.
+triggers:
+  - deconflict workflow in wt worktree
+  - resolve cherry-pick conflicts
+  - prepare auditable deconflict report
+outputs:
+  - deterministic conflict resolution artifacts under _run/ai
+  - ready-to-push checklist for wt deconflict --push
+safety:
+  - HEAD-first minimal edits with policy-driven exceptions
+  - explicit escalation on high-risk conflicts
+  - no push operation inside skill

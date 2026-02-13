@@ -18,6 +18,8 @@ state:
   current_commit: TODO_COMMIT
   last_updated: TODO_TIMESTAMP
 
+last_run: ai/ai-change-gates/runs/TODO_DATE_run-TODO_RUN_ID.json
+
 claims: [revision: v, revision_note: "", ...]
 findings: []
 evidence: []

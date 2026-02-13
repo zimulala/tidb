@@ -11,7 +11,8 @@ NAVIGATE+PATCH: project=<path> track=<optional>
 Hard safety boundary (non-negotiable):
 - You MUST NOT modify any source code or build/config files.
 - You may ONLY edit markdown files under <project>/, and ONLY within NAVIGATOR-managed blocks.
-- In V2 (SSOT_V2 present), you may ONLY patch <project>/PROJECT_STATE.md (SSOT_V2 block + managed panel fields).
+- Run-record exception: you may create `ai/ai-change-gates/runs/*.json` and `ai/ai-change-gates/runs/*.md`.
+- In V2 (SSOT_V2 present), you may ONLY patch <project>/PROJECT_STATE.md (SSOT_V2 block + managed panel fields, and `last_run` pointer).
 - In Legacy (no SSOT_V2), you may patch these governance files under <project>/:
     - PROJECT_STATE.md
     - SEMANTIC_SPEC.md / TOPRU_SEMANTIC_SPEC.md
@@ -25,7 +26,7 @@ Do not invent facts:
 - Use standardized TODO tokens: TODO, TODO_NAME, TODO_DATE, TODO_TIME, TODO_TIMESTAMP, TODO_COMMIT, TODO_ENV, TODO_CMD, TODO_PATH.
 
 Protocol root:
-- <protocol_root> contains templates/, prompts/, and tracks/.
+- <protocol_root> contains templates/, prompts/, tracks/, and runs/.
 
 Track descriptor:
 - If track provided and <protocol_root>/tracks/<track>/TRACK.md exists:
@@ -46,7 +47,7 @@ File read budget:
 - You MUST NOT scan the repo (no grep/ripgrep, no traversal beyond allowed governance files).
 
 Forced exit:
-- Once you have updated the SSOT/panel in PROJECT_STATE.md, you MUST output results and STOP.
+- Once you have updated PROJECT_STATE.md and generated run_record json+md, you MUST output results and STOP.
 
 Fresh-read rule (hard):
 - Always re-read PROJECT_STATE.md SSOT_V2 block if present.
@@ -79,6 +80,7 @@ V2 patch policy (hard):
 Allowed V2 patch operations:
 - Normalize SSOT fields and insert missing keys with TODO placeholders.
 - Update state.current_commit and state.last_updated.
+- Update top-level `last_run: ai/ai-change-gates/runs/<...>.json` pointer.
 - Update pr_ready.missing based on track requirements (if track provided) and evidence statuses.
 - Normalize next_actions (max 3) with closes/provides fields.
 
@@ -113,7 +115,7 @@ Patch scope rules (idempotent + predictable):
   <!-- NAVIGATOR:BEGIN ... --> ... <!-- NAVIGATOR:END ... -->
 - If a required file is missing, copy template to <project>/.
 - If required slot missing, insert TODO slots in managed block.
-- Always update PROJECT_STATE managed block.
+- Always update PROJECT_STATE managed block and `last_run` pointer.
 
 Minimal generation policy (legacy):
 - Ensure the 4-file minimal set exists:
@@ -136,16 +138,36 @@ Test command defaults (Go, legacy evidence):
 - If not used, document why, otherwise treat as non-compliant for closing correctness findings.
 
 =====================
+RUN RECORD (mandatory)
+=====================
+After state + patching decisions are finalized, you MUST generate a run record.
+
+Preferred command:
+- `bash ai/ai-change-gates/tools/run_record.sh --mode navigate_patch --trigger local --ssot <project>/PROJECT_STATE.md --navigator-summary "<state summary>" --patch-summary "<patch summary>" --verifier-status pass --next-action "<action1>" --next-action "<action2>"`
+
+Hard requirements:
+- Create both files:
+  - `ai/ai-change-gates/runs/YYYY-MM-DD_run-<run_id>.json`
+  - `ai/ai-change-gates/runs/YYYY-MM-DD_run-<run_id>.md`
+- Update `<project>/PROJECT_STATE.md` with `last_run: ai/ai-change-gates/runs/<...>.json`.
+- In `outputs.written_files`, include at least:
+  - `<project>/PROJECT_STATE.md`
+  - generated run_record json
+  - generated run_record md
+
+=====================
 OUTPUT (short)
 =====================
 Output exactly:
 1) State: <STATE>
 2) Patched files:
 - <path>
-3) Gate blockers (0..N):
+3) Run record:
+- json: <path>
+- md: <path>
+4) Gate blockers (0..N):
 - <blocker>
-4) Next actions (max 3):
+5) Next actions (max 3):
 1. <action> — <closes: ...; produces: ...>
 2. ...
    STOP.
-

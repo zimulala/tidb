@@ -18,6 +18,9 @@ state:
   current_commit: 509dc996b32e6488b2c4709c99fa910f1ee1c855
   last_updated: 2026-02-03T14:01:27Z
 
+last_run: ai/ai-change-gates/runs/2026-02-13_run-123600Z-48ecf1a3df.json
+
+
 claims:
   - id: C1
     legacy: [S1, A1]

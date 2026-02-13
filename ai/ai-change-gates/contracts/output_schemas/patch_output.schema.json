@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "ai/ai-change-gates/contracts/output_schemas/patch_output.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "role",
+    "run_id",
+    "outputs"
+  ],
+  "properties": {
+    "role": {
+      "const": "patch"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "outputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "patch_plan",
+        "patch_diff",
+        "run_record_ref"
+      ],
+      "properties": {
+        "patch_plan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ssot_updates",
+            "files_to_write",
+            "constraints"
+          ],
+          "properties": {
+            "ssot_updates": {
+              "type": "string",
+              "minLength": 1
+            },
+            "files_to_write": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "constraints": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "patch_diff": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_record_ref": {
+          "type": "string",
+          "pattern": "^ai/ai-change-gates/runs/.+\\.json$"
+        }
+      }
+    }
+  }
+}
