@@ -151,33 +151,10 @@ case "${SUBCOMMAND}" in
     ;;
   fix)
     DOWNSTREAM="${VERIFY_DIR}/run_fix_one_finding_oneclick.sh"
-    HAS_ID=0
-    for arg in "$@"; do
-      if [[ "${arg}" == "--id" ]]; then
-        HAS_ID=1
-        break
-      fi
-    done
-    if [[ "${HAS_ID}" == "1" ]]; then
-      DOWNSTREAM="${VERIFY_DIR}/fix_one_by_one.sh"
-      FORWARD_ARGS=("$@")
-    else
-      while [[ $# -gt 0 ]]; do
-        case "$1" in
-          --base|--head)
-            echo "NOTICE: $1 is not consumed by run_fix_one_finding_oneclick.sh; ignored by oneclick wrapper" >&2
-            shift 2
-            ;;
-          *)
-            FORWARD_ARGS+=("$1")
-            shift
-            ;;
-        esac
-      done
-    fi
+    FORWARD_ARGS=("$@")
     ;;
   self-check)
-    DOWNSTREAM="ai/ai-change-gates/gatecheck/quick.sh"
+    DOWNSTREAM="${VERIFY_DIR}/self_check_oneclick.sh"
     FORWARD_ARGS=("$@")
     ;;
   *)

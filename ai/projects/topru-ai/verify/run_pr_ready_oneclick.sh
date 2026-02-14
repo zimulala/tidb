@@ -239,6 +239,14 @@ PR_READY_RESULT_DIR="${PROJECT_ROOT}/artifacts/pr_ready/runs/${PR_READY_RUN_ID}"
 PR_READY_RESULT_FILE="${PR_READY_RESULT_DIR}/result.json"
 PR_READY_MANIFEST_FILE="${PR_READY_RESULT_DIR}/manifest.json"
 PR_READY_TRACE_FILE="${PR_READY_RESULT_DIR}/trace.jsonl"
+PR_READY_LATEST_FILE="${PROJECT_ROOT}/artifacts/pr_ready/latest"
+CURRENT_BRANCH_NAME="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)"
+CURRENT_BRANCH_SLUG="$(echo "${CURRENT_BRANCH_NAME}" | tr '/[:space:]' '__' | tr -cd 'A-Za-z0-9._-')"
+CURRENT_WORKTREE_NAME="$(basename "${ROOT}")"
+CURRENT_WORKTREE_SLUG="$(echo "${CURRENT_WORKTREE_NAME}" | tr '/[:space:]' '__' | tr -cd 'A-Za-z0-9._-')"
+PR_READY_LATEST_BRANCH_FILE="${PROJECT_ROOT}/artifacts/pr_ready/latest.${CURRENT_BRANCH_SLUG}"
+PR_READY_LATEST_WORKTREE_FILE="${PROJECT_ROOT}/artifacts/pr_ready/latest.${CURRENT_WORKTREE_SLUG}"
+PR_READY_COMPARE_LAST_RUN_FILE="${PR_READY_RESULT_DIR}/compare_last_run.md"
 REVIEW_RC=""
 REVIEW_ART_DIR=""
 REVIEW_TRACE=""
@@ -257,6 +265,113 @@ FINAL_REVIEW_RESULT="PASS"
 FINAL_REVIEW_OPEN_JSON="[]"
 FINAL_FIX_QUEUE_FILE=""
 FINAL_NEXT_COMMAND="NONE"
+
+csv_set_delta() {
+  local prev_csv="$1"
+  local curr_csv="$2"
+  local added removed
+  added="$(comm -13 <(echo "${prev_csv}" | tr ',' '\n' | sed '/^$/d' | sort -u) <(echo "${curr_csv}" | tr ',' '\n' | sed '/^$/d' | sort -u) | paste -sd ',' -)"
+  removed="$(comm -23 <(echo "${prev_csv}" | tr ',' '\n' | sed '/^$/d' | sort -u) <(echo "${curr_csv}" | tr ',' '\n' | sed '/^$/d' | sort -u) | paste -sd ',' -)"
+  echo "added=[${added:-}] removed=[${removed:-}]"
+}
+
+result_json_must_missing_csv() {
+  local file="$1"
+  [[ -f "${file}" ]] || { echo ""; return 0; }
+  jq -r '[.evidence.missing.must[]] | join(",")' "${file}" 2>/dev/null || echo ""
+}
+
+result_json_review_open_count() {
+  local file="$1"
+  [[ -f "${file}" ]] || { echo 0; return 0; }
+  jq -r '.review.open | length // 0' "${file}" 2>/dev/null || echo 0
+}
+
+result_json_review_findings_total() {
+  local file="$1"
+  [[ -f "${file}" ]] || { echo 0; return 0; }
+  jq -r '.review.findings_total // 0' "${file}" 2>/dev/null || echo 0
+}
+
+gatecheck_fail_codes_csv() {
+  local gatecheck_json="$1"
+  [[ -f "${gatecheck_json}" ]] || { echo ""; return 0; }
+  jq -r '[.fail_codes[].code] | join(",")' "${gatecheck_json}" 2>/dev/null || echo ""
+}
+
+read_latest_run_id() {
+  local f="$1"
+  [[ -f "${f}" ]] || return 1
+  tr -d '\r\n' < "${f}"
+}
+
+write_compare_last_run() {
+  mkdir -p "${PR_READY_RESULT_DIR}" >/dev/null 2>&1 || true
+  local current_art_rel="${PR_READY_RESULT_DIR}"
+  local current_open="${FINAL_REVIEW_OPEN_COUNT:-0}"
+  local current_findings="${FINAL_FINDINGS_TOTAL:-0}"
+  local current_must_missing_csv
+  current_must_missing_csv="$(json_array_to_csv "${FINAL_MUST_MISSING_JSON:-[]}")"
+  local current_fail_codes=""
+  if [[ -n "${REVIEW_ART_DIR:-}" ]]; then
+    local curr_gatecheck="${REVIEW_ART_DIR}/gatecheck.json"
+    current_fail_codes="$(gatecheck_fail_codes_csv "${curr_gatecheck}")"
+  fi
+
+  local prev_run_id=""
+  prev_run_id="$(read_latest_run_id "${PR_READY_LATEST_BRANCH_FILE}" 2>/dev/null || true)"
+  if [[ -z "${prev_run_id}" ]]; then
+    prev_run_id="$(read_latest_run_id "${PR_READY_LATEST_WORKTREE_FILE}" 2>/dev/null || true)"
+  fi
+  if [[ -z "${prev_run_id}" ]]; then
+    prev_run_id="$(read_latest_run_id "${PR_READY_LATEST_FILE}" 2>/dev/null || true)"
+  fi
+
+  local prev_art_rel=""
+  local prev_result_file=""
+  local prev_open="0"
+  local prev_findings="0"
+  local prev_must_missing_csv=""
+  local prev_fail_codes=""
+
+  if [[ -n "${prev_run_id}" ]]; then
+    prev_art_rel="${PROJECT_ROOT}/artifacts/pr_ready/runs/${prev_run_id}"
+    prev_result_file="${ROOT}/${prev_art_rel}/result.json"
+    if [[ -f "${prev_result_file}" ]]; then
+      prev_open="$(result_json_review_open_count "${prev_result_file}")"
+      prev_findings="$(result_json_review_findings_total "${prev_result_file}")"
+      prev_must_missing_csv="$(result_json_must_missing_csv "${prev_result_file}")"
+      prev_review_art_dir="$(jq -r '.review.artifacts.artifacts_dir // ""' "${prev_result_file}" 2>/dev/null || true)"
+      if [[ -n "${prev_review_art_dir}" ]]; then
+        prev_fail_codes="$(gatecheck_fail_codes_csv "${ROOT}/${prev_review_art_dir}/gatecheck.json")"
+      fi
+    fi
+  fi
+
+  local delta_open delta_findings fail_code_delta must_missing_delta
+  delta_open=$((current_open - prev_open))
+  delta_findings=$((current_findings - prev_findings))
+  fail_code_delta="$(csv_set_delta "${prev_fail_codes}" "${current_fail_codes}")"
+  must_missing_delta="$(csv_set_delta "${prev_must_missing_csv}" "${current_must_missing_csv}")"
+
+  {
+    echo "# Compare Last Run"
+    echo
+    echo "- current_run: ${current_art_rel}"
+    echo "- previous_run: ${prev_art_rel:-<none>}"
+    echo
+    echo "## Metrics"
+    echo "- review_open_count: ${prev_open} -> ${current_open} (delta=${delta_open})"
+    echo "- findings_total: ${prev_findings} -> ${current_findings} (delta=${delta_findings})"
+    echo "- fail_codes: prev=[${prev_fail_codes}] curr=[${current_fail_codes}] ${fail_code_delta}"
+    echo "- evidence.must_missing: prev=[${prev_must_missing_csv}] curr=[${current_must_missing_csv}] ${must_missing_delta}"
+    echo
+    echo "## Sources"
+    echo "- current_result: ${PR_READY_RESULT_FILE}"
+    echo "- previous_result: ${prev_result_file:-<none>}"
+    echo "- current_review_artifacts: ${REVIEW_ART_DIR:-<none>}"
+  } > "${PR_READY_COMPARE_LAST_RUN_FILE}"
+}
 
 pr_ready_main_trace() {
   # pr_ready_main_trace <stage> <msg> <status> <json_details>
@@ -601,6 +716,9 @@ build_result_json() {
   "fix": {
     "queue_file": $(json_quote "${FINAL_FIX_QUEUE_FILE}")
   },
+  "compare_last_run": {
+    "file": $(json_quote "${PR_READY_COMPARE_LAST_RUN_FILE}")
+  },
   "patched": {
     "ssot_file_modified": ${state_patched_json},
     "audit_patch_invoked": ${audit_patched_json}
@@ -645,7 +763,11 @@ write_run_manifest() {
     "review_dir": $(json_quote "${REVIEW_ART_DIR:-<none>}"),
     "audit_file": $(json_quote "${AUDIT_OUT_FILE:-<none>}"),
     "trace": $(json_quote "${PR_READY_TRACE_FILE}"),
-    "fix_queue": $(json_quote "${FINAL_FIX_QUEUE_FILE:-<none>}")
+    "fix_queue": $(json_quote "${FINAL_FIX_QUEUE_FILE:-<none>}"),
+    "compare_last_run": $(json_quote "${PR_READY_COMPARE_LAST_RUN_FILE}"),
+    "latest": $(json_quote "${PR_READY_LATEST_FILE}"),
+    "latest_branch": $(json_quote "${PR_READY_LATEST_BRANCH_FILE}"),
+    "latest_worktree": $(json_quote "${PR_READY_LATEST_WORKTREE_FILE}")
   }
 }
 EOF
@@ -669,7 +791,9 @@ emit_layered_human_output() {
     echo "RUN_MANIFEST: ${PR_READY_MANIFEST_FILE}"
     echo "REVIEW_DIR: ${REVIEW_ART_DIR:-<none>}"
     echo "AUDIT_FILE: ${AUDIT_OUT_FILE:-<none>}"
+    echo "COMPARE_LAST_RUN: ${PR_READY_COMPARE_LAST_RUN_FILE}"
     echo "TRACE: ${PR_READY_TRACE_FILE}"
+    echo "PR_READY_LATEST: ${PR_READY_LATEST_FILE}"
     return 0
   fi
 
@@ -680,6 +804,10 @@ emit_layered_human_output() {
   echo "NEXT: ${FINAL_NEXT_COMMAND}"
   echo "RESULT_JSON: ${PR_READY_RESULT_FILE}"
   echo "RUN_MANIFEST: ${PR_READY_MANIFEST_FILE}"
+  echo "COMPARE_LAST_RUN: ${PR_READY_COMPARE_LAST_RUN_FILE}"
+  echo "PR_READY_LATEST: ${PR_READY_LATEST_FILE}"
+  echo "PR_READY_LATEST_BRANCH: ${PR_READY_LATEST_BRANCH_FILE}"
+  echo "PR_READY_LATEST_WORKTREE: ${PR_READY_LATEST_WORKTREE_FILE}"
   echo "TRACE: ${PR_READY_TRACE_FILE}"
   echo " "
 }
@@ -718,6 +846,13 @@ emit_result_footer() {
   if [[ "${FINAL_PR_READY_BOOL}" == "true" ]]; then
     result_word="PASS"
   fi
+  echo "DETAIL pr_ready.latest=${PR_READY_LATEST_FILE}"
+  echo "DETAIL pr_ready.latest_run=$(cat "${PR_READY_LATEST_FILE}" 2>/dev/null || true)"
+  echo "DETAIL pr_ready.latest_branch=${PR_READY_LATEST_BRANCH_FILE}"
+  echo "DETAIL pr_ready.latest_branch_run=$(cat "${PR_READY_LATEST_BRANCH_FILE}" 2>/dev/null || true)"
+  echo "DETAIL pr_ready.latest_worktree=${PR_READY_LATEST_WORKTREE_FILE}"
+  echo "DETAIL pr_ready.latest_worktree_run=$(cat "${PR_READY_LATEST_WORKTREE_FILE}" 2>/dev/null || true)"
+  echo "DETAIL compare_last_run=${PR_READY_COMPARE_LAST_RUN_FILE}"
   echo "RESULT=${result_word} RUN_ID=${PR_READY_RUN_ID} ART_DIR=${PR_READY_RESULT_DIR} NEXT=\"${FINAL_NEXT_COMMAND}\""
   echo "DETAIL result_json=${PR_READY_RESULT_FILE}"
   if [[ -n "${FINAL_REVIEW_MD}" && "${FINAL_REVIEW_MD}" != "<none>" ]]; then
@@ -838,6 +973,13 @@ run_oneclick_for_eid() {
   record_evidence_result "${eid}" "run" "${rc}" "${art_dir}" "${trace_file}"
   return "${rc}"
 }
+update_pr_ready_latest() {
+  mkdir -p "$(dirname "${PR_READY_LATEST_FILE}")" >/dev/null 2>&1 || true
+  echo "${PR_READY_RUN_ID}" > "${PR_READY_LATEST_FILE}"
+  echo "${PR_READY_RUN_ID}" > "${PR_READY_LATEST_BRANCH_FILE}"
+  echo "${PR_READY_RUN_ID}" > "${PR_READY_LATEST_WORKTREE_FILE}"
+}
+
 
 finalize_and_exit() {
   # finalize_and_exit <rc>
@@ -845,6 +987,8 @@ finalize_and_exit() {
   collect_final_state "${rc}"
   mkdir -p "${PR_READY_RESULT_DIR}" >/dev/null 2>&1 || true
   write_run_manifest
+  write_compare_last_run
+  update_pr_ready_latest
   pr_ready_main_trace "finalize" "final layered output" "ok" "{\"rc\":${rc},\"next\":$(json_quote "${FINAL_NEXT_COMMAND}")}"
   emit_layered_human_output
   emit_machine_output "${rc}"

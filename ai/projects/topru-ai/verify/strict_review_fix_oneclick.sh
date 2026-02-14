@@ -7,7 +7,7 @@ STRICT_REVIEW_FIX_ONECLICK
 
 Usage:
   bash ai/projects/topru-ai/verify/strict_review_fix_oneclick.sh [--base <hash>] [--head <hash>] \
-    [--mode first|incr|targeted] [--target R1,R2,...] [--no-patch-ssot]
+    [--mode first|incr|followup|targeted] [--target R1,R2,...] [--no-patch-ssot]
 
 Defaults:
   --head: git rev-parse HEAD
@@ -15,6 +15,7 @@ Defaults:
   --mode:
     - if PROJECT_STATE SSOT has review.baseline_commit -> incr
     - else -> first
+    - followup: force base/head from SSOT.review.last_run.range (ignores --base/--head)
 
 This script:
   - collects review evidence (changed_files, diff, commits)
@@ -42,6 +43,7 @@ SSOT_PATCH_RESULT="skipped"
 FINAL_RC=0
 BASE_PROVIDED="0"
 HEAD_PROVIDED="0"
+FOLLOWUP_REQUESTED="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -62,7 +64,6 @@ fi
 cd "${REPO_DIR}"
 
 TIME_UTC="$(date -u +%Y%m%dT%H%M%SZ)"
-HEAD_SHORT="$(echo "${HEAD}" | cut -c1-7)"
 if [[ -z "${MODE}" ]]; then
   if [[ -f "${SSOT_FILE}" ]] && grep -Eq "^review:\\s*$" "${SSOT_FILE}" && grep -q "baseline_commit:" "${SSOT_FILE}"; then
     MODE="incr"
@@ -71,10 +72,65 @@ if [[ -z "${MODE}" ]]; then
   fi
 fi
 
+if [[ "${MODE}" == "followup" ]]; then
+  FOLLOWUP_REQUESTED="1"
+  MODE="incr"
+  if [[ "${BASE_PROVIDED}" == "1" || "${HEAD_PROVIDED}" == "1" ]]; then
+    echo "WARN: --mode followup ignores --base/--head and uses SSOT.review.last_run.range"
+  fi
+  if [[ ! -f "${SSOT_FILE}" ]]; then
+    echo "FOLLOWUP_FAIL_CODE=E_MISSING_LAST_RUN"
+    echo "ERROR: mode=followup requires SSOT file: ${SSOT_FILE}" >&2
+    exit 2
+  fi
+  FOLLOWUP_LAST_RANGE="$(awk '
+    /<!-- NAVIGATOR:BEGIN SSOT_V2 -->/ {inssot=1; next}
+    /<!-- NAVIGATOR:END SSOT_V2 -->/ {inssot=0}
+    inssot && /^review:\s*$/ {inrev=1; next}
+    inssot && inrev && /^[A-Za-z0-9_]+:\s*$/ {inrev=0}
+    inssot && inrev && /^  last_run:\s*$/ {inlast=1; next}
+    inssot && inrev && inlast && /^[A-Za-z0-9_]+:\s*$/ {inlast=0}
+    inssot && inrev && inlast && /^    range:/ {
+      sub(/^    range:[[:space:]]*/, "", $0)
+      gsub(/"/, "", $0)
+      print $0
+      exit
+    }
+  ' "${SSOT_FILE}" 2>/dev/null || true)"
+  if [[ -z "${FOLLOWUP_LAST_RANGE}" ]]; then
+    echo "FOLLOWUP_FAIL_CODE=E_MISSING_LAST_RUN"
+    echo "ERROR: mode=followup requires SSOT.review.last_run.range" >&2
+    exit 2
+  fi
+  if [[ "${FOLLOWUP_LAST_RANGE}" != *".."* ]]; then
+    echo "FOLLOWUP_FAIL_CODE=E_SCHEMA_INVALID"
+    echo "ERROR: invalid SSOT.review.last_run.range: ${FOLLOWUP_LAST_RANGE}" >&2
+    exit 2
+  fi
+  BASE="${FOLLOWUP_LAST_RANGE%%..*}"
+  HEAD="${FOLLOWUP_LAST_RANGE##*..}"
+  if [[ -z "${BASE}" || -z "${HEAD}" ]]; then
+    echo "FOLLOWUP_FAIL_CODE=E_SCHEMA_INVALID"
+    echo "ERROR: invalid followup base/head parsed from range: ${FOLLOWUP_LAST_RANGE}" >&2
+    exit 2
+  fi
+  BASE_PROVIDED="1"
+  HEAD_PROVIDED="1"
+fi
+
+HEAD_SHORT="$(echo "${HEAD}" | cut -c1-7)"
 RUN_ID="${TIME_UTC}_${HEAD_SHORT}_${MODE}"
 OUT_DIR="${PROJECT_DIR}/artifacts/review/${RUN_ID}"
 mkdir -p "${OUT_DIR}"
 
+REVIEW_LATEST_FILE="${PROJECT_DIR}/artifacts/review/latest"
+BRANCH_NAME="$(git -C "${REPO_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)"
+BRANCH_SLUG="$(echo "${BRANCH_NAME}" | tr '/[:space:]' '__' | tr -cd 'A-Za-z0-9._-')"
+WORKTREE_NAME="$(basename "${REPO_DIR}")"
+WORKTREE_SLUG="$(echo "${WORKTREE_NAME}" | tr '/[:space:]' '__' | tr -cd 'A-Za-z0-9._-')"
+REVIEW_LATEST_SCOPED_FILE="${PROJECT_DIR}/artifacts/review/latest.${BRANCH_SLUG}"
+REVIEW_LATEST_WORKTREE_FILE="${PROJECT_DIR}/artifacts/review/latest.${WORKTREE_SLUG}"
+COMPARE_LAST_RUN_MD="${OUT_DIR}/compare_last_run.md"
 RUN_LOG="${OUT_DIR}/run.log"
 CHANGED_FILES="${OUT_DIR}/changed_files.txt"
 DIFF_PATCH="${OUT_DIR}/diff.patch"
@@ -89,6 +145,16 @@ TRACE_JSONL="${OUT_DIR}/trace.jsonl"
 MANIFEST_JSON="${OUT_DIR}/manifest.json"
 FIX_QUEUE_JSON="${OUT_DIR}/fix_queue.json"
 RESULT_JSON="${OUT_DIR}/result.json"
+GATECHECK_LOG="${OUT_DIR}/gatecheck.log"
+GATECHECK_JSON="${OUT_DIR}/gatecheck.json"
+RUN_RECORD_LOG="${OUT_DIR}/run_record.log"
+RUN_RECORD_JSON_REL=""
+RUN_RECORD_MD_REL=""
+RUN_RECORD_STATUS="skipped"
+GATECHECK_RC=0
+GATECHECK_PASS="false"
+GATECHECK_FAIL_CODES=""
+GATECHECK_OPEN_MUST_FIX_COUNT=0
 
 # Create required files early (even if we fail later).
 : >"${RUN_LOG}"
@@ -105,6 +171,10 @@ RESULT_JSON="${OUT_DIR}/result.json"
 : >"${MANIFEST_JSON}"
 : >"${FIX_QUEUE_JSON}"
 : >"${RESULT_JSON}"
+: >"${GATECHECK_LOG}"
+: >"${GATECHECK_JSON}"
+: >"${RUN_RECORD_LOG}"
+: >"${COMPARE_LAST_RUN_MD}"
 
 # Reuse oneclick stage/trace convention for debuggability.
 if [[ -f "${LIB_ONECLICK}" ]]; then
@@ -160,10 +230,17 @@ print_summary() {
     echo "  - changed_files: ${CHANGED_FILES}"
     echo "  - diff_patch: ${DIFF_PATCH}"
     echo "  - commits: ${COMMITS_TXT}"
+    echo "  - review.latest: ${REVIEW_LATEST_FILE}"
     echo "  - summary: ${SUMMARY_TXT}"
     echo "  - trace: ${TRACE_JSONL}"
+    echo "  - gatecheck.log: ${GATECHECK_LOG}"
+    echo "  - gatecheck.json: ${GATECHECK_JSON}"
+    echo "  - run_record.log: ${RUN_RECORD_LOG}"
     echo "range: ${BASE:-<unset>}..${HEAD}"
     echo "ssot_patch: ${SSOT_PATCH_RESULT}"
+    echo "  - review.latest.branch: ${REVIEW_LATEST_SCOPED_FILE}"
+    echo "  - review.latest.worktree: ${REVIEW_LATEST_WORKTREE_FILE}"
+    echo "  - compare_last_run: ${COMPARE_LAST_RUN_MD}"
     echo "exit_code: ${FINAL_RC}"
   } | tee -a "${RUN_LOG}"
 }
@@ -179,6 +256,111 @@ best_effort_base() {
   echo ""
   return 0
 }
+resolve_repo_path() {
+  local p="$1"
+  if [[ -z "${p}" ]]; then
+    echo ""
+    return 0
+  fi
+  if [[ "${p}" == /* ]]; then
+    echo "${p}"
+  else
+    echo "${REPO_DIR}/${p}"
+  fi
+}
+
+count_findings_file() {
+  local f="$1"
+  [[ -f "${f}" ]] || { echo 0; return 0; }
+  awk '/^  - id: /{c++} END{print c+0}' "${f}" 2>/dev/null || echo 0
+}
+
+gatecheck_open_must_count() {
+  local f="$1"
+  [[ -f "${f}" ]] || { echo 0; return 0; }
+  jq -r '.open_must_fix_count // 0' "${f}" 2>/dev/null || echo 0
+}
+
+gatecheck_fail_codes_csv() {
+  local f="$1"
+  [[ -f "${f}" ]] || { echo ""; return 0; }
+  jq -r '[.fail_codes[].code] | join(",")' "${f}" 2>/dev/null || echo ""
+}
+
+audit_missing_must_bracket() {
+  local f="$1"
+  [[ -f "${f}" ]] || { echo "[]"; return 0; }
+  awk -F': ' '/^missing_must: /{print $2; exit}' "${f}" 2>/dev/null || echo "[]"
+}
+
+csv_set_delta() {
+  local prev_csv="$1"
+  local curr_csv="$2"
+  local added removed
+  added="$(comm -13 <(echo "${prev_csv}" | tr ',' '\n' | sed '/^$/d' | sort -u) <(echo "${curr_csv}" | tr ',' '\n' | sed '/^$/d' | sort -u) | paste -sd ',' -)"
+  removed="$(comm -23 <(echo "${prev_csv}" | tr ',' '\n' | sed '/^$/d' | sort -u) <(echo "${curr_csv}" | tr ',' '\n' | sed '/^$/d' | sort -u) | paste -sd ',' -)"
+  echo "added=[${added:-}] removed=[${removed:-}]"
+}
+
+write_compare_last_run() {
+  local current_art_rel="ai/projects/topru-ai/artifacts/review/${RUN_ID}"
+  local current_open_must="${GATECHECK_OPEN_MUST_FIX_COUNT:-0}"
+  local current_findings_total
+  current_findings_total="$(count_findings_file "${FINDINGS_YAML}")"
+  local current_fail_codes="${GATECHECK_FAIL_CODES:-}"
+  local current_missing_must
+  current_missing_must="$(audit_missing_must_bracket "${AUDIT_FILE}")"
+
+  local prev_art_rel="${SSOT_REVIEW_LAST_ART_DIR:-}"
+  local prev_art_abs prev_gatecheck prev_findings prev_audit
+  local prev_open_must="0"
+  local prev_findings_total="0"
+  local prev_fail_codes=""
+  local prev_missing_must="[]"
+
+  prev_art_abs="$(resolve_repo_path "${prev_art_rel}")"
+  prev_gatecheck="${prev_art_abs}/gatecheck.json"
+  prev_findings="${prev_art_abs}/findings.yaml"
+  prev_audit="${prev_art_abs}/audit.txt"
+
+  if [[ -f "${prev_gatecheck}" ]]; then
+    prev_open_must="$(gatecheck_open_must_count "${prev_gatecheck}")"
+    prev_fail_codes="$(gatecheck_fail_codes_csv "${prev_gatecheck}")"
+  fi
+  if [[ -f "${prev_findings}" ]]; then
+    prev_findings_total="$(count_findings_file "${prev_findings}")"
+  fi
+  if [[ -f "${prev_audit}" ]]; then
+    prev_missing_must="$(audit_missing_must_bracket "${prev_audit}")"
+  fi
+
+  local delta_open_must delta_findings fail_code_delta
+  delta_open_must=$((current_open_must - prev_open_must))
+  delta_findings=$((current_findings_total - prev_findings_total))
+  fail_code_delta="$(csv_set_delta "${prev_fail_codes}" "${current_fail_codes}")"
+
+  {
+    echo "# Compare Last Run"
+    echo
+    echo "- current_run: ${current_art_rel}"
+    echo "- previous_run: ${prev_art_rel:-<none>}"
+    echo
+    echo "## Metrics"
+    echo "- open_must_fix_count: ${prev_open_must} -> ${current_open_must} (delta=${delta_open_must})"
+    echo "- findings_total: ${prev_findings_total} -> ${current_findings_total} (delta=${delta_findings})"
+    echo "- fail_codes: prev=[${prev_fail_codes}] curr=[${current_fail_codes}] ${fail_code_delta}"
+    echo "- must_evidence_missing: prev=${prev_missing_must} curr=${current_missing_must}"
+    echo
+    echo "## Sources"
+    echo "- current_gatecheck: ${GATECHECK_JSON}"
+    echo "- previous_gatecheck: ${prev_gatecheck}"
+    echo "- current_findings: ${FINDINGS_YAML}"
+    echo "- previous_findings: ${prev_findings}"
+    echo "- current_audit: ${AUDIT_FILE}"
+    echo "- previous_audit: ${prev_audit}"
+  } > "${COMPARE_LAST_RUN_MD}"
+}
+
 
 if [[ ! -f "${SSOT_FILE}" ]]; then
   stage 0 "preflight failed: SSOT missing"
@@ -277,6 +459,9 @@ fi
 echo "STRICT_REVIEW_FIX_ONECLICK"
 echo "time_utc: ${TIME_UTC}"
 echo "mode: ${MODE}"
+if [[ "${FOLLOWUP_REQUESTED}" == "1" ]]; then
+  echo "FOLLOWUP_BASE=${BASE} FOLLOWUP_HEAD=${HEAD} (from SSOT.review.last_run)"
+fi
 echo "base: ${BASE}"
 echo "head: ${HEAD}"
 echo "range: ${BASE}..${HEAD}"
@@ -484,6 +669,7 @@ prev_findings_abs="$(abs_path "${SSOT_REVIEW_LAST_FINDINGS_YAML}")"
       prev_title="$(prev_finding_field "${prev_findings_abs}" "${rid}" "title")"
       prev_advice="$(prev_finding_field "${prev_findings_abs}" "${rid}" "advice")"
       prev_fp="$(prev_finding_field "${prev_findings_abs}" "${rid}" "fingerprint")"
+      prev_closure="$(prev_finding_field "${prev_findings_abs}" "${rid}" "closure")"
 
       st="${prev_status:-open}"
       typ="${prev_type:-Risk}"
@@ -494,6 +680,7 @@ prev_findings_abs="$(abs_path "${SSOT_REVIEW_LAST_FINDINGS_YAML}")"
       location="${prev_location:-${changed_loc}}"
       title="${prev_title:-TODO}"
       advice="${prev_advice:-TODO}"
+      closure="${prev_closure:-TODO closure criteria}"
       fp="${prev_fp}"
       if [[ -z "${fp}" || "${fp}" == "UNKNOWN" ]]; then
         fp="$(sha1_of "${typ}|${location}|${title}")"
@@ -527,8 +714,11 @@ prev_findings_abs="$(abs_path "${SSOT_REVIEW_LAST_FINDINGS_YAML}")"
       echo "    scope: \"${scope}\""
       echo "    likelihood: \"${likelihood}\""
       echo "    location: \"${location}\""
+      echo "    locations:"
+      echo "      - \"${location}\""
       echo "    title: \"${title}\""
       echo "    advice: \"${advice}\""
+      echo "    closure: \"${closure}\""
       vmin_lines="$(prev_finding_list "${prev_findings_abs}" "${rid}" "verify_min" || true)"
       if [[ -n "${vmin_lines}" ]]; then
         echo "    verify_min:"
@@ -584,8 +774,11 @@ prev_findings_abs="$(abs_path "${SSOT_REVIEW_LAST_FINDINGS_YAML}")"
     echo "    scope: \"local\""
     echo "    likelihood: \"High\""
     echo "    location: \"${GOFMT_BAD}\""
+    echo "    locations:"
+    echo "      - \"${GOFMT_BAD}\""
     echo "    title: \"Changed Go files are not gofmt'ed\""
     echo "    advice: \"Run gofmt on the listed files (do not change semantics).\""
+    echo "    closure: \"Changed files are gofmt-clean and verify_min passes.\""
     echo "    verify_min:"
     echo "      - \"gofmt -l <files> (expect empty)\""
     echo "    verify_opt: []"
@@ -622,7 +815,7 @@ fi
 {
   echo "# STRICT_REVIEW — TopRU (auto-generated)"
   echo
-  echo "## Snapshot"
+  echo "## 1) Layer 1 - Summary"
   echo "- mode: ${MODE}"
   echo "- base: ${BASE}"
   echo "- head: ${HEAD}"
@@ -647,13 +840,13 @@ fi
     echo
   fi
   echo
-  echo "## Evidence Collected"
+  echo "## 2) Layer 2 - Review Strategy"
   echo "- changed_files: ${CHANGED_FILES}"
   echo "- diff_patch: ${DIFF_PATCH}"
   echo "- commits: ${COMMITS_TXT}"
   echo "- summary: ${SUMMARY_TXT}"
   echo
-  echo "## Findings"
+  echo "## 3) Layer 3 - Findings"
   echo
   awk '
     function q(s) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
@@ -870,6 +1063,7 @@ open_non_must_ids="$(
     }
   ' "${FINDINGS_YAML}" 2>/dev/null || true
 )"
+first_open_must_id="$(echo "${open_must_ids}" | sed '/^$/d' | head -n 1 || true)"
 
 if [[ "${open_count}" == "0" ]]; then
   echo "no open findings" >> "${FIX_QUEUE_MD}"
@@ -926,6 +1120,7 @@ cat >"${MANIFEST_JSON}" <<EOF
     "next_actions.md",
     "fix_queue.md",
     "fix_queue.json",
+    "compare_last_run.md",
     "trace.jsonl",
     "manifest.json",
     "result.json"
@@ -934,10 +1129,41 @@ cat >"${MANIFEST_JSON}" <<EOF
 EOF
 
 # -------------------------
-# Step 3: patch SSOT review
+# Step 3: review pack gatecheck
+# -------------------------
+stage 4 "review pack gatecheck"
+set +e
+bash "${REPO_DIR}/ai/ai-change-gates/gatecheck/review_pack.sh"   --artifacts-dir "${OUT_DIR}"   --json-out "${GATECHECK_JSON}" > "${GATECHECK_LOG}" 2>&1
+GATECHECK_RC=$?
+set -e
+
+if [[ ! -s "${GATECHECK_JSON}" ]]; then
+  cat > "${GATECHECK_JSON}" <<EOF
+{
+  "status": "fail",
+  "artifacts_dir": "${OUT_DIR}",
+  "open_must_fix_count": 0,
+  "fail_codes": [
+    {"code":"REVIEW_PACK_MISSING_FILES","detail":"gatecheck did not emit json","min_fix":"Re-run strict review and inspect gatecheck.log"}
+  ]
+}
+EOF
+fi
+
+if jq -e '.status == "pass"' "${GATECHECK_JSON}" >/dev/null 2>&1; then
+  GATECHECK_PASS="true"
+else
+  GATECHECK_PASS="false"
+fi
+GATECHECK_OPEN_MUST_FIX_COUNT="$(jq -r '.open_must_fix_count // 0' "${GATECHECK_JSON}" 2>/dev/null || echo 0)"
+GATECHECK_FAIL_CODES="$(jq -r '[.fail_codes[].code] | join(",")' "${GATECHECK_JSON}" 2>/dev/null || echo "")"
+trace 4 "gatecheck finished" "ok" "{\"rc\":${GATECHECK_RC},\"pass\":\"${GATECHECK_PASS}\",\"open_must_fix\":${GATECHECK_OPEN_MUST_FIX_COUNT}}"
+
+# -------------------------
+# Step 4: patch SSOT review
 # -------------------------
 if [[ "${PATCH_SSOT}" == "1" ]]; then
-  stage 4 "patch SSOT review block"
+  stage 5 "patch SSOT review block"
   ART_DIR_REL="ai/projects/topru-ai/artifacts/review/${RUN_ID}"
   set +e
   python3 "${PROJECT_DIR}/verify/ssot_patch_review.py" \
@@ -949,7 +1175,12 @@ if [[ "${PATCH_SSOT}" == "1" ]]; then
     --artifacts-dir "${ART_DIR_REL}" \
     --review-md "${ART_DIR_REL}/review.md" \
     --findings-yaml "${ART_DIR_REL}/findings.yaml" \
-    --next-actions "${ART_DIR_REL}/next_actions.md"
+    --next-actions "${ART_DIR_REL}/next_actions.md" \
+    --review-run-id "${RUN_ID}" \
+    --review-commit "$(git -C "${REPO_DIR}" rev-parse HEAD)" \
+    --gatecheck-pass "${GATECHECK_PASS}" \
+    --gatecheck-artifact "${ART_DIR_REL}/gatecheck.json" \
+    --open-must-fix-count "${GATECHECK_OPEN_MUST_FIX_COUNT}"
   rc_ensure=$?
   python3 "${PROJECT_DIR}/verify/ssot_patch_review.py" \
     --op update \
@@ -960,16 +1191,21 @@ if [[ "${PATCH_SSOT}" == "1" ]]; then
     --artifacts-dir "${ART_DIR_REL}" \
     --review-md "${ART_DIR_REL}/review.md" \
     --findings-yaml "${ART_DIR_REL}/findings.yaml" \
-    --next-actions "${ART_DIR_REL}/next_actions.md"
+    --next-actions "${ART_DIR_REL}/next_actions.md" \
+    --review-run-id "${RUN_ID}" \
+    --review-commit "$(git -C "${REPO_DIR}" rev-parse HEAD)" \
+    --gatecheck-pass "${GATECHECK_PASS}" \
+    --gatecheck-artifact "${ART_DIR_REL}/gatecheck.json" \
+    --open-must-fix-count "${GATECHECK_OPEN_MUST_FIX_COUNT}"
   rc_update=$?
   set -e
 
   if [[ "${rc_ensure}" == "0" && "${rc_update}" == "0" ]]; then
     SSOT_PATCH_RESULT="ok"
-    trace 4 "ssot patched" "ok" "{\"op\":\"ensure+update\",\"ssot\":\"${SSOT_FILE}\"}"
+    trace 5 "ssot patched" "ok" "{\"op\":\"ensure+update\",\"ssot\":\"${SSOT_FILE}\"}"
   else
     SSOT_PATCH_RESULT="fail(ensure=${rc_ensure},update=${rc_update})"
-    trace 4 "ssot patch failed" "fail" "{\"ensure\":${rc_ensure},\"update\":${rc_update}}"
+    trace 5 "ssot patch failed" "fail" "{\"ensure\":${rc_ensure},\"update\":${rc_update}}"
     FINAL_RC=3
   fi
 else
@@ -981,7 +1217,7 @@ fi
 # -------------------------
 echo
 echo "=== PR-ready check (best-effort) ==="
-stage 5 "audit SSOT pr_ready + compute PR_READY"
+stage 6 "audit SSOT pr_ready + compute PR_READY"
 AUDIT_FILE="${OUT_DIR}/audit.txt"
 if [[ -x "${PROJECT_DIR}/verify/audit_ssot.sh" ]]; then
   AUDIT_OUT_FILE="${AUDIT_FILE}" bash "${PROJECT_DIR}/verify/audit_ssot.sh" \
@@ -1007,15 +1243,83 @@ if [[ -f "${AUDIT_FILE}" ]]; then
   AUDIT_STATUS="$(awk -F': ' '/^pr_ready_status: /{print $2; exit}' "${AUDIT_FILE}" || true)"
 fi
 echo "AUDIT_PR_READY=${AUDIT_STATUS}"
+echo "GATECHECK_PASS=${GATECHECK_PASS}"
+echo "GATECHECK_OPEN_MUST_FIX=${GATECHECK_OPEN_MUST_FIX_COUNT}"
 
 PR_READY="false"
-if [[ "${OPEN_COUNT}" == "0" && "${AUDIT_STATUS}" == "true" ]]; then
+if [[ "${OPEN_COUNT}" == "0" && "${AUDIT_STATUS}" == "true" && "${GATECHECK_PASS}" == "true" ]]; then
   PR_READY="true"
 fi
 echo "PR_READY=${PR_READY}"
 echo "Artifacts: ${OUT_DIR}"
 
-trace 5 "pr_ready computed" "ok" "{\"review_open\":${OPEN_COUNT},\"audit_pr_ready\":\"${AUDIT_STATUS}\",\"pr_ready\":\"${PR_READY}\"}"
+trace 6 "pr_ready computed" "ok" "{\"review_open\":${OPEN_COUNT},\"audit_pr_ready\":\"${AUDIT_STATUS}\",\"pr_ready\":\"${PR_READY}\",\"gatecheck_pass\":\"${GATECHECK_PASS}\"}"
+
+NEXT_CMD="NONE"
+if [[ "${OPEN_COUNT}" != "0" ]]; then
+  if [[ -n "${first_open_must_id}" ]]; then
+    NEXT_CMD="bash ai/projects/topru-ai/verify/run_fix_one_finding_oneclick.sh --id ${first_open_must_id} --verify-min"
+  else
+    NEXT_CMD="bash ai/projects/topru-ai/verify/run_fix_one_finding_oneclick.sh --id ${first_open_id} --verify-min"
+  fi
+elif [[ "${PR_READY}" != "true" ]]; then
+  NEXT_CMD="PR_READY_INCLUDE_REVIEW=1 bash ai/projects/topru-ai/verify/run_pr_ready_oneclick.sh"
+fi
+
+# -------------------------
+# Step 7: write run_record
+stage 8 "compare with previous run"
+write_compare_last_run
+trace 8 "compare_last_run written" "ok" "{\"compare\":\"${COMPARE_LAST_RUN_MD}\"}"
+
+# -------------------------
+stage 7 "write run_record"
+ART_DIR_REL="ai/projects/topru-ai/artifacts/review/${RUN_ID}"
+RUN_RECORD_VERIFIER_STATUS="pass"
+if [[ "${GATECHECK_PASS}" != "true" || "${PR_READY}" != "true" ]]; then
+  RUN_RECORD_VERIFIER_STATUS="fail"
+fi
+
+run_record_cmd=(
+  bash "${REPO_DIR}/ai/ai-change-gates/tools/run_record.sh"
+  --ssot "ai/projects/topru-ai/PROJECT_STATE.md"
+  --mode navigate_patch
+  --trigger local
+  --read-file "ai/projects/topru-ai/PROJECT_STATE.md"
+  --read-file "${ART_DIR_REL}/review.md"
+  --read-file "${ART_DIR_REL}/findings.yaml"
+  --written-file "ai/projects/topru-ai/PROJECT_STATE.md"
+  --written-file "${ART_DIR_REL}/review.md"
+  --written-file "${ART_DIR_REL}/findings.yaml"
+  --written-file "${ART_DIR_REL}/gatecheck.json"
+  --written-file "${ART_DIR_REL}/result.json"
+  --navigator-summary "topru strict review pack generation"
+  --patch-summary "strict review artifacts + gatecheck + ssot review update"
+  --verifier-status "${RUN_RECORD_VERIFIER_STATUS}"
+  --next-action "${NEXT_CMD}"
+  --diff-summary "strict_review range=${BASE}..${HEAD} gatecheck=${GATECHECK_PASS}"
+  --notes "tool=topru strict_review_fix_oneclick artifacts_dir=${ART_DIR_REL} base=${BASE} head=${HEAD}"
+)
+
+if [[ -n "${GATECHECK_FAIL_CODES}" ]]; then
+  while IFS= read -r c; do
+    [[ -n "${c}" ]] || continue
+    run_record_cmd+=(--verifier-fail-code "${c}")
+  done < <(echo "${GATECHECK_FAIL_CODES}" | tr ',' '\n')
+fi
+
+set +e
+"${run_record_cmd[@]}" > "${RUN_RECORD_LOG}" 2>&1
+run_record_rc=$?
+set -e
+if [[ "${run_record_rc}" == "0" ]]; then
+  RUN_RECORD_STATUS="ok"
+  RUN_RECORD_JSON_REL="$(awk -F= '/^RUN_RECORD_JSON=/{print $2; exit}' "${RUN_RECORD_LOG}" | tr -d '\r' || true)"
+  RUN_RECORD_MD_REL="$(awk -F= '/^RUN_RECORD_MD=/{print $2; exit}' "${RUN_RECORD_LOG}" | tr -d '\r' || true)"
+else
+  RUN_RECORD_STATUS="fail(${run_record_rc})"
+fi
+trace 7 "run_record finished" "ok" "{\"status\":\"${RUN_RECORD_STATUS}\"}"
 
 # Exit code policy:
 # - 0: script ran + SSOT patch ok + PR_READY=true
@@ -1027,13 +1331,6 @@ else
   if [[ "${FINAL_RC}" == "0" ]]; then
     FINAL_RC=3
   fi
-fi
-
-NEXT_CMD="NONE"
-if [[ "${OPEN_COUNT}" != "0" ]]; then
-  NEXT_CMD="bash ai/projects/topru-ai/verify/fix_one_by_one.sh --id ${first_open_id} --base ${BASE} --head ${HEAD}"
-elif [[ "${PR_READY}" != "true" ]]; then
-  NEXT_CMD="PR_READY_INCLUDE_REVIEW=1 bash ai/projects/topru-ai/verify/run_pr_ready_oneclick.sh"
 fi
 
 if [[ "${FINAL_RC}" == "0" ]]; then
@@ -1052,6 +1349,9 @@ fi
   echo "  \"range\": $(json_quote "${BASE}..${HEAD}"),"
   echo "  \"result\": $(json_quote "${final_result}"),"
   echo "  \"pr_ready\": $(json_quote "${PR_READY}"),"
+  echo "  \"gatecheck_pass\": $(json_quote "${GATECHECK_PASS}"),"
+  echo "  \"gatecheck_open_must_fix_count\": ${GATECHECK_OPEN_MUST_FIX_COUNT},"
+  echo "  \"gatecheck_fail_codes\": $(json_quote "${GATECHECK_FAIL_CODES}"),"
   echo "  \"open_count\": ${OPEN_COUNT},"
   echo "  \"open_list\": $(json_quote "${open_list}"),"
   echo "  \"next\": $(json_quote "${NEXT_CMD}"),"
@@ -1064,7 +1364,16 @@ fi
   echo "    \"findings_yaml\": $(json_quote "${FINDINGS_YAML}"),"
   echo "    \"fix_queue_md\": $(json_quote "${FIX_QUEUE_MD}"),"
   echo "    \"fix_queue\": $(json_quote "${FIX_QUEUE_JSON}"),"
-  echo "    \"result_json\": $(json_quote "${RESULT_JSON}")"
+  echo "    \"gatecheck_log\": $(json_quote "${GATECHECK_LOG}"),"
+  echo "    \"gatecheck_json\": $(json_quote "${GATECHECK_JSON}"),"
+  echo "    \"run_record_log\": $(json_quote \"${RUN_RECORD_LOG}\"),"
+  echo "    \"run_record_json\": $(json_quote \"${RUN_RECORD_JSON_REL}\"),"
+  echo "    \"run_record_md\": $(json_quote \"${RUN_RECORD_MD_REL}\"),"
+  echo "    \"compare_last_run\": $(json_quote \"${COMPARE_LAST_RUN_MD}\"),"
+  echo "    \"review_latest\": $(json_quote \"${REVIEW_LATEST_FILE}\"),"
+  echo "    \"review_latest_branch\": $(json_quote \"${REVIEW_LATEST_SCOPED_FILE}\"),"
+  echo "    \"review_latest_worktree\": $(json_quote \"${REVIEW_LATEST_WORKTREE_FILE}\"),"
+  echo "    \"result_json\": $(json_quote \"${RESULT_JSON}\")"
   echo "  }"
   echo "}"
 } > "${RESULT_JSON}"
@@ -1088,7 +1397,27 @@ fi
   echo "}"
 } > "${FIX_QUEUE_JSON}"
 
+mkdir -p "$(dirname "${REVIEW_LATEST_FILE}")"
+echo "${RUN_ID}" > "${REVIEW_LATEST_FILE}"
+echo "${RUN_ID}" > "${REVIEW_LATEST_SCOPED_FILE}"
+echo "${RUN_ID}" > "${REVIEW_LATEST_WORKTREE_FILE}"
 print_summary
+if [[ "${final_result}" == "PASS" ]]; then
+  strict_result="OK"
+else
+  strict_result="FAIL"
+fi
+
+echo "STRICT_REVIEW=${strict_result}"
+echo "NEXT: ${NEXT_CMD}"
+if [[ -n "${open_must_ids}" ]]; then
+  echo "NEXT_MUST_FIX:"
+  while IFS= read -r rid; do
+    [[ -n "${rid}" ]] || continue
+    echo "  bash ai/projects/topru-ai/verify/run_fix_one_finding_oneclick.sh --id ${rid} --verify-min"
+  done <<< "${open_must_ids}"
+fi
+echo "DETAILS: review_md=${REVIEW_MD} findings_yaml=${FINDINGS_YAML} gatecheck_json=${GATECHECK_JSON}"
 echo "RESULT=${final_result} RUN_ID=${RUN_ID} ART_DIR=${OUT_DIR} NEXT=\"${NEXT_CMD}\""
 echo "DETAIL trace.jsonl=${TRACE_JSONL}"
 echo "DETAIL manifest.json=${MANIFEST_JSON}"
@@ -1096,5 +1425,16 @@ echo "DETAIL patch.diff=${PATCH_DIFF}"
 echo "DETAIL review.md=${REVIEW_MD}"
 echo "DETAIL findings.yaml=${FINDINGS_YAML}"
 echo "DETAIL fix_queue.md=${FIX_QUEUE_MD}"
+echo "DETAIL compare_last_run=${COMPARE_LAST_RUN_MD}"
+echo "DETAIL review.latest=${REVIEW_LATEST_FILE}"
+echo "DETAIL review.latest_run=$(cat "${REVIEW_LATEST_FILE}" 2>/dev/null || true)"
+echo "DETAIL review.latest_branch=${REVIEW_LATEST_SCOPED_FILE}"
+echo "DETAIL review.latest_branch_run=$(cat "${REVIEW_LATEST_SCOPED_FILE}" 2>/dev/null || true)"
+echo "DETAIL review.latest_worktree=${REVIEW_LATEST_WORKTREE_FILE}"
+echo "DETAIL review.latest_worktree_run=$(cat "${REVIEW_LATEST_WORKTREE_FILE}" 2>/dev/null || true)"
+echo "DETAIL run_record.log=${RUN_RECORD_LOG}"
 echo "DETAIL result.json=${RESULT_JSON}"
+echo "===ONECLICK_JSON_BEGIN==="
+cat "${RESULT_JSON}"
+echo "===ONECLICK_JSON_END==="
 exit "${FINAL_RC}"

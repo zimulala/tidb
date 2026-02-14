@@ -1,0 +1,33 @@
+schema_version: v1
+recipes:
+  - id: V_INTERVAL_DETERMINISM
+    description: deterministic interval/window alignment test without real time
+    commands:
+      - "go test ./pkg/util/topsql/reporter -run 'TestRUWindowAggregatorReportGranularity|TestRUWindowAggregatorTakeOncePerWindow' -count=1"
+    expected_signals:
+      - "PASS"
+    notes: "Project may override package/path."
+
+  - id: V_CONCURRENCY_CANCEL_EXIT
+    description: ensure cancel/close path exits quickly without goroutine hang
+    commands:
+      - "go test ./pkg/util/topsql/reporter -run 'TestCollectRUWorkerCancelNoHangUnderBackpressure' -count=1"
+    expected_signals:
+      - "PASS"
+    notes: "Project may override test name/path."
+
+  - id: V_BACKPRESSURE_SLOW_CONSUMER
+    description: verify slow-consumer/backpressure behavior is explicit and bounded
+    commands:
+      - "go test ./pkg/util/topsql/reporter -run 'TestTopRUReporter_MockDataSinkStructured|TestRUWindowAggregatorTakeOncePerWindow' -count=1"
+    expected_signals:
+      - "PASS"
+    notes: "Project may replace with dedicated slow-consumer test."
+
+  - id: V_PERF_SANITY_AGG
+    description: minimal perf sanity benchmark for RU aggregation/report path
+    commands:
+      - "go test ./pkg/util/topsql/reporter -run '^$' -bench 'BenchmarkRUWindowAggregatorConcurrentIngestReport|BenchmarkRUCollectingAddBatch' -benchmem -count=1"
+    expected_signals:
+      - "ns/op"
+    notes: "Keep benchmark scope small; do not run heavy cluster perf by default."

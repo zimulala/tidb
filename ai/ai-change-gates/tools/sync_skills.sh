@@ -9,11 +9,12 @@ SYNC_CODEX="1"
 SYNC_CURSOR="1"
 TARGET_FILTER_SET="0"
 CURSOR_OUT_DIR="${CURSOR_HOME_DIR}"
+STRICT_CLEAN_SKILLS_SRC="0"
 
 usage() {
   cat <<'EOF'
 Usage:
-  bash ai/ai-change-gates/tools/sync_skills.sh [--codex] [--cursor] [--codex-home <path>] [--cursor-home <path>] [--cursor-out <path>]
+  bash ai/ai-change-gates/tools/sync_skills.sh [--codex] [--cursor] [--codex-home <path>] [--cursor-home <path>] [--cursor-out <path>] [--strict-skills-clean]
 
 Defaults:
   - If neither --codex nor --cursor is provided, sync both targets.
@@ -87,6 +88,10 @@ while [[ $# -gt 0 ]]; do
       CURSOR_OUT_DIR="$2"
       shift 2
       ;;
+    --strict-skills-clean)
+      STRICT_CLEAN_SKILLS_SRC="1"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -102,6 +107,22 @@ done
 if [[ ! -d "${SRC_ROOT}" ]]; then
   echo "[sync_skills][FATAL] source dir not found: ${SRC_ROOT}" >&2
   exit 1
+fi
+
+SKILLS_SRC_REL="ai/skills_src"
+SKILLS_SRC_COMMIT="$(git -C "${ROOT}" rev-list -1 HEAD -- "${SKILLS_SRC_REL}" 2>/dev/null || true)"
+if [[ -z "${SKILLS_SRC_COMMIT}" ]]; then
+  SKILLS_SRC_COMMIT="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null || echo UNKNOWN)"
+fi
+SKILLS_SRC_DIRTY="false"
+SKILLS_SRC_DIRTY_LINES="$(git -C "${ROOT}" status --porcelain -- "${SKILLS_SRC_REL}" 2>/dev/null || true)"
+if [[ -n "${SKILLS_SRC_DIRTY_LINES}" ]]; then
+  SKILLS_SRC_DIRTY="true"
+  if [[ "${STRICT_CLEAN_SKILLS_SRC}" == "1" ]]; then
+    echo "[sync_skills][FATAL] ai/skills_src has uncommitted changes. Commit/stash first or run without --strict-skills-clean." >&2
+    exit 1
+  fi
+  echo "[sync_skills][WARN] ai/skills_src has uncommitted changes; syncing with source_dirty=true" >&2
 fi
 
 if [[ "${SYNC_CODEX}" != "1" && "${SYNC_CURSOR}" != "1" ]]; then
@@ -157,6 +178,8 @@ for skill_dir in "${SRC_ROOT}"/*; do
     echo "description: ${skill_description}"
     echo "version: ${skill_version}"
     echo "source: ${source_rel}"
+    echo "source_commit: ${SKILLS_SRC_COMMIT}"
+    echo "source_dirty: ${SKILLS_SRC_DIRTY}"
     echo "generated_at_utc: ${generated_at}"
     echo "---"
     echo
@@ -187,3 +210,4 @@ if [[ "${generated}" == "0" ]]; then
 fi
 
 echo "[sync_skills] generated_skills=${generated}"
+echo "[sync_skills] skills_src_commit=${SKILLS_SRC_COMMIT} skills_src_dirty=${SKILLS_SRC_DIRTY}"

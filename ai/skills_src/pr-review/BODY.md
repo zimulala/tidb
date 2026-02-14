@@ -94,7 +94,31 @@ For each finding, classify:
 
 Use this classification to justify **Must fix** decisions and to order the output list by priority.
 
+### 1.3.2 Output Contract (MUST, Fixed Order)
+
+The review response MUST be in this order:
+
+1) PR Summary
+- What changed: 1-3 bullets.
+- Why: infer only from diff, commit messages, and PR title.
+- If evidence is insufficient, state unknown and list missing evidence. Do not invent business context.
+
+2) How to Review (for human)
+- Provide 3-6 concrete checks with commands and file/function focus.
+- Prioritize hotspots and lowest-cost verifications first.
+
+3) Review Findings
+- Use the structured finding schema in section 1.4.
+- Include Verify (minimal + optional), Cleanup, and explicit test gaps with reasons.
+
+When layered output is required, map these three parts to:
+- `## 1) Layer 1 - PR Summary`
+- `## 2) Layer 2 - Review Strategy`
+- `## 3) Layer 3 - Detailed Review`
+
 ### 1.4 Produce Review Results (Chinese, for Human Approval)
+
+This section defines the required schema for part 3 (Review Findings).
 
 Output a numbered list. Each item MUST include:
 - **类型**: Bug / Risk / Security / Optimization / Suggestion
@@ -229,6 +253,10 @@ They do NOT authorize execution.
 - Added Severity/Impact classification and incremental summary requirements.
 - Split verification into minimal-required vs recommended-optional.
 - Added contract/behavior change checklist for compatibility-critical PRs.
+
+### v1.6
+- Added a hard output contract: PR Summary -> How to Review -> Review Findings.
+- Restricted PR Summary inference to diff/commit messages/PR title to prevent context hallucination.
 
 ## Rule Justifications (Non-Normative)
 

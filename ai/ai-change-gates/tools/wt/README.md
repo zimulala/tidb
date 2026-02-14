@@ -43,3 +43,6 @@ wt open feature-x --dry-run -v
 wt pr 12345 --dry-run
 wt open feature-x --codex --cursor
 ```
+## Notes
+
+- `wt pr <prNum> --codex` and `wt review <prNum> --codex` print a ready-to-paste `$pr-review` prompt (and copy it via `pbcopy` on macOS) before launching Codex/Cursor UI.

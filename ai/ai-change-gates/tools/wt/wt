@@ -247,6 +247,60 @@ exec_tool_cmd() {
   run_shell_cmd "${script}"
 }
 
+pr_review_codex_prompt() {
+  cat <<'EOF'
+$pr-review
+Use the pr-review skill to review the current PR in this worktree.
+MUST follow the skill Output Contract in this order:
+1) PR Summary (what changed and why from diff/commit messages/PR title only)
+2) How to Review (3-6 concrete checks for human, with commands and file focus)
+3) Review Findings (Type/Must fix/Impact/Scope/Likelihood/Location/Conclusion/Suggested action/Verify minimal+optional/Cleanup/Test gaps)
+EOF
+}
+
+print_next_prompt() {
+  # print_next_prompt <client> <prompt>
+  local client="$1"
+  local prompt="$2"
+  local copied_msg=""
+
+  if command -v pbcopy >/dev/null 2>&1; then
+    if [[ "${DRY_RUN}" == "1" ]]; then
+      copied_msg=" (pbcopy skipped in dry-run)"
+    else
+      printf '%s' "${prompt}" | pbcopy
+      copied_msg=" (copied to clipboard)"
+    fi
+  fi
+
+  echo "[wt][${client}] Next prompt to paste${copied_msg}:"
+  echo "-----BEGIN PROMPT-----"
+  printf '%s\n' "${prompt}"
+  echo "-----END PROMPT-----"
+  if [[ -z "${copied_msg}" ]]; then
+    echo "[wt][${client}] Clipboard copy unavailable: pbcopy not found."
+  fi
+  echo "[wt][${client}] After ${client} opens: paste (Cmd+V) then press Enter."
+}
+
+launch_pr_review_codex() {
+  local worktree="$1"
+  local prompt
+  prompt="$(pr_review_codex_prompt)"
+  print_next_prompt "codex" "${prompt}"
+  echo "[wt][codex] Launching codex in: ${worktree}"
+  exec_tool_cmd "${CODEX_CMD}" "${worktree}"
+}
+
+launch_pr_review_cursor() {
+  local worktree="$1"
+  local prompt
+  prompt="$(pr_review_codex_prompt)"
+  print_next_prompt "cursor" "${prompt}"
+  echo "[wt][cursor] Launching cursor in: ${worktree}"
+  exec_tool_cmd "${CURSOR_CMD}" "${worktree}"
+}
+
 ensure_worktree_dirs() {
   local worktree="$1"
   run_cmd mkdir -p "${worktree}/_run/logs" "${worktree}/_run/tmp" "${worktree}/_run/data" "${worktree}/_run/ai"
@@ -270,6 +324,20 @@ normalize_path() {
     return 0
   fi
   echo "${p}"
+}
+
+resolve_path_follow_symlink() {
+  local p="$1"
+  local link=""
+  while [[ -L "${p}" ]]; do
+    link="$(readlink "${p}")"
+    if [[ "${link}" == /* ]]; then
+      p="${link}"
+    else
+      p="$(cd "$(dirname "${p}")" >/dev/null 2>&1 && pwd -P)/${link}"
+    fi
+  done
+  normalize_path "${p}"
 }
 
 worktree_path_for_branch() {
@@ -1235,8 +1303,8 @@ warn_if_noncanonical_entry() {
   if [[ ! -f "${canonical}" ]]; then
     return 0
   fi
-  canonical_norm="$(normalize_path "${canonical}")"
-  script_norm="$(normalize_path "${SCRIPT_PATH}")"
+  canonical_norm="$(resolve_path_follow_symlink "${canonical}")"
+  script_norm="$(resolve_path_follow_symlink "${SCRIPT_PATH}")"
   if [[ "${script_norm}" != "${canonical_norm}" ]]; then
     echo "[wt][WARN] invoked via ${SCRIPT_PATH}" >&2
     echo "[wt][WARN] canonical entry is ${canonical}" >&2
@@ -2155,10 +2223,10 @@ pr_worktree() {
   fi
 
   if [[ "${WANT_CURSOR}" == "1" ]]; then
-    exec_tool_cmd "${CURSOR_CMD}" "${worktree}"
+    launch_pr_review_cursor "${worktree}"
   fi
   if [[ "${WANT_CODEX}" == "1" ]]; then
-    exec_tool_cmd "${CODEX_CMD}" "${worktree}"
+    launch_pr_review_codex "${worktree}"
   fi
 }
 

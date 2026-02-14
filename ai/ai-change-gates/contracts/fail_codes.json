@@ -63,6 +63,41 @@
       "condition": "Risk signal exists but mitigation text is absent",
       "min_fix": "Add explicit mitigation owner+plan for each risk marker.",
       "severity": "warn"
+    },
+    {
+      "code": "REVIEW_PACK_MISSING_FILES",
+      "title": "Review pack files missing",
+      "condition": "review.md or findings.yaml is missing or empty under artifacts dir",
+      "min_fix": "Regenerate review pack and ensure review.md/findings.yaml are created with non-empty content.",
+      "severity": "blocker"
+    },
+    {
+      "code": "REVIEW_PACK_CHANGED_FILES_EMPTY",
+      "title": "changed_files.txt empty while diff.patch has content",
+      "condition": "diff.patch is non-empty but changed_files.txt is missing or has zero non-blank lines",
+      "min_fix": "Validate BASE/HEAD exist in current repo/worktree, then regenerate changed_files via: git diff --name-only \"$BASE..$HEAD\" > <artifacts_dir>/changed_files.txt and rerun strict review.",
+      "severity": "blocker"
+    },
+    {
+      "code": "REVIEW_PACK_MISSING_LAYERS",
+      "title": "Review pack missing 3-layer review structure",
+      "condition": "review.md does not contain required layers (summary/strategy/findings)",
+      "min_fix": "Regenerate review.md with 3 layers: layer1 summary, layer2 review strategy, layer3 findings.",
+      "severity": "blocker"
+    },
+    {
+      "code": "REVIEW_PACK_FINDINGS_SCHEMA_INVALID",
+      "title": "findings.yaml schema invalid",
+      "condition": "Any finding is missing required keys: id,fingerprint,status,must_fix,locations,closure",
+      "min_fix": "Normalize findings.yaml so every finding has required keys and valid values.",
+      "severity": "blocker"
+    },
+    {
+      "code": "REVIEW_PACK_OPEN_MUST_FIX",
+      "title": "Open must-fix findings exist",
+      "condition": "At least one finding has must_fix=true and status=open",
+      "min_fix": "Fix or explicitly close all open must-fix findings, then rerun strict review + gatecheck.",
+      "severity": "blocker"
     }
   ]
 }

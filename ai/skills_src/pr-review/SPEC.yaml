@@ -1,5 +1,5 @@
 name: pr-review
-version: v1.5
+version: v1.6
 description: Review pull requests for correctness, risk, and test coverage.
 triggers:
   - review pr/diff/commit
@@ -12,3 +12,4 @@ safety:
   - findings-first and evidence-based review
   - no github comment/issue operations without explicit instruction
   - layered output self-check prevents findings-only regression when layered format is required
+  - enforce output order: summary -> strategy -> findings

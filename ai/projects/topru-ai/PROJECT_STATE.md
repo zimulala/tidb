@@ -18,7 +18,7 @@ state:
   current_commit: 509dc996b32e6488b2c4709c99fa910f1ee1c855
   last_updated: 2026-02-03T14:01:27Z
 
-last_run: ai/ai-change-gates/runs/2026-02-13_run-123600Z-48ecf1a3df.json
+last_run: ai/ai-change-gates/runs/2026-02-14_run-065827Z-15a2753dd2.json
 
 
 claims:
@@ -155,17 +155,22 @@ next_actions:
     produces: [E_compat]
 
 review:
-  baseline_commit: "ba8b3d80cf7d5afecc821023a32e9e0363ad1faa"
+  baseline_commit: "15a2753dd2ebdc21643a14d964d2fa9436e66143"
   open: []
   fixed: []
   partially_fixed: []
   last_run:
-    time: "2026-02-10T05:27:08Z"
-    range: "ba8b3d80cf7d5afecc821023a32e9e0363ad1faa..ba8b3d80cf7d5afecc821023a32e9e0363ad1faa"
-    artifacts_dir: "ai/projects/topru-ai/artifacts/review/20260210T052708Z_ba8b3d8_incr"
-    review_md: "ai/projects/topru-ai/artifacts/review/20260210T052708Z_ba8b3d8_incr/review.md"
-    findings_yaml: "ai/projects/topru-ai/artifacts/review/20260210T052708Z_ba8b3d8_incr/findings.yaml"
-    next_actions: "ai/projects/topru-ai/artifacts/review/20260210T052708Z_ba8b3d8_incr/next_actions.md"
+    time: "2026-02-14T06:58:27Z"
+    range: "8c5df181ffc02e81133451433f7ebcbea0133a47..15a2753dd2ebdc21643a14d964d2fa9436e66143"
+    artifacts_dir: "ai/projects/topru-ai/artifacts/review/20260214T065825Z_15a2753_first"
+    review_md: "ai/projects/topru-ai/artifacts/review/20260214T065825Z_15a2753_first/review.md"
+    findings_yaml: "ai/projects/topru-ai/artifacts/review/20260214T065825Z_15a2753_first/findings.yaml"
+    next_actions: "ai/projects/topru-ai/artifacts/review/20260214T065825Z_15a2753_first/next_actions.md"
+    run_id: "20260214T065825Z_15a2753_first"
+    commit: "15a2753dd2ebdc21643a14d964d2fa9436e66143"
+    gatecheck_pass: true
+    gatecheck_artifact: "ai/projects/topru-ai/artifacts/review/20260214T065825Z_15a2753_first/gatecheck.json"
+    open_must_fix_count: 0
 pr_ready:
   from_track: true
   status: true

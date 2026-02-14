@@ -4,6 +4,7 @@ import argparse
 import datetime as _dt
 import re
 import sys
+from typing import List, Optional, Tuple
 
 
 SSOT_BEGIN = "<!-- NAVIGATOR:BEGIN SSOT_V2 -->"
@@ -24,26 +25,20 @@ def _iso_utc_now() -> str:
     return _dt.datetime.now(tz=_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _parse_findings_ids(findings_yaml_path: str):
-    """
-    Minimal YAML-ish parser.
-    We only need:
-      - id: R#
-      status: open|fixed|partially_fixed|...
-    """
+def _parse_findings_ids(findings_yaml_path: str) -> Tuple[List[str], List[str], List[str]]:
     text = _read_text(findings_yaml_path)
-    open_ids = []
-    fixed_ids = []
-    partial_ids = []
+    open_ids: List[str] = []
+    fixed_ids: List[str] = []
+    partial_ids: List[str] = []
 
-    cur_id = None
+    cur_id: Optional[str] = None
     for raw in text.splitlines():
         line = raw.rstrip("\n")
-        m = re.match(r"^\s*-\s+id:\s*([A-Za-z0-9_\\-]+)\s*$", line)
+        m = re.match(r"^\s*-\s+id:\s*([A-Za-z0-9_\-]+)\s*$", line)
         if m:
             cur_id = m.group(1)
             continue
-        m = re.match(r"^\s*status:\s*([A-Za-z0-9_\\-]+)\s*$", line)
+        m = re.match(r"^\s*status:\s*([A-Za-z0-9_\-]+)\s*$", line)
         if m and cur_id:
             st = m.group(1).lower()
             if st == "open":
@@ -54,10 +49,9 @@ def _parse_findings_ids(findings_yaml_path: str):
                 partial_ids.append(cur_id)
             cur_id = None
 
-    # de-dupe while preserving order
-    def uniq(xs):
+    def uniq(xs: List[str]) -> List[str]:
         seen = set()
-        out = []
+        out: List[str] = []
         for x in xs:
             if x in seen:
                 continue
@@ -66,6 +60,17 @@ def _parse_findings_ids(findings_yaml_path: str):
         return out
 
     return uniq(open_ids), uniq(fixed_ids), uniq(partial_ids)
+
+
+def _fmt_bool_yaml(v: Optional[str]) -> Optional[str]:
+    if v is None:
+        return None
+    t = str(v).strip().lower()
+    if t in ("1", "true", "yes", "y", "on"):
+        return "true"
+    if t in ("0", "false", "no", "n", "off"):
+        return "false"
+    return None
 
 
 def _make_review_block(
@@ -77,15 +82,19 @@ def _make_review_block(
     review_md: str,
     findings_yaml: str,
     next_actions: str,
-    open_ids,
-    fixed_ids,
-    partial_ids,
+    open_ids: List[str],
+    fixed_ids: List[str],
+    partial_ids: List[str],
+    review_run_id: Optional[str],
+    review_commit: Optional[str],
+    gatecheck_pass: Optional[str],
+    gatecheck_artifact: Optional[str],
+    open_must_fix_count: Optional[int],
 ) -> str:
-    def fmt_list(ids):
+    def fmt_list(ids: List[str]) -> str:
         return "[" + ", ".join(ids) + "]"
 
-    # Keep YAML plain and simple (2-space indent).
-    lines = []
+    lines: List[str] = []
     lines.append("review:")
     lines.append(f'  baseline_commit: "{baseline_commit}"')
     lines.append(f"  open: {fmt_list(open_ids)}")
@@ -98,15 +107,27 @@ def _make_review_block(
     lines.append(f'    review_md: "{review_md}"')
     lines.append(f'    findings_yaml: "{findings_yaml}"')
     lines.append(f'    next_actions: "{next_actions}"')
+
+    if review_run_id:
+        lines.append(f'    run_id: "{review_run_id}"')
+    if review_commit:
+        lines.append(f'    commit: "{review_commit}"')
+
+    gcp = _fmt_bool_yaml(gatecheck_pass)
+    if gcp is not None:
+        lines.append(f"    gatecheck_pass: {gcp}")
+    if gatecheck_artifact:
+        lines.append(f'    gatecheck_artifact: "{gatecheck_artifact}"')
+    if open_must_fix_count is not None:
+        lines.append(f"    open_must_fix_count: {open_must_fix_count}")
+
     lines.append("")
     return "\n".join(lines)
 
 
 def _patch_ssot_block(ssot_text: str, review_block: str, op: str) -> str:
-    # Replace existing review: ... block if present, else insert before SSOT_END.
     lines = ssot_text.splitlines(keepends=True)
 
-    # Find boundaries.
     try:
         begin_i = next(i for i, l in enumerate(lines) if SSOT_BEGIN in l)
         end_i = next(i for i, l in enumerate(lines) if SSOT_END in l)
@@ -117,7 +138,6 @@ def _patch_ssot_block(ssot_text: str, review_block: str, op: str) -> str:
     before = lines[: begin_i + 1]
     after = lines[end_i:]
 
-    # Find existing review block inside SSOT (top-level key).
     review_start = None
     for i, l in enumerate(ssot_lines):
         if re.match(r"^review:\s*$", l.rstrip("\n")):
@@ -127,7 +147,6 @@ def _patch_ssot_block(ssot_text: str, review_block: str, op: str) -> str:
     if review_start is None:
         if op == "update":
             raise RuntimeError("review block not found (op=update)")
-        # Insert near the end, but before pr_ready if present.
         insert_at = len(ssot_lines)
         for i, l in enumerate(ssot_lines):
             if re.match(r"^pr_ready:\s*$", l.rstrip("\n")):
@@ -137,10 +156,8 @@ def _patch_ssot_block(ssot_text: str, review_block: str, op: str) -> str:
         return "".join(before + new_ssot + after)
 
     if op == "ensure":
-        # ensure == "insert if missing"; do not overwrite existing review block.
         return ssot_text
 
-    # Find end of review block (next top-level key).
     review_end = len(ssot_lines)
     for j in range(review_start + 1, len(ssot_lines)):
         if re.match(r"^[A-Za-z0-9_]+:\s*$", ssot_lines[j].rstrip("\n")):
@@ -151,7 +168,7 @@ def _patch_ssot_block(ssot_text: str, review_block: str, op: str) -> str:
     return "".join(before + new_ssot + after)
 
 
-def main(argv) -> int:
+def main(argv: List[str]) -> int:
     ap = argparse.ArgumentParser(description="Patch SSOT_V2 with review status + last_run pointers")
     ap.add_argument("--ssot", required=True, help="Path to PROJECT_STATE.md")
     ap.add_argument("--op", required=True, choices=["ensure", "update"], help="ensure inserts review if missing; update overwrites existing")
@@ -163,6 +180,13 @@ def main(argv) -> int:
     ap.add_argument("--next-actions", required=True)
     ap.add_argument("--artifacts-dir", required=True)
     ap.add_argument("--baseline-commit", default=None, help="If unset, baseline_commit=head")
+
+    ap.add_argument("--review-run-id", default=None)
+    ap.add_argument("--review-commit", default=None)
+    ap.add_argument("--gatecheck-pass", default=None)
+    ap.add_argument("--gatecheck-artifact", default=None)
+    ap.add_argument("--open-must-fix-count", default=None, type=int)
+
     args = ap.parse_args(argv)
 
     open_ids, fixed_ids, partial_ids = _parse_findings_ids(args.findings_yaml)
@@ -180,6 +204,11 @@ def main(argv) -> int:
         open_ids=open_ids,
         fixed_ids=fixed_ids,
         partial_ids=partial_ids,
+        review_run_id=args.review_run_id,
+        review_commit=args.review_commit,
+        gatecheck_pass=args.gatecheck_pass,
+        gatecheck_artifact=args.gatecheck_artifact,
+        open_must_fix_count=args.open_must_fix_count,
     )
 
     doc = _read_text(args.ssot)

@@ -1,0 +1,33 @@
+schema_version: v1
+recipes:
+  - id: V_INTERVAL_DETERMINISM
+    description: TopRU interval/window determinism checks
+    commands:
+      - "go test ./pkg/util/topsql/reporter -run 'TestRUWindowAggregatorReportGranularity|TestRUWindowAggregatorTakeOncePerWindow' -count=1"
+    expected_signals:
+      - "PASS"
+    notes: "TopRU override: deterministic interval/window tests in reporter package."
+
+  - id: V_CONCURRENCY_CANCEL_EXIT
+    description: TopRU cancel-exit no-hang checks
+    commands:
+      - "go test ./pkg/util/topsql/reporter -run 'TestCollectRUWorkerCancelNoHangUnderBackpressure' -count=1"
+    expected_signals:
+      - "PASS"
+    notes: "TopRU override: cancel path exits quickly under pressure."
+
+  - id: V_BACKPRESSURE_SLOW_CONSUMER
+    description: TopRU backpressure/slow-consumer behavior checks
+    commands:
+      - "go test ./pkg/util/topsql/reporter -run 'TestTopRUReporter_MockDataSinkStructured|TestRUWindowAggregatorTakeOncePerWindow' -count=1"
+    expected_signals:
+      - "PASS"
+    notes: "TopRU override: ensure slow sink path has explicit bounded behavior."
+
+  - id: V_PERF_SANITY_AGG
+    description: TopRU aggregation perf sanity benchmark
+    commands:
+      - "go test ./pkg/util/topsql/reporter -run '^$' -bench 'BenchmarkRUWindowAggregatorConcurrentIngestReport|BenchmarkRUCollectingAddBatch' -benchmem -count=1"
+    expected_signals:
+      - "ns/op"
+    notes: "TopRU override: keep benchmark scope small and deterministic."
