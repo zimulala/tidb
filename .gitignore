@@ -74,7 +74,9 @@ compose-dev.yaml
 fix.sql
 export-20*/
 var
+ai/ai-change-gates/runs/
 ai/projects/*/artifacts/pr_ready/runs/
+ai/projects/*/artifacts/pr_ready/
 ai/projects/*/artifacts/impl/
 ai/projects/*/artifacts/fix/
 ai/projects/*/artifacts/audit/runs/
